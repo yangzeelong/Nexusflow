@@ -6,6 +6,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 namespace nexusflow { namespace core {
@@ -41,11 +42,7 @@ void Worker::WorkLoop() {
 
     bool isSourceModule = m_inputQueueMap.empty(); // Check if this is a source module.
 
-    /**
-     * TODO: yzl
-     * 1. Add try-catch block to handle exceptions.
-     * 2. Configure variables for batch size and timeout from config.
-     */
+    // TODO: configure the batch size and timeout from the module config.
     constexpr size_t kMaxBatchSize = 4;
     constexpr std::chrono::milliseconds kBatchTimeout{100};
 
@@ -67,13 +64,29 @@ void Worker::WorkLoop() {
         // Labels carry the driven module so the profile reads
         // "Worker.Wait.<Module>" / "Worker.Process.<Module>".
         const std::string moduleName = m_modulePtr->GetModuleName();
+        // A source module never blocks on an input queue. When an invocation
+        // produced no output, yield briefly instead of spinning a core at 100%.
+        int sourceIdleMs = m_configPtr->GetValueOrDefault<int>("sourceIdleMs", 1);
+        if (sourceIdleMs < 0) {
+            sourceIdleMs = 0;
+        }
 
         while (!m_stopFlag.load()) {
             if (isSourceModule) {
                 // Source Module Loop
                 Message emptyMessage;
-                TIMER_SCOPE_AVERAGE_MS("Worker.Process." + moduleName, 5000);
-                m_modulePtr->ProcessTimed(emptyMessage);
+                bool produced = false;
+                try {
+                    TIMER_SCOPE_AVERAGE_MS("Worker.Process." + moduleName, 5000);
+                    produced = m_modulePtr->ProcessTimed(emptyMessage);
+                } catch (const std::exception& e) {
+                    LOG_ERROR("Module '{}' threw while processing: {}", moduleName, e.what());
+                } catch (...) {
+                    LOG_ERROR("Module '{}' threw an unknown exception while processing.", moduleName);
+                }
+                if (!produced && sourceIdleMs > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(sourceIdleMs));
+                }
             } else {
                 // Sink or Filter/Transformer Module Loop
                 std::vector<Message> batchMessage;
@@ -88,7 +101,13 @@ void Worker::WorkLoop() {
                 TIMER_START_AVERAGE_MS("Worker.Process." + moduleName, 5000);
                 TIMER_INCREMENT_AVERAGE("Worker.Process." + moduleName,
                                         static_cast<uint64_t>(batchMessage.size()));
-                m_modulePtr->ProcessBatch(batchMessage);
+                try {
+                    m_modulePtr->ProcessBatch(batchMessage);
+                } catch (const std::exception& e) {
+                    LOG_ERROR("Module '{}' threw while processing a batch: {}", moduleName, e.what());
+                } catch (...) {
+                    LOG_ERROR("Module '{}' threw an unknown exception while processing a batch.", moduleName);
+                }
                 TIMER_STOP_AVERAGE("Worker.Process." + moduleName);
             }
         }
@@ -139,7 +158,14 @@ void Worker::RunFusion() {
                 // Construct a fused message and concat to batchMessage.
                 auto fusedMessage = MakeMessage(std::move(messageMap));
                 std::vector<Message> fusedMessageVec{fusedMessage};
-                m_modulePtr->ProcessBatch(fusedMessageVec); // process the fused message
+                try {
+                    m_modulePtr->ProcessBatch(fusedMessageVec); // process the fused message
+                } catch (const std::exception& e) {
+                    LOG_ERROR("Module '{}' threw while processing a fused batch: {}", m_modulePtr->GetModuleName(), e.what());
+                } catch (...) {
+                    LOG_ERROR("Module '{}' threw an unknown exception while processing a fused batch.",
+                              m_modulePtr->GetModuleName());
+                }
                 it = messageCache.erase(it); // remove the message from cache
             } else if (!messageMap.empty() && messageMap.begin()->second.GetMetaData().timestamp < (currentTimeMs - timeoutMs)) {
                 // timeout

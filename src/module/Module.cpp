@@ -45,7 +45,7 @@ void Module::ProcessBatch(std::vector<Message>& inputBatchMessages) {
     }
 }
 
-void Module::ProcessTimed(Message& inputMessage) {
+bool Module::ProcessTimed(Message& inputMessage) {
     m_pendingOutputs.clear();
     m_activeInputTimingMs = inputMessage.GetMetaData().moduleTimingMs;
     m_processing = true;
@@ -66,12 +66,14 @@ void Module::ProcessTimed(Message& inputMessage) {
 
     auto pending = std::move(m_pendingOutputs);
     m_pendingOutputs.clear();
+    const bool produced = !pending.empty();
     for (const auto& output : pending) {
         DispatchOutput(output, elapsedMs);
     }
     m_activeInputTimingMs.clear();
 
     LOG_DEBUG("ModuleTiming: module='{}' elapsed_ms={:.3f}", m_moduleName, elapsedMs);
+    return produced;
 }
 
 void Module::DispatchOutput(const PendingOutput& output, double elapsedMs) {
