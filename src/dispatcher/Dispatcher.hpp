@@ -33,8 +33,9 @@ public:
 
     /**
      * @brief Broadcasts a message to all configured output queues.
-     * @details To optimize performance, this method copies the message for the
-     * first N-1 queues and moves the original message into the last queue.
+     * @details Each subscriber receives its own copy of the message; Message
+     * copies are cheap because the payload is shared copy-on-write. Pushes are
+     * blocking, so a slow subscriber applies backpressure to the producer.
      * @param msg The message to broadcast.
      */
     void Broadcast(const Message& msg);
