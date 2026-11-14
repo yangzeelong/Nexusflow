@@ -1,50 +1,153 @@
 #include <nexusflow/Logging.hpp>
 
 #include <spdlog/sinks/daily_file_sink.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
 
 #include <atomic>
 #include <chrono>
 #include <cstdio>
-#include <functional>
+#include <cstdlib>
 #include <ctime>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
-#include <vector>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
+#endif
 
 namespace nexusflow {
 namespace log {
 
 namespace {
 
+constexpr std::size_t kLevelWidth = 5;
+
 std::atomic<Level>& CurrentLevel() {
     static std::atomic<Level> level{Level::DEBUG};
     return level;
 }
 
-spdlog::level::level_enum ToSpdlogLevel(Level level) {
+// Short level tags keep the line narrow: WARN instead of WARNING.
+const char* LevelName(Level level) {
     switch (level) {
         case Level::TRACE:
-            return spdlog::level::trace;
+            return "TRACE";
         case Level::DEBUG:
-            return spdlog::level::debug;
+            return "DEBUG";
         case Level::INFO:
-            return spdlog::level::info;
+            return "INFO";
         case Level::WARN:
-            return spdlog::level::warn;
+            return "WARN";
         case Level::ERR:
-            return spdlog::level::err;
+            return "ERROR";
         case Level::CRITICAL:
-            return spdlog::level::critical;
+            return "CRITICAL";
+        case Level::OFF:
+            return "OFF";
+    }
+    return "";
+}
+
+std::string PadTo(std::string text, std::size_t width) {
+    if (text.size() < width) {
+        text.append(width - text.size(), ' ');
+    }
+    return text;
+}
+
+// loguru's default palette: cyan / blue / bold / yellow / red / light red.
+const char* LevelColor(Level level) {
+    switch (level) {
+        case Level::TRACE:
+            return "\033[36m\033[1m";
+        case Level::DEBUG:
+            return "\033[34m\033[1m";
+        case Level::INFO:
+            return "\033[1m";  // loguru prints INFO bold, without a hue
+        case Level::WARN:
+            return "\033[33m\033[1m";
+        case Level::ERR:
+            return "\033[31m\033[1m";
+        case Level::CRITICAL:
+            return "\033[91m\033[1m";
         case Level::OFF:
             break;
     }
-    return spdlog::level::off;
+    return "";
 }
 
+const char* kReset = "\033[0m";
+const char* kTimeColor = "\033[32m";      // green
+const char* kLocationColor = "\033[36m";  // cyan
+const char* kThreadColor = "\033[90m";    // gray
+
+// Reading an environment variable without tripping MSVC's getenv deprecation.
+std::string EnvValue(const char* name) {
+#if defined(_WIN32)
+    char* value = nullptr;
+    std::size_t length = 0;
+    if (_dupenv_s(&value, &length, name) != 0 || value == nullptr) {
+        return std::string();
+    }
+    const std::string result(value);
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(name);
+    return value != nullptr ? std::string(value) : std::string();
+#endif
+}
+
+bool ForceColorRequested() {
+    const std::string value = EnvValue("FORCE_COLOR");
+    return !value.empty() && value != "0";
+}
+
+bool NoColorRequested() { return !EnvValue("NO_COLOR").empty(); }
+
+// Colors stay off unless stdout is a terminal, so pipes and redirected files
+// receive plain text. FORCE_COLOR wins, NO_COLOR disables.
+bool StdoutSupportsColor() {
+    if (ForceColorRequested()) {
+        return true;
+    }
+    if (NoColorRequested()) {
+        return false;
+    }
+#if defined(_WIN32)
+    const HANDLE handle = ::GetStdHandle(STD_OUTPUT_HANDLE);
+    if (handle == nullptr || handle == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    DWORD mode = 0;
+    if (::GetConsoleMode(handle, &mode) == 0) {
+        return false;  // stdout is redirected, not a console
+    }
+    if ((mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) == 0) {
+        // Enable ANSI processing; older consoles reject it and stay plain text.
+        if (::SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) == 0) {
+            return false;
+        }
+    }
+    return true;
+#else
+    return ::isatty(STDOUT_FILENO) != 0;
+#endif
+}
+
+// "YYYY-MM-DD HH:mm:ss.mmm +HH:MM", matching loguru's default time format. The
+// default line drops the offset, custom sinks still get it in the record.
 std::string FormatTimestamp() {
     const std::chrono::system_clock::time_point now = std::chrono::system_clock::now();
     const std::time_t seconds = std::chrono::system_clock::to_time_t(now);
@@ -58,34 +161,27 @@ std::string FormatTimestamp() {
     localtime_r(&seconds, &localTime);
 #endif
 
-    char buffer[40];
-    std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d.%03lld", localTime.tm_year + 1900,
-                  localTime.tm_mon + 1, localTime.tm_mday, localTime.tm_hour, localTime.tm_min, localTime.tm_sec,
-                  millis);
-    return std::string(buffer);
-}
-
-// Default sink: forwards records to the current spdlog default logger.
-class SpdlogSink final : public LogSink {
-public:
-    void Write(const LogRecord& record) override {
-        const std::shared_ptr<spdlog::logger> logger = spdlog::default_logger();
-        if (!logger) {
-            return;
-        }
-        logger->log(spdlog::source_loc{record.file, record.line, record.function}, ToSpdlogLevel(record.level), "{}",
-                    record.message);
+    // UTC offset of that instant, including DST. mktime() reads the broken down
+    // time as local time, the *mkgmtime family reads it as UTC; the difference is
+    // the offset in seconds.
+    std::tm localForOffset = localTime;
+    std::tm utcForOffset = localTime;
+    const std::time_t asLocal = std::mktime(&localForOffset);
+#ifdef _WIN32
+    const std::time_t asUtc = _mkgmtime(&utcForOffset);
+#else
+    const std::time_t asUtc = timegm(&utcForOffset);
+#endif
+    long offsetMinutes = 0;
+    if (asLocal != static_cast<std::time_t>(-1) && asUtc != static_cast<std::time_t>(-1)) {
+        offsetMinutes = static_cast<long>((asLocal - asUtc) / 60);
     }
-};
 
-std::mutex& SinkMutex() {
-    static std::mutex mutex;
-    return mutex;
-}
-
-std::shared_ptr<LogSink>& CurrentSink() {
-    static std::shared_ptr<LogSink> sink = std::make_shared<SpdlogSink>();
-    return sink;
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d.%03lld %+03ld:%02ld", localTime.tm_year + 1900,
+                  localTime.tm_mon + 1, localTime.tm_mday, localTime.tm_hour, localTime.tm_min, localTime.tm_sec, millis,
+                  offsetMinutes / 60, std::labs(offsetMinutes % 60));
+    return std::string(buffer);
 }
 
 char PathSeparator() {
@@ -94,6 +190,163 @@ char PathSeparator() {
 #else
     return '/';
 #endif
+}
+
+// Native thread id: short numbers on Windows and Linux, which keeps the thread
+// column readable (std::hash<thread::id> values are unsightly long).
+std::uint64_t NativeThreadId() {
+#if defined(_WIN32)
+    return static_cast<std::uint64_t>(::GetCurrentThreadId());
+#elif defined(__linux__)
+    return static_cast<std::uint64_t>(::syscall(SYS_gettid));
+#else
+    return static_cast<std::uint64_t>(std::hash<std::thread::id>()(std::this_thread::get_id()));
+#endif
+}
+
+// "YYYY-MM-DD HH:mm:ss.mmm +HH:MM" -> "YYYY-MM-DD HH:mm:ss.mmm".
+std::string DateTimeText(const LogRecord& record) {
+    if (record.timestamp.size() >= 23) {
+        return record.timestamp.substr(0, 23);
+    }
+    return record.timestamp;
+}
+
+std::string FileAndLine(const LogRecord& record) {
+    std::string location = record.file != nullptr ? record.file : "";
+    location += ':';
+    location += std::to_string(record.line);
+    return location;
+}
+
+std::string ThreadText(const LogRecord& record) { return "T" + std::to_string(record.threadId); }
+
+// Plain layout (console without a terminal, and the log file):
+//   2026-11-14 22:13:01.084 | INFO  | T19088 | main.cpp:47 - message
+std::string PlainLine(const LogRecord& record) {
+    std::string line;
+    line.reserve(140);
+    line += DateTimeText(record);
+    line += " | ";
+    line += PadTo(LevelName(record.level), kLevelWidth);
+    line += " | ";
+    line += ThreadText(record);
+    line += " | ";
+    line += FileAndLine(record);
+    line += " - ";
+    line += record.message;
+    return line;
+}
+
+// Same layout with loguru's colors: green time, level colored tag and message,
+// gray thread id, cyan location.
+std::string ColoredLine(const LogRecord& record) {
+    const char* levelColor = LevelColor(record.level);
+    std::string line;
+    line.reserve(188);
+    line += kTimeColor;
+    line += DateTimeText(record);
+    line += kReset;
+    line += " | ";
+    line += levelColor;
+    line += PadTo(LevelName(record.level), kLevelWidth);
+    line += kReset;
+    line += " | ";
+    line += kThreadColor;
+    line += ThreadText(record);
+    line += kReset;
+    line += " | ";
+    line += kLocationColor;
+    line += FileAndLine(record);
+    line += kReset;
+    line += " - ";
+    line += levelColor;
+    line += record.message;
+    line += kReset;
+    return line;
+}
+
+std::mutex& ParamMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+LoggerParam& DefaultParam() {
+    static LoggerParam param;
+    return param;
+}
+
+std::mutex& SinkMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+// File backend stays on spdlog (daily rotation, retention); the payload is
+// already a complete plain-text line, so the pattern is just the message.
+std::shared_ptr<spdlog::logger> MakeFileLogger(const LoggerParam& param) {
+    const std::string name = param.logName.empty() ? std::string("nexusflow") : param.logName;
+    std::string path = param.logDir + PathSeparator() + name;
+    // daily_file_sink appends "_YYYY-MM-DD" before the extension; give the file an
+    // explicit .log extension when the caller did not provide one.
+    if (name.find('.') == std::string::npos) {
+        path += ".log";
+    }
+    auto sink = std::make_shared<spdlog::sinks::daily_file_sink_mt>(path, 0, 0, false, param.maxRetentionDays);
+    auto fileLogger = std::make_shared<spdlog::logger>(name, std::move(sink));
+    fileLogger->set_pattern("%v");
+    fileLogger->set_level(spdlog::level::trace);
+    fileLogger->flush_on(spdlog::level::trace);
+    return fileLogger;
+}
+
+// A bad log directory must not take the process down, so a failed file backend
+// degrades to console-only output.
+std::shared_ptr<spdlog::logger> SafeMakeFileLogger(const LoggerParam& param) {
+    try {
+        return MakeFileLogger(param);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "nexusflow: cannot open the log file in '%s': %s\n", param.logDir.c_str(), e.what());
+        return nullptr;
+    }
+}
+
+// Built-in sink: loguru-like console output plus an optional daily rot file.
+class DefaultSink final : public LogSink {
+public:
+    explicit DefaultSink(const LoggerParam& param)
+        : m_consoleColors(StdoutSupportsColor()),
+          m_fileLogger(param.logDir.empty() ? nullptr : SafeMakeFileLogger(param)) {
+    }
+
+    void Write(const LogRecord& record) override {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        std::string text = m_consoleColors ? ColoredLine(record) : PlainLine(record);
+        text += '\n';
+        std::fwrite(text.data(), 1, text.size(), stdout);
+        std::fflush(stdout);
+        if (m_fileLogger) {
+            m_fileLogger->trace("{}", PlainLine(record));
+        }
+    }
+
+private:
+    std::mutex m_mutex;
+    bool m_consoleColors;
+    std::shared_ptr<spdlog::logger> m_fileLogger;
+};
+
+std::shared_ptr<LogSink> MakeDefaultSink() {
+    LoggerParam param;
+    {
+        std::lock_guard<std::mutex> lock(ParamMutex());
+        param = DefaultParam();
+    }
+    return std::make_shared<DefaultSink>(param);
+}
+
+std::shared_ptr<LogSink>& CurrentSink() {
+    static std::shared_ptr<LogSink> sink = MakeDefaultSink();
+    return sink;
 }
 
 }  // namespace
@@ -109,45 +362,28 @@ bool IsLevelEnabled(Level level) {
     return static_cast<int>(level) >= static_cast<int>(GetLogLevel());
 }
 
+void InitializeGlobalLogger(LoggerParam param) {
+    {
+        std::lock_guard<std::mutex> lock(ParamMutex());
+        DefaultParam() = param;
+    }
+    SetLogLevel(param.logLevel);
+    // Rebuild the built-in sink with the new configuration (console + optional file).
+    SetSink(nullptr);
+}
+
 void SetSink(std::shared_ptr<LogSink> sink) {
     std::lock_guard<std::mutex> lock(SinkMutex());
     if (sink) {
         CurrentSink() = std::move(sink);
     } else {
-        CurrentSink() = std::make_shared<SpdlogSink>();
+        CurrentSink() = MakeDefaultSink();
     }
 }
 
 std::shared_ptr<LogSink> GetSink() {
     std::lock_guard<std::mutex> lock(SinkMutex());
     return CurrentSink();
-}
-
-void InitializeGlobalLogger(LoggerParam param) {
-    std::vector<spdlog::sink_ptr> sinks;
-    sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
-
-    const std::string name = param.logName.empty() ? std::string("nexusflow") : param.logName;
-
-    // If logDir is not empty, add a daily rotating file sink.
-    if (!param.logDir.empty()) {
-        const std::string path = param.logDir + PathSeparator() + name;
-        sinks.push_back(std::make_shared<spdlog::sinks::daily_file_sink_mt>(path, 0, 0, false,
-                                                                           param.maxRetentionDays));
-    }
-
-    std::shared_ptr<spdlog::logger> logger = std::make_shared<spdlog::logger>(name, sinks.begin(), sinks.end());
-    logger->set_level(ToSpdlogLevel(param.logLevel));
-    // log_level, datetime, thread_id, file_name, line_num, message
-    // eg: D25-0627 01:08:45.513 T44956 TextureManager.cpp:43] Cleaning up textures
-    logger->set_pattern("%^%L%$%C-%m%d %T.%e T%t %s:%#] %v");
-
-    spdlog::set_default_logger(logger);
-    spdlog::flush_on(ToSpdlogLevel(param.logLevel));
-    spdlog::flush_every(std::chrono::seconds(1));
-
-    SetLogLevel(param.logLevel);
-    SetSink(std::make_shared<SpdlogSink>());
 }
 
 namespace detail {
@@ -160,7 +396,7 @@ void Write(Level level, const char* file, int line, const char* function, const 
     LogRecord record;
     record.level = level;
     record.timestamp = FormatTimestamp();
-    record.threadId = static_cast<std::uint64_t>(std::hash<std::thread::id>()(std::this_thread::get_id()));
+    record.threadId = NativeThreadId();
     record.file = file != nullptr ? FileName(file) : "";
     record.line = line;
     record.function = function != nullptr ? function : "";

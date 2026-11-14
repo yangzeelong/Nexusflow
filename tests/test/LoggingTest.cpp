@@ -7,6 +7,10 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <cstdio>
+#include <ctime>
+#include <fstream>
+#include <iterator>
 
 namespace {
 
@@ -67,6 +71,7 @@ TEST(LoggingTest, CapturesStructuredRecord) {
     EXPECT_EQ(std::string(records[0].file), "LoggingTest.cpp");
     EXPECT_GT(records[0].line, 0);
     EXPECT_FALSE(std::string(records[0].function).empty());
+    EXPECT_NE(records[0].threadId, 0u);  // native thread id is recorded
     EXPECT_NE(records[0].timestamp.find('.'), std::string::npos);
 }
 
@@ -124,3 +129,46 @@ TEST(LoggingTest, StreamStyleLoggingIsCaptured) {
     EXPECT_EQ(records[0].level, log::Level::WARN);
     EXPECT_EQ(records[0].message, "streamed 7");
 }
+namespace {
+
+std::string TodayDateSuffix() {
+    const std::time_t now = std::time(nullptr);
+    std::tm localTime{};
+#ifdef _WIN32
+    localtime_s(&localTime, &now);
+#else
+    localtime_r(&now, &localTime);
+#endif
+    char buffer[16];
+    std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d", localTime.tm_year + 1900, localTime.tm_mon + 1,
+                  localTime.tm_mday);
+    return std::string(buffer);
+}
+
+}  // namespace
+
+TEST(LoggingTest, DefaultSinkWritesToADailyRotatedFile) {
+    const std::string name = "nexusflow_logging_test";
+    nexusflow::log::LoggerParam param;
+    param.logLevel = nexusflow::log::Level::INFO;
+    param.logDir = ".";
+    param.logName = name;
+    param.maxRetentionDays = 1;
+    nexusflow::log::InitializeGlobalLogger(param);
+
+    LOG_INFO("written to the file sink");
+
+    // Back to the console-only built-in sink so the file handle is released.
+    nexusflow::log::InitializeGlobalLogger(nexusflow::log::LoggerParam());
+
+    const std::string path = name + "_" + TodayDateSuffix() + ".log";
+    std::ifstream file(path.c_str());
+    ASSERT_TRUE(file.good()) << "expected a daily log file at " << path;
+    const std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    file.close();
+    EXPECT_NE(content.find("written to the file sink"), std::string::npos);
+    EXPECT_NE(content.find("| INFO  | T"), std::string::npos);
+    EXPECT_EQ(content.find("\n\n"), std::string::npos);  // exactly one line per record
+    std::remove(path.c_str());
+}
+

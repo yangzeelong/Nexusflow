@@ -50,8 +50,8 @@ struct LoggerParam {
 // One formatted log line, handed to a LogSink.
 struct LogRecord {
     Level level = Level::INFO;
-    std::string timestamp;  // local time, "YYYY-MM-DD HH:MM:SS.mmm"
-    std::uint64_t threadId = 0;
+    std::string timestamp;  // local time with offset, "YYYY-MM-DD HH:MM:SS.mmm +HH:MM"
+    std::uint64_t threadId = 0;  // native thread id (TID on Windows/Linux)
     const char* file = "";  // basename only
     int line = 0;
     const char* function = "";
@@ -71,8 +71,15 @@ void SetLogLevel(Level level);
 Level GetLogLevel();
 bool IsLevelEnabled(Level level);
 
-// Installs the default logger (console + optional daily rotating file) and
-// replaces the current sink with the built-in spdlog-backed sink.
+// Installs the built-in logger: the console plus an optional daily rotating
+// file, and replaces the current sink with it.
+//
+// Default layout (console colored by level, file plain text; one file per day:
+// <logName>_YYYY-MM-DD.log):
+//   2026-11-14 22:13:01.084 | INFO  | T19088 | main.cpp:47 - message
+// The console uses loguru's palette (green time, level-colored tag and message,
+// gray thread id, cyan location) when stdout is a terminal; NO_COLOR disables it
+// and FORCE_COLOR=1 forces it on. Implement a LogSink to take over formatting.
 void InitializeGlobalLogger(LoggerParam param = LoggerParam());
 
 // Replaces the sink. Passing nullptr restores the built-in default sink.
