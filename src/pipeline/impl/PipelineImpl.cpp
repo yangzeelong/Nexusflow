@@ -75,8 +75,7 @@ ErrorCode Pipeline::Impl::Init() {
             return ErrorCode::FAILURE;
         }
 
-        constexpr int kQueueSize = 5;
-        auto queue = std::make_unique<MessageQueue>(kQueueSize);
+        auto queue = std::make_unique<MessageQueue>(kDefaultMessageQueueCapacity);
         auto queueView = makeViewPtr(queue.get());
 
         std::string queueName = srcNode->name + " -> " + dstNode->name;

@@ -19,6 +19,11 @@ class Pipeline;
 using ActorName = std::string;
 using ActorNode = ModuleActor;
 
+// Default capacity of the message queue created for every graph edge. It bounds
+// the number of in-flight messages between two stages, i.e. the backpressure
+// depth of the pipeline.
+constexpr int kDefaultMessageQueueCapacity = 5;
+
 // --- Pipeline's Private Implementation (m_pImpl) ---
 class Pipeline::Impl {
 public:
