@@ -151,10 +151,15 @@ TEST(TestGraph, TestIsEmpty) {
     ASSERT_TRUE(graph.isEmpty());
 
     graph.addEdge(a, b);
-    ASSERT_TRUE(graph.isEmpty());
+    ASSERT_FALSE(graph.isEmpty());
 
     graph.setName("xxx");
     ASSERT_FALSE(graph.isEmpty());
+
+    // A name alone does not make a graph non-empty: it still has no nodes.
+    Graph namedGraph;
+    namedGraph.setName("named-only");
+    ASSERT_TRUE(namedGraph.isEmpty());
 }
 
 /**

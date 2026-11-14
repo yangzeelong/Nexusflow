@@ -26,7 +26,7 @@ struct MessageMeta {
 
 /**
  * @class Message
- * @brief A type-erased, thread-safe, shared message container with Copy-On-Write (COW) semantics.
+ * @brief A type-erased, shared message container with Copy-On-Write (COW) semantics.
  *
  * This class holds an object of any type. Copying a Message is a cheap operation,
  * as it only duplicates a shared_ptr. The underlying data is shared among all copies.
@@ -34,8 +34,14 @@ struct MessageMeta {
  * When a mutable reference to the data is requested via `Mut<T>()`, the container
  * checks if the data is shared. If it is, a deep copy of the data is created
  * transparently, ensuring that modifications do not affect other Message instances
- * sharing the original data. This "Copy-On-Write" behavior makes it highly efficient
- * for broadcast scenarios in multi-threaded pipelines while maintaining data integrity.
+ * sharing the original data. This "Copy-On-Write" behavior makes it cheap to
+ * broadcast into multi-threaded pipelines while keeping the copies independent.
+ *
+ * Thread-safety: once copied, distinct Message objects are independent, and the
+ * shared_ptr control block keeps the payload alive across threads. The Message
+ * wrapper itself is not synchronized: calling Mut<T>() or copying the same
+ * Message object concurrently from several threads requires external locking,
+ * because detach_if_shared() performs a non-atomic use_count() check.
  */
 class Message {
 public:

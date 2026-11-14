@@ -11,7 +11,8 @@
 **NexusFlow**：C++14 的数据流/DAG 流水线框架——`include/nexusflow/` + `src/`。
 核心概念：`Message`（Copy-On-Write）、`Module`（每个模块一个工作线程）、
 `Pipeline`（YAML 声明式建图 / `PipelineBuilder` 编程式建图）、`Dispatcher`
-（广播拷贝 N-1、末位 move）、`TimerRegistry`（单轴计时 + p95 滑窗）。
+（每个订阅者各拿一份 Message 拷贝；Message 拷贝只是 shared_ptr 引用计数）、
+`TimerRegistry`（单轴计时 + p95 滑窗）。
 
 可选功能（AI-Football 算法流水线等）放在 `extensions/<name>/`，通过
 `-DNEXUSFLOW_EXTENSIONS=<name>` 启用。**框架核心不得依赖任何扩展**：核心
@@ -21,7 +22,7 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | --- | --- |
 | `include/nexusflow/` | 公开头文件（Message/Module/Pipeline/PipelineBuilder/ModuleFactory/TimerRegistry/Logging…） |
 | `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（TimerRegistry、ConcurrentQueue、Optional 等） |
-| `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 39 个，见 §3） |
+| `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 72 个，见 §3） |
 | `examples/` | 3 个纯框架示例：`1-how-to-use`、`2-linear-vision-pipline`、`3-joined-vision-pipline` |
 | `benchmarks/` | Google Benchmark 基准（`nexusflow_benchmarks`） |
 | `cmake/` | `include.cmake`（第三方依赖 include）、`Summary.cmake`、`3rdparty/*.cmake`（FetchContent 定义） |
@@ -96,8 +97,8 @@ cmake --build build --config Release --parallel 16
 ./build/tests/Release/nexusflow_tests.exe
 ```
 
-实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **39 tests
-from 5 suites，PASSED 39**（MSVC 19.40）。
+实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **72 tests
+from 11 suites，PASSED 72**（MSVC 19.40）。
 
 ---
 
@@ -107,7 +108,7 @@ from 5 suites，PASSED 39**（MSVC 19.40）。
 ./build/bin/nexusflow_tests      # Unix；Windows 见上（build/tests/Release/）
 ```
 
-- 当前 39 个用例（5 个 suite）：消息 7、计时器 5、图 7、Optional 20。
+- 当前 72 个用例（11 个 suite）：消息 7、计时器 5、图 7、Optional 23（TestOptional 18 + OptionalTest 2 + OptionalThrowingTest 3）、Any 5、ConcurrentQueue 7、Pipeline 生命周期 5、Pipeline 错误路径 10、Worker 行为 3。
 - 改框架（Message/Module/Pipeline/Dispatcher/Graph/Timer）**必须**跑；不要为了
   让测试通过而改测试语义。
 

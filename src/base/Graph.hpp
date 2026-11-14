@@ -56,8 +56,10 @@ public:
     std::vector<Edge> toEdgeListBFS(const std::shared_ptr<Node>& inputNodePtr = nullptr) const;
 
 public:
-    // Checks if the graph is empty.
-    inline bool isEmpty() const { return m_name.empty() || m_nodeMap.empty() || m_adjList.empty(); }
+    // Checks if the graph is empty. A graph is empty when it has no nodes: the
+    // name and the adjacency list are not independent signals (a single-node
+    // graph has no edges, and a named graph can still be node-less).
+    inline bool isEmpty() const { return m_nodeMap.empty(); }
 
     // Converts the graph to a string representation.
     std::string toString() const;
