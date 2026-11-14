@@ -1,5 +1,6 @@
 #include "nexusflow/Config.hpp"
 #include "nexusflow/Logging.hpp"
+#include <nexusflow/ErrorCode.hpp>
 #include <nexusflow/ModuleFactory.hpp>
 #include <unordered_map>
 
@@ -29,7 +30,14 @@ std::shared_ptr<Module> ModuleFactory::CreateModule(const std::string& className
 
     if (moduleInst) {
         try {
-            moduleInst->Configure(config);
+            const ErrorCode configureCode = moduleInst->Configure(config);
+            if (configureCode != ErrorCode::SUCCESS) {
+                // A module that refuses its configuration must not reach the graph:
+                // the pipeline would then start a module with an unknown state.
+                LOG_ERROR("Failed to configure module '{}' of class '{}': Configure returned {} ({}).", moduleName, className,
+                          static_cast<int>(configureCode), "non-SUCCESS");
+                return nullptr;
+            }
         } catch (const std::exception& e) {
             // Log an error if configuration fails
             LOG_ERROR("Failed to configure module '{}' of class '{}': {}", moduleName, className, e.what());

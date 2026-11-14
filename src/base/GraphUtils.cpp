@@ -1,7 +1,7 @@
 #include "GraphUtils.hpp"
 #include "base/Define.hpp"
 #include "base/Graph.hpp"
-#include "nexusflow/Any.hpp"
+#include <nexusflow/common/Any.hpp>
 #include "nexusflow/Config.hpp"
 #include "nexusflow/Logging.hpp"
 #include "yaml-cpp/node/node.h"
@@ -130,8 +130,14 @@ std::unique_ptr<Graph> CreateGraphFromYaml(const std::string& configPath) {
         }
 
         for (const auto& module_item : modules_yaml) {
-            std::string nodeName = module_item["name"].as<std::string>();
-            std::string moduleClassName = module_item["class"].as<std::string>();
+            const YAML::Node& moduleNameNode = module_item["name"];
+            const YAML::Node& moduleClassNode = module_item["class"];
+            if (!moduleNameNode || !moduleNameNode.IsScalar() || !moduleClassNode || !moduleClassNode.IsScalar()) {
+                LOG_ERROR("Every entry in 'modules' needs scalar 'name' and 'class' fields in '{}'", configPath);
+                return nullptr;
+            }
+            std::string nodeName = moduleNameNode.as<std::string>();
+            std::string moduleClassName = moduleClassNode.as<std::string>();
 
             // parse custom config.
             nexusflow::Config config;
@@ -230,6 +236,12 @@ std::unique_ptr<Graph> CreateGraphFromYaml(const std::string& configPath) {
 
     } catch (const YAML::Exception& e) {
         LOG_ERROR("Failed to process YAML file '{}' due to a parsing error: {}", configPath, e.what());
+        return nullptr;
+    } catch (const std::exception& e) {
+        // convertYamlNodeToAny() throws std::runtime_error for unsupported node
+        // types, and value conversion can throw too. A bad config file must not
+        // propagate an exception to the caller.
+        LOG_ERROR("Failed to build a graph from '{}': {}", configPath, e.what());
         return nullptr;
     }
 }

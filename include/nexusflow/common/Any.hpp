@@ -1,9 +1,10 @@
-#ifndef NEXUSFLOW_ANY_HPP
-#define NEXUSFLOW_ANY_HPP
+#ifndef NEXUSFLOW_COMMON_ANY_HPP
+#define NEXUSFLOW_COMMON_ANY_HPP
 
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <typeinfo>
 #include <utility>
 
@@ -43,31 +44,34 @@ public:
 
     template <typename T>
     bool hasValue() const noexcept {
-        return m_content && typeid(T) == m_content->getTypeInfo();
+        using U = typename std::decay<T>::type;
+        return m_content && typeid(U) == m_content->getTypeInfo();
     }
 
     const std::type_info& getType() const noexcept { return m_content ? m_content->getTypeInfo() : typeid(void); }
 
     /**
      * @brief Type-safe cast to the contained value.
-     * @tparam T The type to cast to.
+     * @tparam T The type to cast to. cv-qualifiers are ignored, so get<const
+     *         int>() resolves the same stored type as get<int>().
      * @return A pointer to the value if the cast is successful, otherwise nullptr.
      */
     template <typename T>
     T* get() noexcept {
-        if (!m_content || typeid(T) != m_content->getTypeInfo()) {
+        using U = typename std::decay<T>::type;
+        if (!m_content || typeid(U) != m_content->getTypeInfo()) {
             return nullptr;
         }
-        return &static_cast<Model<T>*>(m_content.get())->m_data;
+        return &static_cast<Model<U>*>(m_content.get())->m_data;
     }
 
     template <typename T>
     const T* get() const noexcept {
-        // Implementation for const version
-        if (!m_content || typeid(T) != m_content->getTypeInfo()) {
+        using U = typename std::decay<T>::type;
+        if (!m_content || typeid(U) != m_content->getTypeInfo()) {
             return nullptr;
         }
-        return &static_cast<const Model<T>*>(m_content.get())->m_data;
+        return &static_cast<const Model<U>*>(m_content.get())->m_data;
     }
 
 private:
@@ -80,6 +84,9 @@ private:
 
     template <typename T>
     struct Model final : Concept {
+        static_assert(std::is_copy_constructible<T>::value,
+                      "Any can only store copy-constructible types: copying an Any deep-copies the value.");
+
         explicit Model(T data) : m_data(std::move(data)) {}
         const std::type_info& getTypeInfo() const noexcept override { return typeid(T); }
         std::unique_ptr<Concept> clone() const override { return std::make_unique<Model<T>>(m_data); }

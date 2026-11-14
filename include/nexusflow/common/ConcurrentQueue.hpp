@@ -1,12 +1,12 @@
-#ifndef CONCURRENT_QUEUE_HPP_
-#define CONCURRENT_QUEUE_HPP_
+#ifndef NEXUSFLOW_COMMON_CONCURRENT_QUEUE_HPP_
+#define NEXUSFLOW_COMMON_CONCURRENT_QUEUE_HPP_
 
-#include "Optional.hpp"
+#include <nexusflow/common/Optional.hpp>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <memory>
 #include <mutex>
-#include <optional>
 #include <queue>
 
 /**
@@ -154,8 +154,8 @@ public:
 
     /**
      * @brief Tries to pop an item from the queue without blocking.
-     * @return An std::optional containing the item if the queue was not empty,
-     *         otherwise std::nullopt.
+     * @return An Optional holding the item if the queue was not empty,
+     *         otherwise nullOpt.
      */
     Optional<T> tryPop() {
         std::lock_guard<std::mutex> lock(m_mutex);

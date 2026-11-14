@@ -274,7 +274,9 @@ public:
         spdlog::flush_every(std::chrono::seconds(1));
     }
 };
-static void InitializeGlobalLogger(LoggerParam logParam = {}) {
+// inline (not static) so this helper has external linkage; a static function in a
+// header warns as "unreferenced" in every TU that does not call it (MSVC C4505).
+inline void InitializeGlobalLogger(LoggerParam logParam = {}) {
     // if no logParam is provided, use default log level and no file logger
     LoggerGenerator::set_default_logger(std::move(logParam));
 }

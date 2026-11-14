@@ -8,7 +8,10 @@
 #include <nexusflow/Pipeline.hpp>
 #include <nexusflow/PipelineBuilder.hpp>
 #include <nexusflow/TypeTraits.hpp>
-#include <nexusflow/Any.hpp>
 #include <nexusflow/TimerRegistry.hpp>
+#include <nexusflow/common/Any.hpp>
+#include <nexusflow/common/ConcurrentQueue.hpp>
+#include <nexusflow/common/Optional.hpp>
+#include <nexusflow/common/ViewPtr.hpp>
 
 #endif

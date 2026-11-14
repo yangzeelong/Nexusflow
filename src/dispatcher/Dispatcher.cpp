@@ -11,17 +11,25 @@ void Dispatcher::Broadcast(const Message& message) {
     for (auto& pair : m_subscriberMap) {
         auto& subscriber = pair.second;
         // Apply backpressure instead of silently dropping frames when a
-        // downstream inference module is slower than the source.
-        subscriber->push(message);
+        // downstream inference module is slower than the source. A false return
+        // value means the queue was shut down while we were broadcasting.
+        if (!subscriber->push(message)) {
+            LOG_WARN("Broadcast to output queue {} failed: the queue is shut down", pair.first);
+        }
     }
 }
 
-void Dispatcher::SendTo(const std::string& outputName, const Message& msg) {
+bool Dispatcher::SendTo(const std::string& outputName, const Message& msg) {
     auto it = m_subscriberMap.find(outputName);
-    if (it != m_subscriberMap.end()) {
-        auto& subscriber = it->second;
-        subscriber->push(msg);
+    if (it == m_subscriberMap.end()) {
+        LOG_WARN("SendTo failed: output queue {} does not exist", outputName);
+        return false;
     }
+    if (!it->second->push(msg)) {
+        LOG_WARN("SendTo output queue {} failed: the queue is shut down", outputName);
+        return false;
+    }
+    return true;
 }
 
 }} // namespace nexusflow::dispatcher

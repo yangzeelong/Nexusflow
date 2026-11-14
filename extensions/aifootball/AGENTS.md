@@ -14,7 +14,7 @@
 
 | 路径 | 作用 |
 | --- | --- |
-| `include/nexusflow/`、`src/` | 框架本体（模块、消息、流水线、计时器 `src/common/TimerRegistry.*`） |
+| `include/nexusflow/`、`src/` | 框架本体（模块、消息、流水线、计时器 `include/nexusflow/TimerRegistry.hpp`，命名空间 `nexusflow::profiling`） |
 | `extensions/aifootball/` | 算法 SDK：检测/跟踪/姿态/平滑模块 + 公开 API `include/aifootball/AIFootball.hpp` |
 | `extensions/aifootball/app/` | demo app（`main.cpp`、`VideoRenderer.*`、`JsonlWriter.*`、`VideoReader.*`、`AppConfig.*`）、`config/` 配置目录；**只跑基模**：写 `observations.jsonl` + 可选渲染，触球判定与 `touches.jsonl` 已移到 Python |
 | `extensions/aifootball/touch_eval/` | 触球业务逻辑（**Python**：`py/` uv 工程，包 `touch_eval`，含判定/评估/报告与差分测试）+ 720p 配置 + `run_touch_eval.sh`（app 只跑基模写 `observations.jsonl`，C++ 侧判定实现已删除）；`tools/plot_touch_sweep.py` 逐点重跑评估画 PR 曲线（`sweep_*.csv` / `pr_*.png`）、`tools/touch_view_report.py` 打印事件级/过程级（`--coverage` 才加覆盖式诊断）、`tools/render_touch_review.py` 烧录复核视频、`tools/render_pr_errors.py` 把每个 FP/FN 渲染成带中文原因的对照图 + `pr_review/index.md`；`--playback` 另出整段 1× 实时的 `pr_review/touch_playback.mp4`（顶部中文原因、底部 pred/gt 双时间轴，TP 绿/FP 红/FN 黄）。需要中文字体，缺失会提示 `apt-get install -y fonts-wqy-microhei`，见其 `README.md` |
@@ -160,7 +160,7 @@ python3 extensions/aifootball/tools/render_jsonl.py --observations <dir>/observa
 ## 4. 测试与性能
 
 ```bash
-./build/bin/nexusflow_tests        # 当前 39 个用例
+./build/bin/nexusflow_tests        # 单测（当前 79 个用例）
 ```
 
 - 改完 SDK 算法/渲染**必须**跑；**不要为了让测试通过而改测试语义**。
@@ -254,13 +254,13 @@ git -C /home/hx1/yzl/Work/AI-Football show <rev>:code/tracking.py > /tmp/trackin
 | demo：渲染/JSONL/解码/配置解析 | `extensions/aifootball/app/{VideoRenderer,JsonlWriter,VideoReader,AppConfig}.{hpp,cpp}`、`extensions/aifootball/app/main.cpp` |
 | 配置与批量脚本 | `extensions/aifootball/app/config/`、`extensions/aifootball/tools/run_all_configs.sh` |
 | 扩展构建 | `extensions/aifootball/CMakeLists.txt`、`extensions/aifootball/app/CMakeLists.txt`、`extensions/aifootball/benchmarks/CMakeLists.txt` |
-| 计时器（框架） | `include/nexusflow/TimerRegistry.hpp`、`src/common/TimerRegistry.*` |
+| 计时器（框架，`nexusflow::profiling`） | `include/nexusflow/TimerRegistry.hpp`、`src/common/TimerRegistry.cpp` |
 
 ---
 
 ## 9. 最近做过的变更（别重复劳动，也别踩回去）
 
-- **扩展化（2026-11）**：aifootball 从 `sdk/` + `examples/` 迁到 `extensions/aifootball/`（93 个文件，`git mv` 保留历史）；框架移除 `WITH_AIFOOTBALL_SDK`，改用 `-DNEXUSFLOW_EXTENSIONS=aifootball`；扩展 CMake 自包含（CUDA/TensorRT/FFmpeg 渐进降级），Windows 上框架 39 单测与 SDK 空壳编译均已验证。
+- **扩展化（2026-11）**：aifootball 从 `sdk/` + `examples/` 迁到 `extensions/aifootball/`（93 个文件，`git mv` 保留历史）；框架移除 `WITH_AIFOOTBALL_SDK`，改用 `-DNEXUSFLOW_EXTENSIONS=aifootball`；扩展 CMake 自包含（CUDA/TensorRT/FFmpeg 渐进降级），Windows 上框架 79 单测与 SDK 空壳编译均已验证。
 - **球**：可输出全部候选（`keepOnlyBestBall: false` → `track_id=-1` 的未跟踪观测）；被过滤球按姿态支持救援（`rescued`）；选球改为打分（置信度+人脚支持−背景惩罚）。
 - **渲染**：ROI 多边形、person/球标签、被过滤球按原因着色、计数面板、`fps=<处理速率>`、渲染耗时单列（`render: X ms/frame`，与端到端 `per frame` 区分）。
 - **数据对齐**：`persons[].bbox` 改为姿态裁剪框（与 Python 比例 1.0000，关键点零变化）；`detectionBbox` 只服务渲染。

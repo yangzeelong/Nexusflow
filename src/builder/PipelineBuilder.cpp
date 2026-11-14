@@ -6,7 +6,6 @@
 
 #include <memory>
 #include <string>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -51,6 +50,11 @@ std::unique_ptr<Pipeline> PipelineBuilder::Build() {
         return nullptr; // Builder has been consumed
     }
 
+    if (m_pImpl->modules.empty()) {
+        LOG_ERROR("PipelineBuilder::Build() called without any module.");
+        return nullptr;
+    }
+
     // --- Step 1: Create a Graph object ---
     auto graph = std::make_unique<Graph>();
     graph->setName("Programmatically_Built_Pipeline"); // Or generate a unique name
@@ -72,12 +76,10 @@ std::unique_ptr<Pipeline> PipelineBuilder::Build() {
 
     // --- Step 3: Add edges to the graph based on connections ---
     if (m_pImpl->connections.empty() && m_pImpl->modules.size() > 1) {
-        // Error: modules provided but no connections defined.
+        LOG_ERROR("PipelineBuilder has {} modules but no connections; refusing to build a disconnected pipeline.",
+                  m_pImpl->modules.size());
         return nullptr;
     }
-
-    // Keep track of which nodes have incoming edges.
-    std::unordered_set<std::string> nodesWithIncomingEdges;
 
     for (const auto& conn : m_pImpl->connections) {
         const std::string& fromName = conn.first;
@@ -87,52 +89,29 @@ std::unique_ptr<Pipeline> PipelineBuilder::Build() {
         auto toIt = nodeLookupMap.find(toName);
 
         if (fromIt == nodeLookupMap.end() || toIt == nodeLookupMap.end()) {
-            // Error: Connection references a module that was not added.
+            LOG_ERROR("Connection '{} -> {}' references a module that was not added to the builder.", fromName, toName);
             return nullptr;
         }
 
         graph->addEdge(fromIt->second, toIt->second);
-        nodesWithIncomingEdges.insert(toName);
     }
 
-    // --- Step 4: Heuristically determine the main input and output nodes ---
-    // A simple heuristic:
-    // - The main input node is one of the nodes that has no incoming edges.
-    // - The main output node is one of the nodes that has no outgoing edges.
-    // This logic might need to be more robust for complex graphs.
-
-    std::shared_ptr<Node> sourceNode = nullptr;
-    for (const auto& pair : nodeLookupMap) {
-        if (nodesWithIncomingEdges.find(pair.first) == nodesWithIncomingEdges.end()) {
-            // This node has no incoming edges, so it's a potential source.
-            sourceNode = pair.second;
-            break; // Pick the first one we find.
-        }
-    }
-
-    // For simplicity, we'll assume the last node in the last connection is the sink.
-    // A better way would be to check for nodes with an out-degree of 0.
-    std::shared_ptr<Node> sinkNode = nullptr;
-    if (!m_pImpl->connections.empty()) {
-        sinkNode = nodeLookupMap.at(m_pImpl->connections.back().second);
-    } else if (m_pImpl->modules.size() == 1) {
-        // Handle single-node graph
-        sourceNode = nodeLookupMap.at(m_pImpl->modules[0]->GetModuleName());
-        sinkNode = sourceNode;
-    }
-
-    // --- Step 5: Check for cycles ---
+    // --- Step 4: Check for cycles ---
     if (graph->hasCycle()) {
-        // Error: The defined graph has a cycle.
+        LOG_ERROR("The graph built from the builder contains a cycle; refusing to build the pipeline.");
         return nullptr;
     }
 
-    // --- Step 6: Create the Pipeline from the fully constructed Graph ---
+    // --- Step 5: Create the Pipeline from the fully constructed Graph ---
     auto pipeline = std::unique_ptr<Pipeline>(new Pipeline());
-    pipeline->InitWithGraph(std::move(graph));
+    const ErrorCode code = pipeline->InitWithGraph(std::move(graph));
 
     m_pImpl.reset(); // Consume the builder
 
+    if (code != ErrorCode::SUCCESS) {
+        LOG_ERROR("Failed to initialize the pipeline built from the builder's modules.");
+        return nullptr;
+    }
     return pipeline;
 }
 

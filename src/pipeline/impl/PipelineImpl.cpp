@@ -2,6 +2,7 @@
 #include "base/Graph.hpp"
 #include <nexusflow/ModuleFactory.hpp>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace nexusflow {
 
@@ -27,7 +28,16 @@ std::shared_ptr<ActorNode> Pipeline::Impl::GetOrCreateActorNode(const std::share
         module = moduleFactory.CreateModule(nodIns->moduleClassName, nodIns->name, nodIns->config);
         config = nodIns->config;
     } else {
-        throw std::runtime_error("");
+        LOG_ERROR("Cannot create an actor node for '{}': unsupported node type.", nodeName);
+        return nullptr;
+    }
+
+    if (!module) {
+        // CreateModule() already logged the reason (unregistered class, or the
+        // module threw from Configure()). Keep going is not an option: the actor
+        // would own a null module and crash on the first Init()/Start().
+        LOG_ERROR("Cannot create an actor node for '{}': module instance is null.", nodeName);
+        return nullptr;
     }
 
     // 2. 创建 ActiveNode 并存入 map
@@ -38,10 +48,16 @@ std::shared_ptr<ActorNode> Pipeline::Impl::GetOrCreateActorNode(const std::share
 }
 
 ErrorCode Pipeline::Impl::Init() {
+    if (!graph) {
+        LOG_ERROR("Cannot initialize a pipeline without a graph.");
+        return ErrorCode::UNINITIALIZED_ERROR;
+    }
     LOG_TRACE("Try init pipeline with graph, [graphName={}]", graph->getName());
 
     auto edgeList = graph->toEdgeListBFS();
     LOG_TRACE("edgeList size: {}", edgeList.size());
+
+    std::unordered_set<ActorNode*> seenActors;
 
     for (const auto& edge : edgeList) {
         auto srcNode = edge.srcNodePtr.lock();
@@ -49,14 +65,17 @@ ErrorCode Pipeline::Impl::Init() {
 
         if (!srcNode || !dstNode) {
             LOG_ERROR("An edge contains an expired node pointer. Pipeline initialization failed.");
-            throw std::runtime_error("Expired node pointer in graph edge.");
+            return ErrorCode::FAILURE;
         }
 
         auto srcActorNode = GetOrCreateActorNode(srcNode);
         auto dstActorNode = GetOrCreateActorNode(dstNode);
+        if (!srcActorNode || !dstActorNode) {
+            LOG_ERROR("Failed to create the actor nodes for edge '{} -> {}'.", srcNode->name, dstNode->name);
+            return ErrorCode::FAILURE;
+        }
 
-        constexpr int kQueueSize = 5;
-        auto queue = std::make_unique<MessageQueue>(kQueueSize);
+        auto queue = std::make_unique<MessageQueue>(kDefaultMessageQueueCapacity);
         auto queueView = makeViewPtr(queue.get());
 
         std::string queueName = srcNode->name + " -> " + dstNode->name;
@@ -66,14 +85,23 @@ ErrorCode Pipeline::Impl::Init() {
 
         queues.push_back(std::move(queue));
 
-        // store ordered actor nodes
-        actorOrderedNodes.insert(srcActorNode);
-        actorOrderedNodes.insert(dstActorNode);
+        // Store actors in the order the graph exposes them. The edge list comes
+        // from a BFS over the DAG, so producers are recorded before consumers;
+        // Pipeline::Init/Start walk this order forward and DeInit reverses it.
+        // (A std::set here used to order actors by shared_ptr address, which is
+        // arbitrary and made init/start/teardown order nondeterministic.)
+        if (seenActors.insert(srcActorNode.get()).second) {
+            actorOrderedNodes.push_back(srcActorNode);
+        }
+        if (seenActors.insert(dstActorNode.get()).second) {
+            actorOrderedNodes.push_back(dstActorNode);
+        }
     }
 
     CHECK(actorModuleMap.size() == actorOrderedNodes.size(), "actorModuleMap size != actorOrderedNodes size, [{} != {}]",
           actorModuleMap.size(), actorOrderedNodes.size());
 
+    graphReady = true;
     return ErrorCode::SUCCESS;
 }
 

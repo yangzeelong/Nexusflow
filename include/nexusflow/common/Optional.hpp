@@ -1,5 +1,5 @@
-#ifndef OPTIONAL_HPP_
-#define OPTIONAL_HPP_
+#ifndef NEXUSFLOW_COMMON_OPTIONAL_HPP_
+#define NEXUSFLOW_COMMON_OPTIONAL_HPP_
 
 #include <memory>
 #include <type_traits>
@@ -55,13 +55,14 @@ public:
     // Operators overloading
     Optional& operator=(const Optional& other) {
         if (this != &other) {
-            if (m_hasValue) {
-                m_value.~T();
-            }
-
-            m_hasValue = other.m_hasValue;
-            if (m_hasValue) {
+            // reset() first, and flip m_hasValue only after the value has been
+            // constructed: if T's copy constructor throws, *this stays empty.
+            // Marking it present up front would make ~Optional destroy a value
+            // that was never constructed.
+            reset();
+            if (other.m_hasValue) {
                 new (&m_value) T(other.m_value);
+                m_hasValue = true;
             }
         }
         return *this;
@@ -69,13 +70,10 @@ public:
 
     Optional& operator=(Optional&& other) noexcept(std::is_nothrow_move_constructible<T>::value) {
         if (this != &other) {
-            if (m_hasValue) {
-                m_value.~T();
-            }
-
-            m_hasValue = other.m_hasValue;
-            if (m_hasValue) {
+            reset();
+            if (other.m_hasValue) {
                 new (&m_value) T(std::move(other.m_value));
+                m_hasValue = true;
                 other.m_hasValue = false;
             }
         }
@@ -98,9 +96,8 @@ public:
     template <class U, typename = std::enable_if_t<std::is_constructible<T, U>::value || std::is_assignable<T, U>::value ||
                                                    std::is_enum<T>::value>>
     void reset(U&& u) {
-        if (m_hasValue) {
-            m_value.~T();
-        }
+        // Exception-safe: if construction throws, the optional is left empty.
+        reset();
         new (&m_value) T(std::forward<U>(u));
         m_hasValue = true;
     }
@@ -155,4 +152,4 @@ class Optional<std::reference_wrapper<T>> {
     static_assert(is_always_false<T>::value, "Not Support Refernce Type Now.");
 };
 
-#endif // OPTIONAL_HPP_
+#endif // NEXUSFLOW_COMMON_OPTIONAL_HPP_

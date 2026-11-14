@@ -20,6 +20,7 @@ Module::~Module() {
 };
 
 ErrorCode Module::Configure(const Config& config) {
+    (void)config; // the base implementation does not need any settings
     // Initialize the module.
     LOG_TRACE("Module '{}' initializing...", m_moduleName);
     return ErrorCode::SUCCESS;
@@ -45,9 +46,9 @@ void Module::ProcessBatch(std::vector<Message>& inputBatchMessages) {
     }
 }
 
-void Module::ProcessTimed(Message& inputMessage) {
+bool Module::ProcessTimed(Message& inputMessage) {
     m_pendingOutputs.clear();
-    m_activeInputTimingMs = inputMessage.GetMetaData().moduleTimingMs;
+    m_activeInputTimingMs = inputMessage.GetMetaData().GetModuleTimings();
     m_processing = true;
     const auto started = std::chrono::steady_clock::now();
 
@@ -66,17 +67,19 @@ void Module::ProcessTimed(Message& inputMessage) {
 
     auto pending = std::move(m_pendingOutputs);
     m_pendingOutputs.clear();
+    const bool produced = !pending.empty();
     for (const auto& output : pending) {
         DispatchOutput(output, elapsedMs);
     }
     m_activeInputTimingMs.clear();
 
     LOG_DEBUG("ModuleTiming: module='{}' elapsed_ms={:.3f}", m_moduleName, elapsedMs);
+    return produced;
 }
 
 void Module::DispatchOutput(const PendingOutput& output, double elapsedMs) {
     Message routed = output.message;
-    auto& timings = routed.MetaData().moduleTimingMs;
+    auto& timings = routed.MetaData().MutableModuleTimings();
     for (const auto& entry : m_activeInputTimingMs) {
         if (timings.find(entry.first) == timings.end()) {
             timings[entry.first] = entry.second;
@@ -87,7 +90,10 @@ void Module::DispatchOutput(const PendingOutput& output, double elapsedMs) {
     if (output.named) {
         if (m_dispatcherPtr != nullptr) {
             LOG_DEBUG("Module '{}' sending message to '{}'.", m_moduleName, output.outputName);
-            m_dispatcherPtr->SendTo(output.outputName, routed);
+            if (!m_dispatcherPtr->SendTo(output.outputName, routed)) {
+                LOG_WARN("Module '{}' could not send message to '{}': the output is missing or shut down.",
+                         m_moduleName, output.outputName);
+            }
         }
     } else if (m_dispatcherPtr != nullptr) {
         LOG_DEBUG("Module '{}' broadcasting message.", m_moduleName);
@@ -108,17 +114,17 @@ void Module::Broadcast(const Message& message) {
     }
 }
 
-void Module::SendTo(const std::string& outputName, const Message& msg) {
+bool Module::SendTo(const std::string& outputName, const Message& msg) {
     if (m_processing) {
         m_pendingOutputs.push_back(PendingOutput{true, outputName, msg});
-        return;
+        return true;
     }
     if (m_dispatcherPtr != nullptr) {
         LOG_DEBUG("Module '{}' sending message to '{}'.", m_moduleName, outputName);
-        m_dispatcherPtr->SendTo(outputName, msg);
-    } else {
-        LOG_WARN("Module '{}' has no handle, cannot send message.", m_moduleName);
+        return m_dispatcherPtr->SendTo(outputName, msg);
     }
+    LOG_WARN("Module '{}' has no handle, cannot send message.", m_moduleName);
+    return false;
 }
 
 const std::string& Module::GetModuleName() const { return m_moduleName; }

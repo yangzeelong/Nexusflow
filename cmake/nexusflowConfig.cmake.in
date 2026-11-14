@@ -1,0 +1,16 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Public headers expose spdlog through nexusflow/Logging.hpp, and the exported
+# target links yaml-cpp, so consumers must be able to resolve both targets.
+if(NOT TARGET spdlog::spdlog)
+    find_dependency(spdlog)
+endif()
+if(NOT TARGET yaml-cpp::yaml-cpp)
+    find_dependency(yaml-cpp)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/nexusflowTargets.cmake")
+
+check_required_components(Nexusflow)

@@ -2,7 +2,7 @@
 #define NEXUSFLOW_DISPATCHER_HPP
 
 #include "base/Define.hpp"
-#include "common/ViewPtr.hpp"
+#include <nexusflow/common/ViewPtr.hpp>
 #include "nexusflow/Config.hpp"
 #include "nexusflow/Message.hpp"
 #include "nexusflow/Logging.hpp"
@@ -33,8 +33,9 @@ public:
 
     /**
      * @brief Broadcasts a message to all configured output queues.
-     * @details To optimize performance, this method copies the message for the
-     * first N-1 queues and moves the original message into the last queue.
+     * @details Each subscriber receives its own copy of the message; Message
+     * copies are cheap because the payload is shared copy-on-write. Pushes are
+     * blocking, so a slow subscriber applies backpressure to the producer.
      * @param msg The message to broadcast.
      */
     void Broadcast(const Message& msg);
@@ -43,9 +44,10 @@ public:
      * @brief Sends a message to a specific output queue.
      * @param outputName The name of the output queue to send the message to.
      * @param msg The message to send.
-     * @throws std::invalid_argument If the outputName is not found in the output queue map.
+     * @return true when the message was pushed to the named output queue; false
+     * when the output is unknown or its queue has already been shut down.
      */
-    void SendTo(const std::string& outputName, const Message& msg);
+    bool SendTo(const std::string& outputName, const Message& msg);
 
     /**
      * @brief Adds a new output queue to the dispatcher.

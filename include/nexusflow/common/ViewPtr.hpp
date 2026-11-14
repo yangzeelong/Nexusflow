@@ -1,5 +1,5 @@
-#ifndef VIEW_PTR_HPP
-#define VIEW_PTR_HPP
+#ifndef NEXUSFLOW_COMMON_VIEW_PTR_HPP
+#define NEXUSFLOW_COMMON_VIEW_PTR_HPP
 
 #include <cassert>
 #include <functional>
@@ -113,4 +113,4 @@ inline ViewPtr<T> makeViewPtr(T* ptr) noexcept {
     return ViewPtr<T>(ptr);
 }
 
-#endif // VIEW_PTR_HPP
+#endif // NEXUSFLOW_COMMON_VIEW_PTR_HPP

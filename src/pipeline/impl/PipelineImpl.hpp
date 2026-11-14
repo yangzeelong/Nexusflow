@@ -7,8 +7,8 @@
 #include "dispatcher/Dispatcher.hpp"
 #include "module/ModuleActor.hpp"
 #include <nexusflow/Pipeline.hpp>
-#include <set>
 #include <string>
+#include <vector>
 
 namespace nexusflow {
 
@@ -19,13 +19,26 @@ class Pipeline;
 using ActorName = std::string;
 using ActorNode = ModuleActor;
 
+// Default capacity of the message queue created for every graph edge. It bounds
+// the number of in-flight messages between two stages, i.e. the backpressure
+// depth of the pipeline.
+constexpr int kDefaultMessageQueueCapacity = 5;
+
 // --- Pipeline's Private Implementation (m_pImpl) ---
 class Pipeline::Impl {
 public:
     std::unique_ptr<Graph> graph;
     std::vector<MessageQueueUPtr> queues;
 
-    std::set<std::shared_ptr<ActorNode>> actorOrderedNodes;
+    // Actors in graph order (producers before consumers). Pipeline::Init and
+    // Pipeline::Start walk this forward, DeInit walks it backward.
+    std::vector<std::shared_ptr<ActorNode>> actorOrderedNodes;
+
+    // Lifecycle bookkeeping so Pipeline can be defensive instead of relying on
+    // the caller to hit Init/Start/Stop/DeInit in exactly the right order.
+    bool graphReady = false;
+    bool initialized = false;
+    bool started = false;
 
     ErrorCode Init();
 

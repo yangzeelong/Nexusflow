@@ -40,7 +40,7 @@ private:
 
     Pipeline();
 
-    void InitWithGraph(std::unique_ptr<Graph> graph);
+    ErrorCode InitWithGraph(std::unique_ptr<Graph> graph);
 
     class Impl;
     std::unique_ptr<Impl> m_pImpl;

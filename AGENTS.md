@@ -11,7 +11,8 @@
 **NexusFlow**：C++14 的数据流/DAG 流水线框架——`include/nexusflow/` + `src/`。
 核心概念：`Message`（Copy-On-Write）、`Module`（每个模块一个工作线程）、
 `Pipeline`（YAML 声明式建图 / `PipelineBuilder` 编程式建图）、`Dispatcher`
-（广播拷贝 N-1、末位 move）、`TimerRegistry`（单轴计时 + p95 滑窗）。
+（每个订阅者各拿一份 Message 拷贝；Message 拷贝只是 shared_ptr 引用计数）、
+`TimerRegistry`（命名空间 `nexusflow::profiling`，单轴计时 + p95 滑窗）。
 
 可选功能（AI-Football 算法流水线等）放在 `extensions/<name>/`，通过
 `-DNEXUSFLOW_EXTENSIONS=<name>` 启用。**框架核心不得依赖任何扩展**：核心
@@ -20,8 +21,9 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | 路径 | 作用 |
 | --- | --- |
 | `include/nexusflow/` | 公开头文件（Message/Module/Pipeline/PipelineBuilder/ModuleFactory/TimerRegistry/Logging…） |
-| `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（TimerRegistry、ConcurrentQueue、Optional 等） |
-| `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 39 个，见 §3） |
+| `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（TimerRegistry 实现与测试） |
+| `include/nexusflow/common/` | 公开的 header-only 容器/工具：`Any`、`ConcurrentQueue`、`Optional`、`ViewPtr`（`Nexusflow::nexusflow_common` INTERFACE target） |
+| `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 79 个，见 §3） |
 | `examples/` | 3 个纯框架示例：`1-how-to-use`、`2-linear-vision-pipline`、`3-joined-vision-pipline` |
 | `benchmarks/` | Google Benchmark 基准（`nexusflow_benchmarks`） |
 | `cmake/` | `include.cmake`（第三方依赖 include）、`Summary.cmake`、`3rdparty/*.cmake`（FetchContent 定义） |
@@ -39,7 +41,8 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | 消息分发 | `src/dispatcher/Dispatcher.hpp` |
 | YAML → DAG、拓扑排序 | `src/base/Graph.hpp`、`src/base/GraphUtils.*` |
 | 模块注册 | `include/nexusflow/ModuleFactory.hpp` |
-| 计时器（p95、单轴） | `include/nexusflow/TimerRegistry.hpp`、`src/common/TimerRegistry.*` |
+| 计时器 / profile（`nexusflow::profiling`，p95、单轴） | `include/nexusflow/TimerRegistry.hpp`、`src/common/TimerRegistry.cpp` |
+| 容器/工具（Any、队列、Optional、ViewPtr） | `include/nexusflow/common/*.hpp` |
 | 日志 | `include/nexusflow/Logging.hpp` |
 | 单测 | `tests/test/*.cpp`、`src/base/test/`、`src/common/test/` |
 
@@ -63,6 +66,13 @@ cmake --build build --parallel 16
 产物（Unix Makefiles）：`build/bin/`（`nexusflow_tests`、示例、扩展 app）；
 `build/lib/`（`nexusflow`、扩展库）。多配置生成器（Visual Studio）落在
 `build/<subdir>/<Config>/`，例如 `build/src/Release/nexusflow.lib`。
+
+安装/导出：`cmake --install build --prefix <dir>` 会装 `lib/libnexusflow.a`、
+`include/nexusflow/**`（含 `include/nexusflow/common/`）与
+`lib/cmake/Nexusflow/NexusflowConfig.cmake`（导出 `Nexusflow::nexusflow`、
+`Nexusflow::nexusflow_common`，下游 `find_package(Nexusflow CONFIG)`）。
+同一次 install 也会把 `spdlog`、`yaml-cpp` 装进同一 prefix（嵌套 FetchContent 默认
+不装），因此导出的 target 能自解析依赖。
 
 ### 离线构建（无外网）
 
@@ -96,8 +106,8 @@ cmake --build build --config Release --parallel 16
 ./build/tests/Release/nexusflow_tests.exe
 ```
 
-实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **39 tests
-from 5 suites，PASSED 39**（MSVC 19.40）。
+实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **79 tests
+from 14 suites，PASSED 79**（MSVC 19.40）。
 
 ---
 
@@ -107,7 +117,7 @@ from 5 suites，PASSED 39**（MSVC 19.40）。
 ./build/bin/nexusflow_tests      # Unix；Windows 见上（build/tests/Release/）
 ```
 
-- 当前 39 个用例（5 个 suite）：消息 7、计时器 5、图 7、Optional 20。
+- 当前 79 个用例（14 个 suite）：消息 7、计时器 5、图 7、Optional 23（TestOptional 18 + OptionalTest 2 + OptionalThrowingTest 3）、Any 5、ConcurrentQueue 7、Pipeline 生命周期 5、Pipeline 错误路径 10、Pipeline 图序 1、Pipeline 计时 1、MessageMeta 3、ModuleFactory 1、Worker 行为 4。
 - 改框架（Message/Module/Pipeline/Dispatcher/Graph/Timer）**必须**跑；不要为了
   让测试通过而改测试语义。
 
@@ -130,7 +140,7 @@ from 5 suites，PASSED 39**（MSVC 19.40）。
    留在工作区，并在汇报里说明未提交。
 2. **C++14**，不用 C++17+ 语法（结构化绑定、`if constexpr`、`std::optional`、
    `string_view`、inline 变量、if-init 等）。需要 optional 时用框架内的
-   `src/common/Optional.hpp`。
+   `include/nexusflow/common/Optional.hpp`。
 3. **构建目录固定为 `build`**；不要新建或沿用 `build-release` 等其他名字。
 4. 改完必须验证：构建退出码 0 + `nexusflow_tests` 全绿；**跑了就说跑了，没跑就
    明确说没跑**，不要含糊。

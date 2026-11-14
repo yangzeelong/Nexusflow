@@ -325,6 +325,37 @@ as `build/src/Release/`.
 ./build/bin/nexusflow_how_to_use examples/1-how-to-use/config.yaml
 ```
 
+### Installing and Exporting the Package
+
+```bash
+cmake --install build --prefix <install-dir>
+```
+
+The install rule publishes:
+
+- `lib/libnexusflow.a` (or the MSVC `.lib`) — the framework library;
+- `include/nexusflow/**` — public headers, including the header-only utilities in
+  `include/nexusflow/common/` (`Any`, `ConcurrentQueue`, `Optional`, `ViewPtr`);
+- `lib/cmake/Nexusflow/` — `NexusflowConfig.cmake`,
+  `NexusflowConfigVersion.cmake` and `nexusflowTargets.cmake` (namespace
+  `Nexusflow::`).
+
+The bundled `spdlog` and `yaml-cpp` builds are installed into the same prefix, so
+the exported targets can resolve their dependencies without a second install.
+
+A downstream CMake project can then write:
+
+```cmake
+find_package(Nexusflow CONFIG REQUIRED)
+target_link_libraries(my_app PRIVATE Nexusflow::nexusflow)
+```
+
+`Nexusflow::nexusflow_common` is the header-only INTERFACE target for the
+containers and utilities and is exported as well. The exported targets link
+`spdlog::spdlog` and `yaml-cpp::yaml-cpp`, so a consumer must be able to resolve
+those targets; `nexusflowConfig.cmake` calls `find_dependency` when they are
+missing.
+
 ## Contributing
 
 Contributions of any kind are welcome! If you have ideas, suggestions, or have found a bug, please feel free to open a Pull Request or create an Issue.

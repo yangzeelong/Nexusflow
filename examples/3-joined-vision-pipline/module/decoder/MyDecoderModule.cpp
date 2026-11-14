@@ -22,7 +22,6 @@ nexusflow::ErrorCode MyDecoderModule::Configure(const nexusflow::Config& config)
 
 void MyDecoderModule::Process(nexusflow::Message& inputMessage) {
     if (auto* msg = inputMessage.MutPtr<DecoderMessage>()) {
-        auto& videoPackage = msg->videoPackage;
         if (m_frameIdx % m_skipInterval == 0) {
             msg->videoFrame.frameId = m_frameIdx;
             msg->videoFrame.frameData = "frameData-" + std::to_string(m_frameIdx);

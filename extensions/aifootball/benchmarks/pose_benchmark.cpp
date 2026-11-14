@@ -144,7 +144,7 @@ std::vector<pose::HRNetPoseEstimatorInfer::PersonInput> MakeInputs(
 }
 
 void PrintPoseTimers() {
-    auto stats = nexusflow::TimerRegistry::Instance().Snapshot();
+    auto stats = nexusflow::profiling::TimerRegistry::Instance().Snapshot();
     std::sort(stats.begin(), stats.end(), [](const auto& lhs, const auto& rhs) {
         return lhs.name < rhs.name;
     });
@@ -176,7 +176,7 @@ bool RunBatch(const Options& options,
         }
     }
 
-    nexusflow::TimerRegistry::Instance().Reset();
+    nexusflow::profiling::TimerRegistry::Instance().Reset();
     results.clear();
     const auto started = std::chrono::steady_clock::now();
     for (int i = 0; i < options.iterations; ++i) {
