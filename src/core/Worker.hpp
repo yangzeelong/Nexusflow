@@ -2,7 +2,7 @@
 #define NEXUSFLOW_WORKER_HPP
 
 #include "base/Define.hpp"
-#include "common/ViewPtr.hpp"
+#include <nexusflow/common/ViewPtr.hpp>
 #include "nexusflow/ErrorCode.hpp"
 #include "nexusflow/Logging.hpp"
 #include "nexusflow/Module.hpp"

@@ -1,5 +1,5 @@
-#ifndef OPTIONAL_HPP_
-#define OPTIONAL_HPP_
+#ifndef NEXUSFLOW_COMMON_OPTIONAL_HPP_
+#define NEXUSFLOW_COMMON_OPTIONAL_HPP_
 
 #include <memory>
 #include <type_traits>
@@ -152,4 +152,4 @@ class Optional<std::reference_wrapper<T>> {
     static_assert(is_always_false<T>::value, "Not Support Refernce Type Now.");
 };
 
-#endif // OPTIONAL_HPP_
+#endif // NEXUSFLOW_COMMON_OPTIONAL_HPP_

@@ -1,7 +1,7 @@
 #ifndef NEXUSFLOW_BASE_DEFINE_HPP
 #define NEXUSFLOW_BASE_DEFINE_HPP
 
-#include "common/ConcurrentQueue.hpp"
+#include <nexusflow/common/ConcurrentQueue.hpp>
 #include "nexusflow/Message.hpp"
 #include <memory>
 #include <unordered_map>

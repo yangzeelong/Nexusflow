@@ -2,7 +2,7 @@
 #define NEXUSFLOW_DISPATCHER_HPP
 
 #include "base/Define.hpp"
-#include "common/ViewPtr.hpp"
+#include <nexusflow/common/ViewPtr.hpp>
 #include "nexusflow/Config.hpp"
 #include "nexusflow/Message.hpp"
 #include "nexusflow/Logging.hpp"

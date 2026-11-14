@@ -1,5 +1,5 @@
-#ifndef NEXUSFLOW_ANY_HPP
-#define NEXUSFLOW_ANY_HPP
+#ifndef NEXUSFLOW_COMMON_ANY_HPP
+#define NEXUSFLOW_COMMON_ANY_HPP
 
 #include <memory>
 #include <stdexcept>

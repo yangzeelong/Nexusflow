@@ -2,7 +2,7 @@
 #pragma once
 
 #include "base/Graph.hpp"
-#include "nexusflow/Any.hpp"
+#include <nexusflow/common/Any.hpp>
 #include <yaml-cpp/yaml.h>
 
 namespace graphutils {

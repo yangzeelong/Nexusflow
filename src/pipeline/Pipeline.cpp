@@ -2,7 +2,7 @@
 #include "base/Define.hpp"
 #include "base/Graph.hpp"
 #include "base/GraphUtils.hpp"
-#include "common/ViewPtr.hpp"
+#include <nexusflow/common/ViewPtr.hpp>
 #include "core/Worker.hpp"
 #include "dispatcher/Dispatcher.hpp"
 #include "nexusflow/Logging.hpp"

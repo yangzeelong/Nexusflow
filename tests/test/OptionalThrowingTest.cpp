@@ -1,4 +1,4 @@
-#include "../../src/common/Optional.hpp"
+#include <nexusflow/common/Optional.hpp>
 
 #include <gtest/gtest.h>
 

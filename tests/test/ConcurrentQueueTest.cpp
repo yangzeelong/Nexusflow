@@ -1,4 +1,4 @@
-#include "../../src/common/ConcurrentQueue.hpp"
+#include <nexusflow/common/ConcurrentQueue.hpp>
 
 #include <gtest/gtest.h>
 

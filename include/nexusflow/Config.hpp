@@ -1,7 +1,7 @@
 #ifndef NEXUSFLOW_CONFIG_HPP
 #define NEXUSFLOW_CONFIG_HPP
 
-#include "nexusflow/Any.hpp"
+#include <nexusflow/common/Any.hpp>
 #include <string>
 #include <unordered_map>
 namespace nexusflow {

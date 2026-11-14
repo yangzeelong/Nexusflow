@@ -1,7 +1,7 @@
-#ifndef CONCURRENT_QUEUE_HPP_
-#define CONCURRENT_QUEUE_HPP_
+#ifndef NEXUSFLOW_COMMON_CONCURRENT_QUEUE_HPP_
+#define NEXUSFLOW_COMMON_CONCURRENT_QUEUE_HPP_
 
-#include "Optional.hpp"
+#include <nexusflow/common/Optional.hpp>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
