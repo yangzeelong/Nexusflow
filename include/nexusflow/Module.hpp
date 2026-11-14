@@ -116,8 +116,10 @@ protected:
      * @brief Sends a message to a specific downstream output.
      * @param outputName The name of the output port to send the message to.
      * @param msg The message to be sent.
+     * @return true when the message was handed to the output port (or queued for
+     * dispatch); false when the port is unknown or its queue is shut down.
      */
-    void SendTo(const std::string& outputName, const Message& msg);
+    bool SendTo(const std::string& outputName, const Message& msg);
 
 private:
     friend class ModuleActor;

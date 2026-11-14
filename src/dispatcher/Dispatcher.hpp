@@ -44,9 +44,10 @@ public:
      * @brief Sends a message to a specific output queue.
      * @param outputName The name of the output queue to send the message to.
      * @param msg The message to send.
-     * @throws std::invalid_argument If the outputName is not found in the output queue map.
+     * @return true when the message was pushed to the named output queue; false
+     * when the output is unknown or its queue has already been shut down.
      */
-    void SendTo(const std::string& outputName, const Message& msg);
+    bool SendTo(const std::string& outputName, const Message& msg);
 
     /**
      * @brief Adds a new output queue to the dispatcher.

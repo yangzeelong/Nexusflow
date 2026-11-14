@@ -28,7 +28,10 @@ Worker::~Worker() {
     }
 }
 
-void Worker::Reset() { m_stopFlag.store(false); }
+ErrorCode Worker::Start() {
+    m_stopFlag.store(false);
+    return ErrorCode::SUCCESS;
+}
 
 void Worker::LoadConfig() {
     if (!m_modulePtr) {

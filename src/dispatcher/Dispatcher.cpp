@@ -19,15 +19,17 @@ void Dispatcher::Broadcast(const Message& message) {
     }
 }
 
-void Dispatcher::SendTo(const std::string& outputName, const Message& msg) {
+bool Dispatcher::SendTo(const std::string& outputName, const Message& msg) {
     auto it = m_subscriberMap.find(outputName);
     if (it == m_subscriberMap.end()) {
-        LOG_ERROR("SendTo failed: output queue {} does not exist", outputName);
-        throw std::invalid_argument("Output queue not found: " + outputName);
+        LOG_WARN("SendTo failed: output queue {} does not exist", outputName);
+        return false;
     }
     if (!it->second->push(msg)) {
         LOG_WARN("SendTo output queue {} failed: the queue is shut down", outputName);
+        return false;
     }
+    return true;
 }
 
 }} // namespace nexusflow::dispatcher

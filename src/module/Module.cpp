@@ -90,7 +90,10 @@ void Module::DispatchOutput(const PendingOutput& output, double elapsedMs) {
     if (output.named) {
         if (m_dispatcherPtr != nullptr) {
             LOG_DEBUG("Module '{}' sending message to '{}'.", m_moduleName, output.outputName);
-            m_dispatcherPtr->SendTo(output.outputName, routed);
+            if (!m_dispatcherPtr->SendTo(output.outputName, routed)) {
+                LOG_WARN("Module '{}' could not send message to '{}': the output is missing or shut down.",
+                         m_moduleName, output.outputName);
+            }
         }
     } else if (m_dispatcherPtr != nullptr) {
         LOG_DEBUG("Module '{}' broadcasting message.", m_moduleName);
@@ -111,17 +114,17 @@ void Module::Broadcast(const Message& message) {
     }
 }
 
-void Module::SendTo(const std::string& outputName, const Message& msg) {
+bool Module::SendTo(const std::string& outputName, const Message& msg) {
     if (m_processing) {
         m_pendingOutputs.push_back(PendingOutput{true, outputName, msg});
-        return;
+        return true;
     }
     if (m_dispatcherPtr != nullptr) {
         LOG_DEBUG("Module '{}' sending message to '{}'.", m_moduleName, outputName);
-        m_dispatcherPtr->SendTo(outputName, msg);
-    } else {
-        LOG_WARN("Module '{}' has no handle, cannot send message.", m_moduleName);
+        return m_dispatcherPtr->SendTo(outputName, msg);
     }
+    LOG_WARN("Module '{}' has no handle, cannot send message.", m_moduleName);
+    return false;
 }
 
 const std::string& Module::GetModuleName() const { return m_moduleName; }

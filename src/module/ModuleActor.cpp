@@ -37,7 +37,11 @@ ErrorCode ModuleActor::Start() {
         LOG_WARN("ModuleActor '{}' is already started.", GetModuleName());
         return ErrorCode::FAILED_ALREADY_START;
     }
-    m_worker->Reset();
+    const ErrorCode workerCode = m_worker->Start();
+    if (workerCode != ErrorCode::SUCCESS) {
+        LOG_ERROR("ModuleActor '{}' failed to start its worker.", GetModuleName());
+        return workerCode;
+    }
     m_workThread = std::thread([this]() { m_worker->WorkLoop(); });
 
     return ErrorCode::SUCCESS;

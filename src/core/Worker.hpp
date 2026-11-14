@@ -46,10 +46,12 @@ public:
     ErrorCode Stop();
 
     /**
-     * @brief Clears the stop flag so a (re)started thread keeps working.
-     * ModuleActor calls this right before spawning the worker thread.
+     * @brief Prepares the loop to run: clears the stop flag.
+     * ModuleActor calls this right before spawning the worker thread, keeping
+     * Start()/Stop() symmetric with the other lifecycle calls.
+     * @return Always ErrorCode::SUCCESS.
      */
-    void Reset();
+    ErrorCode Start();
 
     // Setter and getter for the input queue map.
     void AddQueue(const std::string& name, ViewPtr<MessageQueue> queue) {
