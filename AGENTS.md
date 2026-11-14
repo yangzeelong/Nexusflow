@@ -21,7 +21,8 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | 路径 | 作用 |
 | --- | --- |
 | `include/nexusflow/` | 公开头文件（Message/Module/Pipeline/PipelineBuilder/ModuleFactory/TimerRegistry/Logging…） |
-| `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（TimerRegistry、ConcurrentQueue、Optional 等） |
+| `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（TimerRegistry 实现与测试） |
+| `include/nexusflow/common/` | 公开的 header-only 容器/工具：`Any`、`ConcurrentQueue`、`Optional`、`ViewPtr`（`Nexusflow::nexusflow_common` INTERFACE target） |
 | `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 79 个，见 §3） |
 | `examples/` | 3 个纯框架示例：`1-how-to-use`、`2-linear-vision-pipline`、`3-joined-vision-pipline` |
 | `benchmarks/` | Google Benchmark 基准（`nexusflow_benchmarks`） |
@@ -41,6 +42,7 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | YAML → DAG、拓扑排序 | `src/base/Graph.hpp`、`src/base/GraphUtils.*` |
 | 模块注册 | `include/nexusflow/ModuleFactory.hpp` |
 | 计时器（p95、单轴） | `include/nexusflow/TimerRegistry.hpp`、`src/common/TimerRegistry.*` |
+| 容器/工具（Any、队列、Optional、ViewPtr） | `include/nexusflow/common/*.hpp` |
 | 日志 | `include/nexusflow/Logging.hpp` |
 | 单测 | `tests/test/*.cpp`、`src/base/test/`、`src/common/test/` |
 
@@ -64,6 +66,13 @@ cmake --build build --parallel 16
 产物（Unix Makefiles）：`build/bin/`（`nexusflow_tests`、示例、扩展 app）；
 `build/lib/`（`nexusflow`、扩展库）。多配置生成器（Visual Studio）落在
 `build/<subdir>/<Config>/`，例如 `build/src/Release/nexusflow.lib`。
+
+安装/导出：`cmake --install build --prefix <dir>` 会装 `lib/libnexusflow.a`、
+`include/nexusflow/**`（含 `include/nexusflow/common/`）与
+`lib/cmake/Nexusflow/NexusflowConfig.cmake`（导出 `Nexusflow::nexusflow`、
+`Nexusflow::nexusflow_common`，下游 `find_package(Nexusflow CONFIG)`）。
+同一次 install 也会把 `spdlog`、`yaml-cpp` 装进同一 prefix（嵌套 FetchContent 默认
+不装），因此导出的 target 能自解析依赖。
 
 ### 离线构建（无外网）
 
@@ -131,7 +140,7 @@ from 14 suites，PASSED 79**（MSVC 19.40）。
    留在工作区，并在汇报里说明未提交。
 2. **C++14**，不用 C++17+ 语法（结构化绑定、`if constexpr`、`std::optional`、
    `string_view`、inline 变量、if-init 等）。需要 optional 时用框架内的
-   `src/common/Optional.hpp`。
+   `include/nexusflow/common/Optional.hpp`。
 3. **构建目录固定为 `build`**；不要新建或沿用 `build-release` 等其他名字。
 4. 改完必须验证：构建退出码 0 + `nexusflow_tests` 全绿；**跑了就说跑了，没跑就
    明确说没跑**，不要含糊。
