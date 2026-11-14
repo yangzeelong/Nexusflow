@@ -6,10 +6,16 @@
 
 #include <gtest/gtest.h>
 
+#include "../../src/base/Define.hpp"
+#include "../../src/core/Worker.hpp"
+#include <nexusflow/Config.hpp>
+
 #include <spdlog/spdlog.h>
 
 #include <atomic>
 #include <chrono>
+#include <mutex>
+#include <vector>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -143,4 +149,58 @@ TEST(WorkerBehaviorTest, IdleSourceBacksOffInsteadOfSpinning) {
     // default backoff keeps this in the tens. The bound is loose on purpose so
     // a slow CI machine does not make the test flaky.
     EXPECT_LT(calls, 5000);
+}
+
+
+namespace {
+
+// Records the size of every batch the worker hands to it, so a test can check
+// that the per-module maxBatchSize knob is actually honoured.
+class BatchRecordingModule : public Module {
+public:
+    explicit BatchRecordingModule(const std::string& name) : Module(name) {}
+
+    std::mutex mutex;
+    std::vector<std::size_t> batchSizes;
+
+protected:
+    void Process(Message& inputMessage) override { (void)inputMessage; }
+
+    void ProcessBatch(std::vector<Message>& inputBatchMessages) override {
+        std::lock_guard<std::mutex> guard(mutex);
+        batchSizes.push_back(inputBatchMessages.size());
+    }
+};
+
+} // namespace
+
+TEST(WorkerBehaviorTest, ConfiguredBatchSizeIsRespected) {
+    auto module = std::make_shared<BatchRecordingModule>("batch_recorder");
+    Config config;
+    config.Add<int>("maxBatchSize", 2);
+    config.Add<int>("batchTimeoutMs", 5);
+    ViewPtr<Config> configView(&config);
+
+    MessageQueue queue(16);
+    core::Worker worker(module, configView);
+    worker.AddQueue("input", makeViewPtr(&queue));
+
+    // Fill the queue before starting the worker, so the very first pull already
+    // has more messages available than the configured batch size.
+    for (int i = 0; i < 10; ++i) {
+        queue.push(MakeMessage(i));
+    }
+
+    std::thread workerThread([&worker]() { worker.WorkLoop(); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    worker.Stop();
+    queue.shutdown();
+    workerThread.join();
+
+    std::lock_guard<std::mutex> guard(module->mutex);
+    ASSERT_FALSE(module->batchSizes.empty());
+    EXPECT_EQ(module->batchSizes.front(), 2u);
+    for (std::size_t size : module->batchSizes) {
+        EXPECT_LE(size, 2u);
+    }
 }

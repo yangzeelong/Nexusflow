@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <string>
 #include <unordered_map>
 
 namespace nexusflow { namespace core {
@@ -65,6 +66,14 @@ public:
     void WorkLoop();
 
 private:
+    /**
+     * @brief Reads the per-module tuning knobs (batch size/timeout, fusion timeout,
+     *        source idle time, sync-inputs flag) and pre-builds the timer labels.
+     *        Called once from the constructor so the hot loop does no config lookups.
+     *        All values fall back to the historical defaults when absent.
+     */
+    void LoadConfig();
+
     void RunFusion();
 
     /**
@@ -91,6 +100,17 @@ private:
     std::unordered_map<std::string, ViewPtr<MessageQueue>> m_inputQueueMap;
 
     std::atomic<bool> m_stopFlag{false};
+
+    // Per-module tuning, resolved once in LoadConfig().
+    std::size_t m_maxBatchSize = 4;
+    std::chrono::milliseconds m_batchTimeout{100};
+    std::chrono::milliseconds m_fusionTimeout{60000};
+    int m_sourceIdleMs = 1;
+    bool m_syncInputs = false;
+    // Timer labels are stable per module; building them once keeps the work loop free
+    // of a string concatenation on every iteration.
+    std::string m_processTimerName;
+    std::string m_waitTimerName;
 };
 
 }} // namespace nexusflow::core
