@@ -2,6 +2,7 @@
 #include "base/Graph.hpp"
 #include <nexusflow/ModuleFactory.hpp>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace nexusflow {
 
@@ -56,6 +57,8 @@ ErrorCode Pipeline::Impl::Init() {
     auto edgeList = graph->toEdgeListBFS();
     LOG_TRACE("edgeList size: {}", edgeList.size());
 
+    std::unordered_set<ActorNode*> seenActors;
+
     for (const auto& edge : edgeList) {
         auto srcNode = edge.srcNodePtr.lock();
         auto dstNode = edge.dstNodePtr.lock();
@@ -83,9 +86,17 @@ ErrorCode Pipeline::Impl::Init() {
 
         queues.push_back(std::move(queue));
 
-        // store ordered actor nodes
-        actorOrderedNodes.insert(srcActorNode);
-        actorOrderedNodes.insert(dstActorNode);
+        // Store actors in the order the graph exposes them. The edge list comes
+        // from a BFS over the DAG, so producers are recorded before consumers;
+        // Pipeline::Init/Start walk this order forward and DeInit reverses it.
+        // (A std::set here used to order actors by shared_ptr address, which is
+        // arbitrary and made init/start/teardown order nondeterministic.)
+        if (seenActors.insert(srcActorNode.get()).second) {
+            actorOrderedNodes.push_back(srcActorNode);
+        }
+        if (seenActors.insert(dstActorNode.get()).second) {
+            actorOrderedNodes.push_back(dstActorNode);
+        }
     }
 
     CHECK(actorModuleMap.size() == actorOrderedNodes.size(), "actorModuleMap size != actorOrderedNodes size, [{} != {}]",
