@@ -1,26 +1,29 @@
 #pragma once
 
-// -- Pre-requisites --
-// 1. Link against spdlog.
-// 2. For debug-only logs (DLOG), compile with -DNDEBUG for release builds.
+// Public logging facade.
+//
+// This header owns the logging API: level, parameters, record layout and the
+// sink hook. It deliberately does not include any third-party logging header:
+// the default backend (spdlog) lives in src/common/Logging.cpp and can be
+// replaced at runtime through log::SetSink().
+//
+// For debug-only logs (DLOG), compile with -DNDEBUG for release builds.
 
-#include <spdlog/sinks/daily_file_sink.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
-#include <spdlog/spdlog.h>
-
-#include <atomic> // For std::atomic
-#include <chrono> // For std::chrono
+#include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <iomanip>
 #include <memory>
-#include <mutex> // For LOG_EVERY_T
-#include <sstream> // For stream-based logging
-#include <string.h> // For strrchr
-#include <string> // For CHECK macros
-#include <vector>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <type_traits>
 
-//--------------------------------------------------------------------------------//
-// Platform and Filename Helpers
-//--------------------------------------------------------------------------------//
-
+// Compatibility macro kept for code that used it to strip paths from __FILE__.
+// FILENAME_ below handles both separators directly, so this is only a leftover.
 #ifndef OS_SEP
 #ifdef _MSC_VER
 #define OS_SEP '\\'
@@ -29,15 +32,227 @@
 #endif
 #endif
 
-#define FILENAME_ (strrchr(__FILE__, OS_SEP) ? strrchr(__FILE__, OS_SEP) + 1 : __FILE__)
+namespace nexusflow {
+namespace log {
 
-//--------------------------------------------------------------------------------//
-// Internal Macro Helpers (Do not use directly)
-//--------------------------------------------------------------------------------//
+// Severity, ordered from least to most severe. OFF disables logging entirely.
+enum class Level : std::int8_t { TRACE = 0, DEBUG, INFO, WARN, ERR, CRITICAL, OFF };
 
-namespace nexusflow { namespace logger_internal {
+// Parameters of the default logger. Field names are kept stable because they are
+// part of the public API used by the applications.
+struct LoggerParam {
+    Level logLevel = Level::DEBUG;  // default log level
+    std::string logDir;             // if empty, no file logger will be created
+    std::string logName;            // if empty, a default name will be used
+    std::size_t maxRetentionDays = 0;  // if 0, no retention limit
+};
 
-// A NullStream that does nothing, used to disable logging statements at compile time.
+// One formatted log line, handed to a LogSink.
+struct LogRecord {
+    Level level = Level::INFO;
+    std::string timestamp;  // local time with offset, "YYYY-MM-DD HH:MM:SS.mmm +HH:MM"
+    std::uint64_t threadId = 0;  // native thread id (TID on Windows/Linux)
+    const char* file = "";  // basename only
+    int line = 0;
+    const char* function = "";
+    std::string message;  // already formatted
+};
+
+// A sink receives every enabled log record. Implement it to forward records to
+// a custom backend (collector, test buffer, rotating file writer, ...).
+class LogSink {
+public:
+    virtual ~LogSink() = default;
+    virtual void Write(const LogRecord& record) = 0;
+};
+
+// Level control. The default level is DEBUG.
+void SetLogLevel(Level level);
+Level GetLogLevel();
+bool IsLevelEnabled(Level level);
+
+// Installs the built-in logger: the console plus an optional daily rotating
+// file, and replaces the current sink with it.
+//
+// Default layout (console colored by level, file plain text; one file per day:
+// <logName>_YYYY-MM-DD.log):
+//   2026-11-14 22:13:01.084 | INFO  | T19088 | main.cpp:47 - message
+// The console uses loguru's palette (green time, level-colored tag and message,
+// gray thread id, cyan location) when stdout is a terminal; NO_COLOR disables it
+// and FORCE_COLOR=1 forces it on. Implement a LogSink to take over formatting.
+void InitializeGlobalLogger(LoggerParam param = LoggerParam());
+
+// Replaces the sink. Passing nullptr restores the built-in default sink.
+void SetSink(std::shared_ptr<LogSink> sink);
+std::shared_ptr<LogSink> GetSink();
+
+namespace detail {
+
+// Strips directories from a __FILE__ path (handles '/' and '\\').
+inline const char* FileName(const char* path) {
+    if (path == nullptr) {
+        return "";
+    }
+    const char* base = path;
+    for (const char* cursor = path; *cursor != '\0'; ++cursor) {
+        if (*cursor == '/' || *cursor == '\\') {
+            base = cursor + 1;
+        }
+    }
+    return base;
+}
+
+// Parses the precision of floating-point placeholders such as "{:.2f}".
+inline bool ParseFixedSpec(const std::string& spec, int& precision) {
+    if (spec.empty()) {
+        return false;
+    }
+    const std::size_t dot = spec.find('.');
+    if (dot == std::string::npos) {
+        return false;
+    }
+    std::size_t cursor = dot + 1;
+    int value = 0;
+    bool hasDigit = false;
+    while (cursor < spec.size() && spec[cursor] >= '0' && spec[cursor] <= '9') {
+        value = value * 10 + (spec[cursor] - '0');
+        ++cursor;
+        hasDigit = true;
+    }
+    if (!hasDigit) {
+        return false;
+    }
+    if (cursor < spec.size() && spec[cursor] == 'f') {
+        ++cursor;
+    }
+    if (cursor != spec.size()) {
+        return false;
+    }
+    precision = value;
+    return true;
+}
+
+inline std::string ToText(const std::string& value, const std::string&) { return value; }
+inline std::string ToText(const char* value, const std::string&) { return value != nullptr ? std::string(value) : std::string("(null)"); }
+inline std::string ToText(char* value, const std::string& spec) { return ToText(static_cast<const char*>(value), spec); }
+inline std::string ToText(bool value, const std::string&) { return value ? "true" : "false"; }
+inline std::string ToText(char value, const std::string&) { return std::string(1, value); }
+
+template <typename T>
+inline typename std::enable_if<!std::is_floating_point<T>::value, std::string>::type ToText(const T& value,
+                                                                                            const std::string&) {
+    std::ostringstream stream;
+    stream << value;
+    return stream.str();
+}
+
+template <typename T>
+inline typename std::enable_if<std::is_floating_point<T>::value, std::string>::type ToText(const T& value,
+                                                                                           const std::string& spec) {
+    std::ostringstream stream;
+    int precision = 0;
+    if (ParseFixedSpec(spec, precision)) {
+        stream << std::fixed << std::setprecision(precision);
+    }
+    stream << value;
+    return stream.str();
+}
+
+// Terminal case: append what is left of the format string.
+inline void AppendFormatted(std::string& out, const char*& cursor) {
+    if (cursor == nullptr) {
+        return;
+    }
+    out += cursor;
+    cursor += std::strlen(cursor);
+}
+
+// Consumes one argument per "{}" / "{:spec}" placeholder and appends literals.
+template <typename T, typename... Rest>
+void AppendFormatted(std::string& out, const char*& cursor, const T& value, const Rest&... rest) {
+    bool consumed = false;
+    while (cursor != nullptr && *cursor != '\0') {
+        if (*cursor == '{') {
+            if (cursor[1] == '{') {
+                out += '{';
+                cursor += 2;
+                continue;
+            }
+            const char* close = cursor + 1;
+            while (*close != '\0' && *close != '}') {
+                ++close;
+            }
+            const std::string placeholder(cursor + 1, static_cast<std::size_t>(close - (cursor + 1)));
+            std::string spec;
+            if (!placeholder.empty() && placeholder[0] == ':') {
+                spec = placeholder.substr(1);
+            }
+            out += ToText(value, spec);
+            cursor = (*close == '}') ? close + 1 : close;
+            consumed = true;
+            break;
+        }
+        if (*cursor == '}' && cursor[1] == '}') {
+            out += '}';
+            cursor += 2;
+            continue;
+        }
+        out += *cursor;
+        ++cursor;
+    }
+    if (!consumed) {
+        // More arguments than placeholders: keep the extra values visible.
+        out += ' ';
+        out += ToText(value, std::string());
+    }
+    AppendFormatted(out, cursor, rest...);
+}
+
+// Minimal replacement for fmt: "{}" and "{:.Nf}" are the only supported
+// placeholders (that is all the framework uses). Braces can be escaped with
+// "{{" / "}}".
+template <typename... Args>
+std::string Format(const char* format, const Args&... args) {
+    std::string out;
+    if (format == nullptr) {
+        return out;
+    }
+    out.reserve(std::strlen(format) + 32);
+    const char* cursor = format;
+    AppendFormatted(out, cursor, args...);
+    return out;
+}
+
+// Call sites also pass a runtime-built std::string as the format string (e.g.
+// LOG_INFO(GetModuleName() + ": ...", value)). Accept it explicitly so the
+// facade keeps the same call syntax as the previous spdlog-based macros.
+template <typename... Args>
+std::string Format(const std::string& format, const Args&... args) {
+    return Format(format.c_str(), args...);
+}
+
+// Implemented in src/common/Logging.cpp.
+void Write(Level level, const char* file, int line, const char* function, const std::string& message);
+
+// Helper for time-based logging state.
+struct LogEveryTState {
+    std::mutex mutex;
+    std::chrono::steady_clock::time_point lastLog{};
+};
+
+inline bool ShouldLogEveryT(LogEveryTState& state, double seconds) {
+    const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(state.mutex);
+    const std::chrono::steady_clock::duration interval =
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(seconds));
+    if (now - state.lastLog > interval) {
+        state.lastLog = now;
+        return true;
+    }
+    return false;
+}
+
+// A NullStream does nothing; used to disable logging statements at compile time.
 class NullStream {
 public:
     template <typename T>
@@ -47,70 +262,88 @@ public:
     NullStream& stream() { return *this; }
 };
 
-// A LogStream that captures data and logs it on destruction.
-class LogStream {
+// Stream-style logging: buffers with operator<< and emits on destruction.
+class StreamLogger {
 public:
-    LogStream(spdlog::level::level_enum level, const char* file, int line, const char* func) : level_(level), loc_{file, line, func} {}
+    StreamLogger(Level level, const char* file, int line, const char* function)
+        : m_level(level),
+          m_file(file),
+          m_line(line),
+          m_function(function),
+          m_enabled(IsLevelEnabled(level)) {}
 
-    ~LogStream() {
-        // Log the buffered message. Use a simple format string to pass it through.
-        spdlog::log(loc_, level_, "{}", stream_.str());
+    virtual ~StreamLogger() {
+        if (m_writeOnDestroy) {
+            WriteBuffered();
+        }
     }
 
     template <typename T>
-    LogStream& operator<<(const T& msg) {
-        stream_ << msg;
+    StreamLogger& operator<<(const T& value) {
+        if (m_enabled) {
+            m_stream << value;
+        }
         return *this;
     }
 
-    // Returns the underlying stream for CHECK macros
-    std::stringstream& stream() { return stream_; }
+    std::stringstream& stream() { return m_stream; }
 
 protected:
-    std::stringstream stream_;
-    spdlog::level::level_enum level_;
-    spdlog::source_loc loc_;
+    void WriteBuffered() {
+        if (m_enabled) {
+            Write(m_level, m_file, m_line, m_function, m_stream.str());
+            m_enabled = false;
+        }
+    }
+
+    std::stringstream m_stream;
+    Level m_level;
+    const char* m_file;
+    int m_line;
+    const char* m_function;
+    bool m_enabled;
+    bool m_writeOnDestroy = true;
 };
 
-// A FatalLogStream that logs and then terminates the program.
-class FatalLogStream : public LogStream {
+// Stream-style fatal check: writes the buffer and terminates the process.
+class FatalStream : public StreamLogger {
 public:
-    using LogStream::LogStream; // Inherit constructor
+    using StreamLogger::StreamLogger;
 
-    ~FatalLogStream() {
-        // The message is logged first by the base class destructor,
-        // which runs AFTER this destructor's body. So we log here and then abort.
-        spdlog::log(loc_, level_, "{}", stream_.str());
+    ~FatalStream() override {
+        WriteBuffered();
         std::abort();
     }
 };
 
-// Helper for time-based logging state
-struct LogEveryTState {
-    std::mutex mtx;
-    std::chrono::steady_clock::time_point last_log{};
-};
-inline bool ShouldLogEveryT(LogEveryTState& state, double seconds) {
-    const auto now = std::chrono::steady_clock::now();
-    std::lock_guard<std::mutex> lock(state.mtx);
-    if (now - state.last_log >
-        std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(seconds))) {
-        state.last_log = now;
-        return true;
-    }
-    return false;
-}
-}} // namespace nexusflow::logger_internal
+}  // namespace detail
+}  // namespace log
+}  // namespace nexusflow
 
-// Core `fmt`-style logging implementation
-#define HELPER_LOG_TRACE(...)    spdlog::log({FILENAME_, __LINE__, __FUNCTION__}, spdlog::level::trace, __VA_ARGS__)
-#define HELPER_LOG_DEBUG(...)    spdlog::log({FILENAME_, __LINE__, __FUNCTION__}, spdlog::level::debug, __VA_ARGS__)
-#define HELPER_LOG_INFO(...)     spdlog::log({FILENAME_, __LINE__, __FUNCTION__}, spdlog::level::info, __VA_ARGS__)
-#define HELPER_LOG_WARN(...)     spdlog::log({FILENAME_, __LINE__, __FUNCTION__}, spdlog::level::warn, __VA_ARGS__)
-#define HELPER_LOG_ERROR(...)    spdlog::log({FILENAME_, __LINE__, __FUNCTION__}, spdlog::level::err, __VA_ARGS__)
-#define HELPER_LOG_CRITICAL(...) spdlog::log({FILENAME_, __LINE__, __FUNCTION__}, spdlog::level::critical, __VA_ARGS__)
+// Basename of the current source file, without directories.
+#define FILENAME_ (::nexusflow::log::detail::FileName(__FILE__))
 
-// Helper for CHECK_XX `fmt` macros
+//--------------------------------------------------------------------------------//
+// Core logging macros
+//--------------------------------------------------------------------------------//
+
+#define NEXUSFLOW_LOG_AT(level, ...)                                                        \
+    do {                                                                                    \
+        if (::nexusflow::log::IsLevelEnabled(level)) {                                      \
+            ::nexusflow::log::detail::Write(level, FILENAME_, __LINE__, __FUNCTION__,       \
+                                            ::nexusflow::log::detail::Format(__VA_ARGS__)); \
+        }                                                                                   \
+    } while (0)
+
+// Kept for compatibility with call sites that spell the helper name directly.
+#define HELPER_LOG_TRACE(...) NEXUSFLOW_LOG_AT(::nexusflow::log::Level::TRACE, __VA_ARGS__)
+#define HELPER_LOG_DEBUG(...) NEXUSFLOW_LOG_AT(::nexusflow::log::Level::DEBUG, __VA_ARGS__)
+#define HELPER_LOG_INFO(...) NEXUSFLOW_LOG_AT(::nexusflow::log::Level::INFO, __VA_ARGS__)
+#define HELPER_LOG_WARN(...) NEXUSFLOW_LOG_AT(::nexusflow::log::Level::WARN, __VA_ARGS__)
+#define HELPER_LOG_ERROR(...) NEXUSFLOW_LOG_AT(::nexusflow::log::Level::ERR, __VA_ARGS__)
+#define HELPER_LOG_CRITICAL(...) NEXUSFLOW_LOG_AT(::nexusflow::log::Level::CRITICAL, __VA_ARGS__)
+
+// Helper for CHECK_XX comparison macros.
 #define HELPER_CHECK_OP_FMT(val1, val2, op_str, op)                                           \
     do {                                                                                      \
         auto v1 = (val1);                                                                     \
@@ -121,11 +354,7 @@ inline bool ShouldLogEveryT(LogEveryTState& state, double seconds) {
         }                                                                                     \
     } while (0)
 
-//--------------------------------------------------------------------------------//
-// Public Glog-Style Logging Macros
-//--------------------------------------------------------------------------------//
-
-// --- 1. FMT-Style Logging (High Performance) ---
+// --- 1. FMT-style logging ---
 
 #define LOG(level, ...) HELPER_LOG_##level(__VA_ARGS__)
 #define LOG_IF(level, condition, ...) \
@@ -146,23 +375,24 @@ inline bool ShouldLogEveryT(LogEveryTState& state, double seconds) {
             LOG(level, __VA_ARGS__);                                                    \
         }                                                                               \
     } while (0)
-#define LOG_EVERY_T(level, seconds, ...)                               \
-    do {                                                               \
-        static logger_internal::LogEveryTState state;           \
-        if (logger_internal::ShouldLogEveryT(state, seconds)) { \
-            LOG(level, __VA_ARGS__);                                   \
-        }                                                              \
+#define LOG_EVERY_T(level, seconds, ...)                                    \
+    do {                                                                    \
+        static ::nexusflow::log::detail::LogEveryTState state;              \
+        if (::nexusflow::log::detail::ShouldLogEveryT(state, seconds)) {    \
+            LOG(level, __VA_ARGS__);                                        \
+        }                                                                   \
     } while (0)
 #define LOG_IF_EVERY_N(level, condition, n, ...) \
     if (condition) {                             \
         LOG_EVERY_N(level, n, __VA_ARGS__);      \
     }
 
-// --- 2. Stream-Style Logging (Flexible, glog-like) ---
+// --- 2. Stream-style logging ---
 
-#define LOG_STREAM(level) logger_internal::LogStream(HELPER_GET_SPDLOG_LEVEL(level), FILENAME_, __LINE__, __FUNCTION__)
+#define LOG_STREAM(level) \
+    ::nexusflow::log::detail::StreamLogger(::nexusflow::log::Level::level, FILENAME_, __LINE__, __FUNCTION__)
 #define LOG_STREAM_IF(level, condition) \
-    if (condition) LOG_STREAM(level) else logger_internal::NullStream()
+    if (condition) LOG_STREAM(level) else ::nexusflow::log::detail::NullStream()
 #define LOG_STREAM_EVERY_N(level, n)                                         \
     (((n) > 0 &&                                                             \
       [] {                                                                   \
@@ -170,31 +400,32 @@ inline bool ShouldLogEveryT(LogEveryTState& state, double seconds) {
           return counter.fetch_add(1, std::memory_order_relaxed) % (n) == 0; \
       }())                                                                   \
          ? LOG_STREAM(level)                                                 \
-         : logger_internal::NullStream())
+         : ::nexusflow::log::detail::NullStream())
 
-// --- 3. Simplified Level-Only Macros (As requested) ---
-#define LOG_TRACE(...)    HELPER_LOG_TRACE(__VA_ARGS__)
-#define LOG_DEBUG(...)    HELPER_LOG_DEBUG(__VA_ARGS__)
-#define LOG_INFO(...)     HELPER_LOG_INFO(__VA_ARGS__)
-#define LOG_WARN(...)     HELPER_LOG_WARN(__VA_ARGS__)
-#define LOG_ERROR(...)    HELPER_LOG_ERROR(__VA_ARGS__)
+// --- 3. Simplified level-only macros ---
+
+#define LOG_TRACE(...) HELPER_LOG_TRACE(__VA_ARGS__)
+#define LOG_DEBUG(...) HELPER_LOG_DEBUG(__VA_ARGS__)
+#define LOG_INFO(...) HELPER_LOG_INFO(__VA_ARGS__)
+#define LOG_WARN(...) HELPER_LOG_WARN(__VA_ARGS__)
+#define LOG_ERROR(...) HELPER_LOG_ERROR(__VA_ARGS__)
 #define LOG_CRITICAL(...) HELPER_LOG_CRITICAL(__VA_ARGS__)
 
-// --- 4. Debug-Only Logging (DLOG - compiled out if NDEBUG is defined) ---
+// --- 4. Debug-only logging (DLOG - compiled out if NDEBUG is defined) ---
 
 #ifdef NDEBUG
-#define DLOG(level, ...)                 (void)0
-#define DLOG_IF(level, ...)              (void)0
-#define DLOG_STREAM(level)               logger_internal::NullStream()
-#define DLOG_STREAM_IF(level, condition) logger_internal::NullStream()
+#define DLOG(level, ...) (void)0
+#define DLOG_IF(level, ...) (void)0
+#define DLOG_STREAM(level) ::nexusflow::log::detail::NullStream()
+#define DLOG_STREAM_IF(level, condition) ::nexusflow::log::detail::NullStream()
 #else
-#define DLOG(level, ...)                 LOG(level, __VA_ARGS__)
-#define DLOG_IF(level, condition, ...)   LOG_IF(level, condition, __VA_ARGS__)
-#define DLOG_STREAM(level)               LOG_STREAM(level)
+#define DLOG(level, ...) LOG(level, __VA_ARGS__)
+#define DLOG_IF(level, condition, ...) LOG_IF(level, condition, __VA_ARGS__)
+#define DLOG_STREAM(level) LOG_STREAM(level)
 #define DLOG_STREAM_IF(level, condition) LOG_STREAM_IF(level, condition)
 #endif
 
-// --- 5. Fatal Assertion Checks (CHECK - ALWAYS ON) ---
+// --- 5. Fatal assertion checks (CHECK - ALWAYS ON) ---
 
 // `fmt` style check
 #define CHECK(condition, ...)                                            \
@@ -212,72 +443,29 @@ inline bool ShouldLogEveryT(LogEveryTState& state, double seconds) {
 #define CHECK_GE(v1, v2) HELPER_CHECK_OP_FMT(v1, v2, ">=", >=)
 
 // Stream style check
-#define CHECK_STREAM(condition)                                                                                     \
-    if (condition)                                                                                                  \
-        (void)0;                                                                                                    \
-    else                                                                                                            \
-        logger_internal::FatalLogStream(spdlog::level::critical, FILENAME_, __LINE__, __FUNCTION__).stream() \
+#define CHECK_STREAM(condition)                                                                     \
+    if (condition)                                                                                  \
+        (void)0;                                                                                    \
+    else                                                                                            \
+        ::nexusflow::log::detail::FatalStream(::nexusflow::log::Level::CRITICAL, FILENAME_, __LINE__, \
+                                              __FUNCTION__)                                         \
+                .stream()                                                                           \
             << "Check failed: " #condition ". "
 
 //--------------------------------------------------------------------------------//
-// Logger Initialization and Configuration
+// Backwards-compatible spelling: nexusflow::logger
 //--------------------------------------------------------------------------------//
-namespace nexusflow { namespace logger {
-enum class LogLevel : int8_t { TRACE, DEBUG, INFO, WARN, ERR, CRITICAL, OFF };
-struct LoggerParam {
-    LogLevel logLevel = LogLevel::DEBUG; // default log level
-    std::string logDir; // if empty, no file logger will be created
-    std::string logName; // if empty, default name will be used
-    size_t maxRetentionDays = 0; // if 0, no retention limit
-};
-class LoggerGenerator {
-public:
-    static spdlog::level::level_enum to_spdlog_level(const LogLevel& log_level) {
-        if (log_level == LogLevel::TRACE) return spdlog::level::trace;
-        if (log_level == LogLevel::DEBUG) return spdlog::level::debug;
-        if (log_level == LogLevel::INFO) return spdlog::level::info;
-        if (log_level == LogLevel::WARN) return spdlog::level::warn;
-        if (log_level == LogLevel::ERR) return spdlog::level::err;
-        if (log_level == LogLevel::CRITICAL) return spdlog::level::critical;
-        return spdlog::level::off;
-    }
-    static std::shared_ptr<spdlog::logger> gen_logger(const LoggerParam& param) {
-        std::vector<spdlog::sink_ptr> sinks;
-        auto spdlog_level = to_spdlog_level(param.logLevel);
-        sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
-        // if logDir is not empty, create a daily rotating file logger
-        if (!param.logDir.empty()) {
-            std::string path = param.logDir + OS_SEP + param.logName;
-            sinks.push_back(std::make_shared<spdlog::sinks::daily_file_sink_mt>(path, 0, 0, false, param.maxRetentionDays));
-        }
-        auto logger = std::make_shared<spdlog::logger>(param.logName, sinks.begin(), sinks.end());
-        logger->set_level(spdlog_level);
 
-        // log_level, datetime, thread_id, file_name, line_num, message
-        // eg: D25-0627 01:08:45.513 T44956 TextureManager.cpp:43] Cleaning up textures
-        logger->set_pattern("%^%L%$%C-%m%d %T.%e T%t %s:%#] %v");
+namespace nexusflow {
+namespace logger {
 
-        // glog style log format.
-        // eg: D0627 01:13:20.856707 45548 TextureManager.cpp:43] Cleaning up textures
-        // logger->set_pattern("%^%L%$%m%d %H:%M:%S.%f %t %s:%#] %v");
+using LogLevel = ::nexusflow::log::Level;
+using LoggerParam = ::nexusflow::log::LoggerParam;
 
-        // 更详细的pattern.
-        // eg: [2025-06-27 01:16:27.088] [debug  ] [thread 43712] [TextureManager.cpp:43] Cleaning up textures
-        // logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%-7l%$] [thread %t] [%s:%#] %v");
+using ::nexusflow::log::GetLogLevel;
+using ::nexusflow::log::InitializeGlobalLogger;
+using ::nexusflow::log::IsLevelEnabled;
+using ::nexusflow::log::SetLogLevel;
 
-        return logger;
-    }
-    static void set_default_logger(LoggerParam&& logParam) {
-        auto logger = gen_logger(logParam);
-        spdlog::set_default_logger(logger);
-        spdlog::flush_on(to_spdlog_level(logParam.logLevel));
-        spdlog::flush_every(std::chrono::seconds(1));
-    }
-};
-// inline (not static) so this helper has external linkage; a static function in a
-// header warns as "unreferenced" in every TU that does not call it (MSVC C4505).
-inline void InitializeGlobalLogger(LoggerParam logParam = {}) {
-    // if no logParam is provided, use default log level and no file logger
-    LoggerGenerator::set_default_logger(std::move(logParam));
-}
-}} // namespace nexusflow::logger
+}  // namespace logger
+}  // namespace nexusflow

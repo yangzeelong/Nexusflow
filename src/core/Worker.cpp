@@ -156,7 +156,7 @@ void Worker::RunFusion() {
     // timestamps come from system_clock, so they cannot be compared against the
     // steady-clock "now" used for the timeout (that comparison never fired).
     std::unordered_map<uint64_t, uint64_t> cacheArrivalMs;
-    const int expectedInputCount = m_inputQueueMap.size(); // Expected number of inputs.
+    const std::size_t expectedInputCount = m_inputQueueMap.size(); // Expected number of inputs.
 
     // Partial fused messages are dropped after this many milliseconds.
     const uint64_t timeoutMs = static_cast<uint64_t>(m_fusionTimeout.count());
