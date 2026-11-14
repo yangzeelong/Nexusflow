@@ -1,6 +1,8 @@
+#include <nexusflow/Config.hpp>
 #include <nexusflow/ErrorCode.hpp>
 #include <nexusflow/Message.hpp>
 #include <nexusflow/Module.hpp>
+#include <nexusflow/ModuleFactory.hpp>
 #include <nexusflow/Pipeline.hpp>
 #include <nexusflow/PipelineBuilder.hpp>
 
@@ -58,6 +60,26 @@ TEST(PipelineOrderTest, InitFollowsGraphEdgesAndDeInitReversesThem) {
     ASSERT_EQ(pipeline->DeInit(), ErrorCode::SUCCESS);
     const std::vector<std::string> expectedAfterDeInit{"first", "second", "third", "third", "second", "first"};
     EXPECT_EQ(order, expectedAfterDeInit);
+}
+
+// A module whose Configure() rejects its configuration.
+class ConfigFailingModule : public Module {
+public:
+    explicit ConfigFailingModule(const std::string& name) : Module(name) {}
+
+    ErrorCode Configure(const Config& config) override {
+        (void)config;
+        return ErrorCode::FAILURE;
+    }
+
+    void Process(Message& inputMessage) override { (void)inputMessage; }
+};
+
+TEST(PipelineOrderTest, ModuleFactoryRejectsModulesWhoseConfigureFails) {
+    ModuleFactory::GetInstance().Register<ConfigFailingModule>("ConfigFailingModule");
+    const std::shared_ptr<Module> module =
+        ModuleFactory::GetInstance().CreateModule("ConfigFailingModule", "config_failing", Config());
+    EXPECT_EQ(module, nullptr);
 }
 
 } // namespace
