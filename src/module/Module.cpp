@@ -20,6 +20,7 @@ Module::~Module() {
 };
 
 ErrorCode Module::Configure(const Config& config) {
+    (void)config; // the base implementation does not need any settings
     // Initialize the module.
     LOG_TRACE("Module '{}' initializing...", m_moduleName);
     return ErrorCode::SUCCESS;

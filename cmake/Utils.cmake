@@ -20,3 +20,12 @@ function(separate_files_by_suffix SUFFIX INPUT_LIST OUT_REGULAR_FILES OUT_MATCHE
     set(${OUT_REGULAR_FILES} ${local_regular} PARENT_SCOPE)
     set(${OUT_MATCHED_FILES} ${local_matched} PARENT_SCOPE)
 endfunction()
+
+# Enable a stricter warning set on one of our own targets (never on third-party targets).
+function(nexusflow_enable_warnings TARGET)
+    if(MSVC)
+        target_compile_options(${TARGET} PRIVATE /W4)
+    else()
+        target_compile_options(${TARGET} PRIVATE -Wall -Wextra)
+    endif()
+endfunction()

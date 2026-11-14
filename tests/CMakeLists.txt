@@ -7,9 +7,10 @@ endif()
 
 
 
-file(GLOB_RECURSE CUR_TEST_SOURCES "**Test.cpp")
+file(GLOB_RECURSE CUR_TEST_SOURCES CONFIGURE_DEPENDS "**Test.cpp")
 
 add_executable(nexusflow_tests gtest_main.cpp ${CUR_TEST_SOURCES} ${ALL_TEST_SOURCES})
+nexusflow_enable_warnings(nexusflow_tests)
 
 target_link_libraries(nexusflow_tests PRIVATE nexusflow GTest::gtest)
 

@@ -66,7 +66,9 @@ struct InferenceMessage {
 };
 
 // --- Message Convert ---
-static InferenceMessage ConvertDecoderMessageToInferenceMessage(const DecoderMessage& decoderMessage) {
+// inline (not static): a header helper with internal linkage warns as unreferenced (MSVC C4505)
+// in every TU that does not call it.
+inline InferenceMessage ConvertDecoderMessageToInferenceMessage(const DecoderMessage& decoderMessage) {
     InferenceMessage inferenceMessage;
     inferenceMessage.videoFrame = decoderMessage.videoFrame;
     inferenceMessage.boxes = std::vector<Box>();
