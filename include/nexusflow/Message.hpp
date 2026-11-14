@@ -21,7 +21,36 @@ struct MessageMeta {
     uint64_t messageId = 0; // The unique identifier for the message
     uint64_t timestamp = 0; // The timestamp when the message was created
     std::string sourceName; // The name of the source of the message
-    std::map<std::string, double> moduleTimingMs;
+
+    // Per-stage elapsed time, keyed by module name. The map is shared between
+    // copies of one message and only deep-copied when a stage adds its own entry,
+    // so broadcasting a message no longer clones the whole timing map.
+    std::shared_ptr<std::map<std::string, double>> moduleTimingMs;
+
+    // Read-only view of the accumulated per-stage timings (never null).
+    const std::map<std::string, double>& GetModuleTimings() const {
+        return moduleTimingMs ? *moduleTimingMs : EmptyModuleTimings();
+    }
+
+    // Mutable view: copies on write when other messages still share the map.
+    std::map<std::string, double>& MutableModuleTimings() {
+        if (!moduleTimingMs) {
+            moduleTimingMs = std::make_shared<std::map<std::string, double>>();
+        } else if (moduleTimingMs.use_count() > 1) {
+            moduleTimingMs = std::make_shared<std::map<std::string, double>>(*moduleTimingMs);
+        }
+        return *moduleTimingMs;
+    }
+
+    void SetModuleTimingMs(const std::string& moduleName, double elapsedMs) {
+        MutableModuleTimings()[moduleName] = elapsedMs;
+    }
+
+private:
+    static const std::map<std::string, double>& EmptyModuleTimings() {
+        static const std::map<std::string, double> empty;
+        return empty;
+    }
 };
 
 /**

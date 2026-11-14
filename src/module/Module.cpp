@@ -48,7 +48,7 @@ void Module::ProcessBatch(std::vector<Message>& inputBatchMessages) {
 
 bool Module::ProcessTimed(Message& inputMessage) {
     m_pendingOutputs.clear();
-    m_activeInputTimingMs = inputMessage.GetMetaData().moduleTimingMs;
+    m_activeInputTimingMs = inputMessage.GetMetaData().GetModuleTimings();
     m_processing = true;
     const auto started = std::chrono::steady_clock::now();
 
@@ -79,7 +79,7 @@ bool Module::ProcessTimed(Message& inputMessage) {
 
 void Module::DispatchOutput(const PendingOutput& output, double elapsedMs) {
     Message routed = output.message;
-    auto& timings = routed.MetaData().moduleTimingMs;
+    auto& timings = routed.MetaData().MutableModuleTimings();
     for (const auto& entry : m_activeInputTimingMs) {
         if (timings.find(entry.first) == timings.end()) {
             timings[entry.first] = entry.second;

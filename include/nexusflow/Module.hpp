@@ -90,7 +90,7 @@ public:
      *
      * Workers must call this method instead of Process() directly. Outputs
      * emitted during the invocation are held until Process() returns, then
-     * receive this module's elapsed time in MessageMeta::moduleTimingMs.
+     * receive this module's elapsed time in MessageMeta::GetModuleTimings().
      * @return true if the invocation emitted at least one output message.
      */
     bool ProcessTimed(Message& inputMessage);

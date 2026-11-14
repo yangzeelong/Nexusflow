@@ -50,7 +50,7 @@ void Sink::Process(nexusflow::Message& inputMessage) {
 
     ResultPacket packet;
     packet.message = *message;
-    packet.moduleTimingsMs = inputMessage.GetMetaData().moduleTimingMs;
+    packet.moduleTimingsMs = inputMessage.GetMetaData().GetModuleTimings();
     ResultHandler handler;
     {
         std::lock_guard<std::mutex> lock(m_mutex);
