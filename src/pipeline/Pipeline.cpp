@@ -33,13 +33,14 @@ Pipeline::~Pipeline() {
     }
 }
 
-void Pipeline::InitWithGraph(std::unique_ptr<Graph> graph) {
+ErrorCode Pipeline::InitWithGraph(std::unique_ptr<Graph> graph) {
+    if (!m_pImpl) {
+        return ErrorCode::UNINITIALIZED_ERROR;
+    }
     if (!graph) {
         LOG_ERROR("Pipeline::InitWithGraph received an empty graph.");
-        if (m_pImpl) {
-            m_pImpl->graphReady = false;
-        }
-        return;
+        m_pImpl->graphReady = false;
+        return ErrorCode::UNINITIALIZED_ERROR;
     }
     LOG_DEBUG("Initializing pipeline with graph, graph={}", graph->toString());
     m_pImpl->graph = std::move(graph);
@@ -48,6 +49,7 @@ void Pipeline::InitWithGraph(std::unique_ptr<Graph> graph) {
         LOG_ERROR("Pipeline graph initialization failed, code={}", static_cast<int>(code));
         m_pImpl->graphReady = false;
     }
+    return code;
 }
 
 // --- Public APIs ---
@@ -59,8 +61,7 @@ std::unique_ptr<Pipeline> Pipeline::CreateFromYaml(const std::string& configPath
     }
 
     auto pipeline = std::unique_ptr<Pipeline>(new Pipeline());
-    pipeline->InitWithGraph(std::move(graph));
-    if (!pipeline->m_pImpl->graphReady) {
+    if (pipeline->InitWithGraph(std::move(graph)) != ErrorCode::SUCCESS) {
         return nullptr;
     }
     return pipeline;
