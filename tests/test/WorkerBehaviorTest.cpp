@@ -6,6 +6,8 @@
 
 #include <gtest/gtest.h>
 
+#include <spdlog/spdlog.h>
+
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -16,6 +18,22 @@
 namespace {
 
 using namespace nexusflow;
+
+// Temporarily raises the log level so an expected error message is not printed
+// into the test output. Restores the previous level when it goes out of scope.
+class ScopedLogSilencer {
+public:
+    explicit ScopedLogSilencer(spdlog::level::level_enum level) : m_previous(spdlog::default_logger()->level()) {
+        spdlog::set_level(level);
+    }
+    ~ScopedLogSilencer() { spdlog::set_level(m_previous); }
+
+    ScopedLogSilencer(const ScopedLogSilencer&) = delete;
+    ScopedLogSilencer& operator=(const ScopedLogSilencer&) = delete;
+
+private:
+    spdlog::level::level_enum m_previous;
+};
 
 // Emits one message only when told to, so ProcessTimed can be checked for both
 // outcomes without a pipeline.
@@ -82,6 +100,10 @@ TEST(WorkerBehaviorTest, ProcessTimedReportsWhetherItProducedOutput) {
 }
 
 TEST(WorkerBehaviorTest, ThrowingModuleDoesNotKillTheWorker) {
+    // The module failure below is expected, so keep the error-level log out of
+    // the test output.
+    const ScopedLogSilencer silenceExpectedError(spdlog::level::off);
+
     auto source = std::make_shared<ThrowingSourceModule>("throwing_source");
     auto sink = std::make_shared<CountingSinkModule>("sink");
     auto pipeline = PipelineBuilder()
