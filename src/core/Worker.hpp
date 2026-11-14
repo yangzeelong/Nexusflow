@@ -36,16 +36,19 @@ public:
     Worker& operator=(const Worker&) = delete;
 
     /**
-     * @brief Starts the worker's thread.
-     * @return An ErrorCode indicating the result of the operation.
-     */
-    ErrorCode Start();
-
-    /**
-     * @brief Signals the worker thread to stop and waits for it to join.
-     * @return An ErrorCode indicating the result of the operation.
+     * @brief Signals the worker thread to stop.
+     * @note The thread itself is owned by ModuleActor. This only flips the flag
+     *       that WorkLoop() observes; ModuleActor joins the thread in its own
+     *       Stop(). Calling it more than once is harmless.
+     * @return Always ErrorCode::SUCCESS.
      */
     ErrorCode Stop();
+
+    /**
+     * @brief Clears the stop flag so a (re)started thread keeps working.
+     * ModuleActor calls this right before spawning the worker thread.
+     */
+    void Reset();
 
     // Setter and getter for the input queue map.
     void AddQueue(const std::string& name, ViewPtr<MessageQueue> queue) {

@@ -38,6 +38,10 @@ std::shared_ptr<ActorNode> Pipeline::Impl::GetOrCreateActorNode(const std::share
 }
 
 ErrorCode Pipeline::Impl::Init() {
+    if (!graph) {
+        LOG_ERROR("Cannot initialize a pipeline without a graph.");
+        return ErrorCode::UNINITIALIZED_ERROR;
+    }
     LOG_TRACE("Try init pipeline with graph, [graphName={}]", graph->getName());
 
     auto edgeList = graph->toEdgeListBFS();
@@ -74,6 +78,7 @@ ErrorCode Pipeline::Impl::Init() {
     CHECK(actorModuleMap.size() == actorOrderedNodes.size(), "actorModuleMap size != actorOrderedNodes size, [{} != {}]",
           actorModuleMap.size(), actorOrderedNodes.size());
 
+    graphReady = true;
     return ErrorCode::SUCCESS;
 }
 

@@ -27,6 +27,12 @@ public:
 
     std::set<std::shared_ptr<ActorNode>> actorOrderedNodes;
 
+    // Lifecycle bookkeeping so Pipeline can be defensive instead of relying on
+    // the caller to hit Init/Start/Stop/DeInit in exactly the right order.
+    bool graphReady = false;
+    bool initialized = false;
+    bool started = false;
+
     ErrorCode Init();
 
 private:

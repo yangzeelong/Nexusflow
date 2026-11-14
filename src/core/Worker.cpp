@@ -17,36 +17,23 @@ Worker::Worker(const std::shared_ptr<Module>& modulePtr, const ViewPtr<Config>& 
 }
 
 Worker::~Worker() {
-    // Signal the worker to stop.
+    // Signal the worker to stop. Joining the thread is ModuleActor's job; this
+    // only guarantees the loop is asked to exit before the Worker is freed.
     LOG_TRACE("Destroying worker for module: {}", m_modulePtr->GetModuleName());
-    if (!m_stopFlag) {
-        LOG_WARN("Worker is still running, stopping it now.");
+    if (!m_stopFlag.load()) {
+        LOG_WARN("Worker for module '{}' is still running when destroyed, requesting stop.", m_modulePtr->GetModuleName());
         Stop();
     }
 }
 
-ErrorCode Worker::Start() {
-    // Check if the worker is already running.
-    if (m_stopFlag.load()) {
-        LOG_WARN("Worker is already running.");
-        return ErrorCode::FAILURE;
-    }
-
-    // Start the worker thread.
-    m_stopFlag.store(false);
-    return ErrorCode::SUCCESS;
-}
+void Worker::Reset() { m_stopFlag.store(false); }
 
 ErrorCode Worker::Stop() {
-    // Check if the worker is already stopped.
-    if (!m_stopFlag.load()) {
-        LOG_TRACE("Stopping worker for module: {}", m_modulePtr->GetModuleName());
-        m_stopFlag.store(true);
-        return ErrorCode::SUCCESS;
-    } else {
-        LOG_WARN("Worker is already stopped.");
-        return ErrorCode::FAILURE;
-    }
+    // Idempotent by design: the pipeline and the owning ModuleActor can both
+    // request a stop (for example from ~Pipeline after an explicit Stop).
+    LOG_TRACE("Stopping worker for module: {}", m_modulePtr->GetModuleName());
+    m_stopFlag.store(true);
+    return ErrorCode::SUCCESS;
 }
 
 void Worker::WorkLoop() {
