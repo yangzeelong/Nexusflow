@@ -1,7 +1,8 @@
 #include "Worker.hpp"
 #include "nexusflow/ErrorCode.hpp"
 #include "nexusflow/Message.hpp"
-#include "utils/logging.hpp"
+#include "nexusflow/Logging.hpp"
+#include "nexusflow/TimerRegistry.hpp"
 #include <chrono>
 #include <memory>
 #include <string>
@@ -72,15 +73,36 @@ void Worker::WorkLoop() {
         assert(!isSourceModule);
         RunFusion(); // Run the fusion module.
     } else {
+        // Per-module timing splits each loop iteration into the time spent
+        // waiting for work and the time spent processing it. The difference
+        // tells a starved stage (waiting on upstream) from a bottleneck stage
+        // (busy), which is what pipeline-level throughput tuning needs.
+        // Labels carry the driven module so the profile reads
+        // "Worker.Wait.<Module>" / "Worker.Process.<Module>".
+        const std::string moduleName = m_modulePtr->GetModuleName();
+
         while (!m_stopFlag.load()) {
             if (isSourceModule) {
                 // Source Module Loop
                 Message emptyMessage;
-                m_modulePtr->Process(emptyMessage);
+                TIMER_SCOPE_AVERAGE_MS("Worker.Process." + moduleName, 5000);
+                m_modulePtr->ProcessTimed(emptyMessage);
             } else {
                 // Sink or Filter/Transformer Module Loop
-                auto batchMessage = PullBatchMessage(kMaxBatchSize, kBatchTimeout);
+                std::vector<Message> batchMessage;
+                {
+                    TIMER_SCOPE_AVERAGE_MS("Worker.Wait." + moduleName, 5000);
+                    batchMessage = PullBatchMessage(kMaxBatchSize, kBatchTimeout);
+                }
+                if (batchMessage.empty()) continue;
+
+                // One item per message in the batch, so the reported cost is
+                // per message rather than per dispatch.
+                TIMER_START_AVERAGE_MS("Worker.Process." + moduleName, 5000);
+                TIMER_INCREMENT_AVERAGE("Worker.Process." + moduleName,
+                                        static_cast<uint64_t>(batchMessage.size()));
                 m_modulePtr->ProcessBatch(batchMessage);
+                TIMER_STOP_AVERAGE("Worker.Process." + moduleName);
             }
         }
     }

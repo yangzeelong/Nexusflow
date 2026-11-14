@@ -18,6 +18,21 @@ The core idea of the framework is to decompose complex processing workflows into
 
 ---
 
+## Extensions
+
+Optional functionality ships as extensions under `extensions/`. The framework
+core does not depend on any of them: an extension is built only when it is
+listed in `-DNEXUSFLOW_EXTENSIONS=<name>` (semicolon-separated for several).
+
+| Extension | Description | Requirements |
+| --- | --- | --- |
+| [`aifootball`](extensions/aifootball/README.md) | AI-Football algorithm SDK (`aifootball_sdk`), offline demo app, and the Python touch-evaluation toolchain. | CUDA, TensorRT, FFmpeg |
+
+See [`extensions/README.md`](extensions/README.md) for the extension layout and
+how to add a new one.
+
+---
+
 ## Quick Start
 
 The following example demonstrates how to build a pipeline with four modules: one input node distributes data to two parallel processing nodes, and one output node gathers the results.
@@ -66,7 +81,7 @@ graph:
 #include "my_module/MockInputModule.hpp"    // Include your custom module headers
 #include "my_module/MockProcessModule.hpp"
 #include "my_module/MockOutputModule.hpp"
-#include "utils/logging.hpp"               // Your logging utility
+#include "nexusflow/Logging.hpp"               // Your logging utility
 
 #include <iostream>
 #include <chrono>
@@ -283,22 +298,31 @@ That's it! You can now use `class: "MultiplierModule"` in your `graph.yaml` file
 
 ## Building the Project
 
-This project uses CMake for building.
+The project uses CMake (3.15+) and is written in C++14.
 
 ```bash
-# 1. Create a build directory
-mkdir build
-cd build
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel 16
+```
 
-# 2. Run CMake to configure the project
-# Assumes dependencies are managed by CMake's FetchContent or are system-installed.
-cmake ..
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `WITH_TESTING` | `ON` | Build the GoogleTest suite (`nexusflow_tests`). |
+| `WITH_EXAMPLES` | `ON` | Build the example pipelines under `examples/`. |
+| `WITH_BENCHMARK` | `ON` | Build the Google Benchmark targets under `benchmarks/`. |
+| `NEXUSFLOW_EXTENSIONS` | empty | Semicolon-separated extensions to build from `extensions/<name>` (see [Extensions](#extensions)). |
 
-# 3. Compile the project
-make -j$(nproc)
+Third-party dependencies (spdlog, yaml-cpp, jsoncpp, GoogleTest, Google
+Benchmark) are pulled in with CMake `FetchContent`. On an offline machine point
+`FETCHCONTENT_SOURCE_DIR_<NAME>` at local checkouts.
 
-# 4. Run the example
-./examples/nexusflow_example path/to/your/graph.yaml
+With the default Unix generator artifacts go to `build/bin/` and `build/lib/`;
+multi-config generators (Visual Studio) use per-configuration directories such
+as `build/src/Release/`.
+
+```bash
+./build/bin/nexusflow_tests                                        # unit tests
+./build/bin/nexusflow_how_to_use examples/1-how-to-use/config.yaml
 ```
 
 ## Contributing
