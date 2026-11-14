@@ -1,0 +1,441 @@
+#ifndef MY_MESSAGE_HPP
+#define MY_MESSAGE_HPP
+
+#include <nexusflow/Message.hpp>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <cstddef>
+#include <cstdint>
+#include <utility>
+#include <vector>
+
+// --- Base ---
+struct VideoFrame {
+    uint32_t frameId = 0;
+    std::string frameData; // Owned contiguous RGB24 bytes for file/app input.
+    const uint8_t* externalData = nullptr; // Non-owning SDK input view.
+    std::size_t externalDataBytes = 0;
+    std::shared_ptr<const void> externalOwner; // Optional lifetime anchor.
+    int width = 0;
+    int height = 0;
+    int channels = 3; // RGB24 = 3 channels
+
+    const uint8_t* Data() const {
+        if (externalData != nullptr) return externalData;
+        return reinterpret_cast<const uint8_t*>(frameData.data());
+    }
+
+    std::size_t DataSize() const {
+        return externalData != nullptr ? externalDataBytes : frameData.size();
+    }
+};
+
+// A decoded frame is immutable after publication. All pipeline messages share
+// the same frame object, so message copies do not copy pixels.
+using VideoFramePtr = std::shared_ptr<const VideoFrame>;
+
+struct Rect {
+    int x0 = 0;
+    int y0 = 0;
+    int x1 = 0;
+    int y1 = 0;
+};
+
+struct Box {
+    // --- Detection
+    Rect rect;
+    int label = 0;
+    float score = 0.0f;
+    std::string labelName;
+
+    // --- Classification
+    int clsLabel = 0;
+    float clsScore = 0.0f;
+    std::string clsLabelName;
+};
+
+// --- Legacy compressed-stream messages ---
+// Kept for compatibility with older graph configs and downstream experiments.
+struct StreamInfo {
+    int codecId = 0;      // AVCodecID value
+    int width = 0;
+    int height = 0;
+    int pixFmt = 0;       // AVPixelFormat value
+    std::string extradata; // Codec extradata (SPS/PPS for H.264, etc.)
+    double fps = 25.0;
+    int timeBaseNum = 0;
+    int timeBaseDen = 1;
+};
+
+// --- Messages ---
+
+// PacketMessage: compressed packet plus optional stream metadata.
+struct PacketMessage {
+    std::string packetData; // Compressed NAL units
+    int64_t pts = 0;        // Presentation timestamp (in stream time_base)
+    int64_t dts = 0;        // Decode timestamp
+    bool isKeyFrame = false;
+    bool isEnd = false;     // EOF marker
+    uint32_t packetIndex = 0;
+
+    // Stream info: populated on first packet only
+    bool hasStreamInfo = false;
+    StreamInfo streamInfo;
+
+    std::string toString() const {
+        std::ostringstream oss;
+        oss << "[PacketMessage] = {idx=" << packetIndex
+            << ", size=" << packetData.size() << "B"
+            << ", pts=" << pts << ", dts=" << dts
+            << ", key=" << isKeyFrame
+            << ", end=" << isEnd;
+        if (hasStreamInfo) {
+            oss << ", stream=" << streamInfo.width << "x" << streamInfo.height
+                << " fps=" << streamInfo.fps;
+        }
+        oss << "}";
+        return oss.str();
+    }
+};
+
+// FrameMessage: decoded frame input for RFDetrDetector and downstream modules.
+struct FrameMessage {
+    VideoFramePtr videoFrame;
+    bool isKeyFrame = false;
+    bool isEnd = false;
+    uint64_t timestamp = 0; // Wall-clock ms
+    double timestampSec = 0.0; // PTS-based seconds
+
+    std::string toString() const {
+        std::ostringstream oss;
+        oss << "[FrameMessage] = {frameId=" << (videoFrame ? videoFrame->frameId : 0)
+            << ", " << (videoFrame ? videoFrame->width : 0) << "x"
+            << (videoFrame ? videoFrame->height : 0)
+            << ", ch=" << (videoFrame ? videoFrame->channels : 0)
+            << ", dataSize=" << (videoFrame ? videoFrame->DataSize() : 0) << "B"
+            << ", isKeyFrame=" << isKeyFrame
+            << ", isEnd=" << isEnd
+            << ", ts=" << timestamp
+            << ", tsSec=" << timestampSec << "}";
+        return oss.str();
+    }
+};
+
+// --- Detection (output of the RFDetrDetector module) ---
+//
+// Uses float coordinates in the *original frame* space so that downstream
+// modules (tracker, pose estimator, ROI filter) do not need to know about
+// the resize transform applied inside the detector.
+struct Detection {
+    float x0 = 0.0f;
+    float y0 = 0.0f;
+    float x1 = 0.0f;
+    float y1 = 0.0f;
+    float score = 0.0f;
+    int   classId = -1;   // RF-DETR COCO index (1 = person, 37 = sports ball, ...)
+    int   trackId = -1;   // Filled by tracker; -1 for raw detections
+
+    float width()  const { return x1 - x0; }
+    float height() const { return y1 - y0; }
+    float centerX() const { return 0.5f * (x0 + x1); }
+    float centerY() const { return 0.5f * (y0 + y1); }
+    float area()    const { return width() * height(); }
+};
+
+// Raw per-class detection counts, useful for downstream diagnostics /
+// JSONL 'raw_detection_counts' field (mirrors Python observations.py).
+struct DetectionCounts {
+    int total = 0;
+    int person = 0;
+    int ball = 0;
+    int cone = 0;      // 只有三分类微调模型会非零（coneClassId 配置生效时）
+};
+
+// Ball detection dropped by the application-level box filters, carrying which
+// filter rejected it so a debug overlay can colour it the way Python does.
+struct RejectedBall {
+    Detection detection;
+    bool failedConfidence = false;
+    bool failedSize = false;
+};
+
+struct DetectionMessage {
+    VideoFramePtr videoFrame;              // Shared immutable decoded frame
+    std::vector<Detection> detections;     // Detections in *original frame* coords
+    DetectionCounts rawCounts;             // Counts before threshold / class filtering
+    bool isEnd = false;
+    double timestampSec = 0.0;
+    uint64_t timestamp = 0;
+
+    std::string toString() const {
+        std::ostringstream oss;
+        oss << "[DetectionMessage] = {frameId=" << (videoFrame ? videoFrame->frameId : 0)
+            << ", " << (videoFrame ? videoFrame->width : 0) << "x"
+            << (videoFrame ? videoFrame->height : 0)
+            << ", dets=" << detections.size()
+            << ", person=" << rawCounts.person
+            << ", ball=" << rawCounts.ball
+            << ", cone=" << rawCounts.cone
+            << ", isEnd=" << isEnd
+            << ", tsSec=" << timestampSec << "}";
+        return oss.str();
+    }
+};
+
+// Backward compatibility alias
+using DecoderMessage = FrameMessage;
+
+// --- Tracked detection (output of ByteTracker) ---
+//
+// Same as DetectionMessage but each Detection carries a valid trackId (>= 0)
+// and track state info. Non-person detections (e.g. sports ball) are passed
+// through with trackId = -1 unless a dedicated ball tracker assigns one.
+enum class TrackState : int {
+    New      = 0,
+    Tracked  = 1,
+    Lost     = 2,
+    Removed  = 3,
+};
+
+struct TrackedDetectionMessage {
+    VideoFramePtr videoFrame;
+    std::vector<Detection> persons;   // person detections with trackId assigned
+    std::vector<Detection> balls;     // ball detections (trackId may be -1 here)
+    // Ball detections rejected by the application-level confidence/size
+    // filter. Python evaluates these after pose estimation and may rescue
+    // them when they have sufficient person/foot support.
+    std::vector<RejectedBall> rejectedBalls;
+    /// 锥检测（classId == coneClassId）。跟踪阶段没有锥通道，所以它只是**原样带下去**，
+    /// 供调试/渲染画框用（不进跟踪、不影响 filteredCounts）。
+    std::vector<Detection> cones;
+    DetectionCounts rawCounts;        // copied from the upstream detector
+    // Counts after ROI and application-level detection filters. Unlike
+    // persons.size(), this remains stable when tracking suppresses a track.
+    DetectionCounts filteredCounts;
+    int   activeTrackCount = 0;       // # of tracks in Tracked state this frame
+    int   lostTrackCount   = 0;       // # of tracks in Lost state this frame
+    bool  isEnd = false;
+    double timestampSec = 0.0;
+    uint64_t timestamp = 0;
+
+    std::string toString() const {
+        std::ostringstream oss;
+        oss << "[TrackedDetectionMessage] = {frameId=" << (videoFrame ? videoFrame->frameId : 0)
+            << ", persons=" << persons.size()
+            << ", balls=" << balls.size()
+            << ", active=" << activeTrackCount
+            << ", lost=" << lostTrackCount
+            << ", isEnd=" << isEnd
+            << ", tsSec=" << timestampSec << "}";
+        return oss.str();
+    }
+};
+
+// --- Pose estimation types ---
+//
+// Project 26-keypoint layout (mirrors AI-Football observations.py):
+//   0..22  : wholebody keypoints from RTMPose (COCO-WholeBody 23)
+//   23     : neck    (virtual, midpoint of left_shoulder/right_shoulder)
+//   24     : pelvis  (virtual, midpoint of left_hip/right_hip)
+//   25     : thorax  (virtual, midpoint of neck/pelvis)
+//
+// Names array is exposed via GetProject26Names() for downstream JSONL writer.
+constexpr int kProjectKeypointCount = 26;
+constexpr int kWholebodyKeypointCount = 23;
+
+enum class KeypointState : int {
+    Missing  = 0,
+    Observed = 1,
+    Virtual  = 2,
+};
+
+struct Keypoint2D {
+    float x = 0.0f;
+    float y = 0.0f;
+    float confidence = 0.0f;
+    KeypointState state = KeypointState::Missing;
+};
+
+struct PersonPose {
+    int   trackId = -1;
+    // Pose crop box in original frame coords: the detector box expanded by the
+    // pose estimator. Python's estimator hands this box back and the
+    // observation writer publishes it, so it is the public person bbox.
+    float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+    // Detector box the crop above was expanded from. Python draws this one as
+    // the person detection box, so the renderer needs it too.
+    float detectorX0 = 0, detectorY0 = 0, detectorX1 = 0, detectorY1 = 0;
+    float detectionConfidence = 0.0f;
+    // 26 keypoints in *original frame* coordinates.
+    Keypoint2D keypoints[kProjectKeypointCount];
+};
+
+struct PoseMessage {
+    VideoFramePtr videoFrame;
+    std::vector<PersonPose> persons;
+    std::vector<Detection>  balls;      // pass-through from upstream tracker
+    std::vector<RejectedBall> rejectedBalls;
+    /// 锥检测（classId == coneClassId）。跟踪阶段没有锥通道，所以它只是**原样带下去**，
+    /// 供调试/渲染画框用（不进跟踪、不影响 filteredCounts）。
+    std::vector<Detection> cones;
+    DetectionCounts rawCounts;
+    DetectionCounts filteredCounts;
+    int   activeTrackCount = 0;
+    int   lostTrackCount   = 0;
+    bool  isEnd = false;
+    double timestampSec = 0.0;
+    uint64_t timestamp = 0;
+
+    std::string toString() const {
+        std::ostringstream oss;
+        oss << "[PoseMessage] = {frameId=" << (videoFrame ? videoFrame->frameId : 0)
+            << ", persons=" << persons.size()
+            << ", balls=" << balls.size()
+            << ", isEnd=" << isEnd
+            << ", tsSec=" << timestampSec << "}";
+        return oss.str();
+    }
+};
+
+// Returns the canonical 26-keypoint name list.
+inline const char* const* GetProject26Names() {
+    static const char* const names[kProjectKeypointCount] = {
+        "nose", "left_eye", "right_eye", "left_ear", "right_ear",
+        "left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+        "left_wrist", "right_wrist", "left_hip", "right_hip",
+        "left_knee", "right_knee", "left_ankle", "right_ankle",
+        "left_big_toe", "left_small_toe", "left_heel",
+        "right_big_toe", "right_small_toe", "right_heel",
+        "neck", "pelvis", "thorax",
+    };
+    return names;
+}
+
+// Wholebody(23) -> Project(26) index mapping. -1 means "no source" (virtual).
+inline const int* GetWholebodyToProject26() {
+    static const int map[kProjectKeypointCount] = {
+         0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12,
+        13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+        -1, -1, -1,   // neck / pelvis / thorax (virtual)
+    };
+    return map;
+}
+
+// --- Smoothed pose (output of KeypointSmoother) ---
+//
+// Same shape as PoseMessage but keypoints have been temporally smoothed.
+// Kept as a distinct type so downstream modules can distinguish raw vs.
+// smoothed poses at compile time.
+struct SmoothedPoseMessage {
+    VideoFramePtr videoFrame;
+    std::vector<PersonPose> persons;
+    std::vector<Detection>  balls;
+    std::vector<RejectedBall> rejectedBalls;
+    /// 锥检测（classId == coneClassId）。跟踪阶段没有锥通道，所以它只是**原样带下去**，
+    /// 供调试/渲染画框用（不进跟踪、不影响 filteredCounts）。
+    std::vector<Detection> cones;
+    DetectionCounts rawCounts;
+    DetectionCounts filteredCounts;
+    int   activeTrackCount = 0;
+    int   lostTrackCount   = 0;
+    bool  isEnd = false;
+    double timestampSec = 0.0;
+    uint64_t timestamp = 0;
+
+    std::string toString() const {
+        std::ostringstream oss;
+        oss << "[SmoothedPoseMessage] = {frameId=" << (videoFrame ? videoFrame->frameId : 0)
+            << ", persons=" << persons.size()
+            << ", balls=" << balls.size()
+            << ", isEnd=" << isEnd
+            << ", tsSec=" << timestampSec << "}";
+        return oss.str();
+    }
+};
+
+// --- Football (ball) tracking ---
+//
+// BallTrackState mirrors Python tracking.py:
+//   Observed  : a detection was matched this frame
+//   Predicted : no detection, position extrapolated from velocity
+//   Lost      : missed for too long, no prediction emitted
+enum class BallTrackState : int {
+    Lost      = 0,
+    Predicted = 1,
+    Observed  = 2,
+};
+
+struct BallTrack {
+    int   trackId = -1;
+    float x0 = 0, y0 = 0, x1 = 0, y1 = 0;   // bbox (original frame coords)
+    float centerX = 0, centerY = 0;
+    float confidence = 0.0f;                 // decayed when predicted
+    float vx = 0, vy = 0;                    // estimated velocity (px/frame)
+    int   missedFrames = 0;                  // consecutive frames without detection
+    BallTrackState state = BallTrackState::Lost;
+};
+
+struct BallTrackMessage {
+    VideoFramePtr videoFrame;
+    std::vector<PersonPose> persons;   // pass-through from smoother
+    std::vector<BallTrack>  balls;     // tracked ball(s) this frame
+    // Ball detections the pipeline worked from: kept by the filters, plus the
+    // rejected ones the tracker rescued. Python draws exactly this set as
+    // detection boxes before it marks the tracked ball.
+    std::vector<Detection>  ballDetections;
+    DetectionCounts rawCounts;
+    // Diagnostics for the renderer: what the ROI never saw, what the box
+    // filters dropped, and how many of those the tracker brought back.
+    DetectionCounts filteredCounts;
+    DetectionCounts detectorCounts;
+    std::vector<RejectedBall> rejectedBalls;
+    /// 锥检测（classId == coneClassId）。跟踪阶段没有锥通道，所以它只是**原样带下去**，
+    /// 供调试/渲染画框用（不进跟踪、不影响 filteredCounts）。
+    std::vector<Detection> cones;
+    int   rescuedBallCount = 0;
+    int   activeTrackCount = 0;
+    int   lostTrackCount   = 0;
+    bool  isEnd = false;
+    double timestampSec = 0.0;
+    uint64_t timestamp = 0;
+
+    std::string toString() const {
+        std::ostringstream oss;
+        oss << "[BallTrackMessage] = {frameId=" << (videoFrame ? videoFrame->frameId : 0)
+            << ", persons=" << persons.size()
+            << ", balls=" << balls.size()
+            << ", isEnd=" << isEnd
+            << ", tsSec=" << timestampSec << "}";
+        return oss.str();
+    }
+};
+
+struct InferenceMessage {
+    VideoFramePtr videoFrame;
+    std::vector<Box> boxes;
+
+    std::string toString() const {
+        std::ostringstream oss;
+        oss << "[InferenceMessage] = {frameId=" << (videoFrame ? videoFrame->frameId : 0)
+            << ", boxes=[" << std::endl;
+        for (const auto& box : boxes) {
+            oss << "\tx0=" << box.rect.x0 << ", y0=" << box.rect.y0 << ", x1=" << box.rect.x1 << ", y1=" << box.rect.y1
+                << ", score=" << box.score << ", label=" << box.label << ", labelName=" << box.labelName
+                << ", clsScore=" << box.clsScore << ", clsLabel=" << box.clsLabel << ", clsLabelName=" << box.clsLabelName
+                << std::endl;
+        }
+        oss << "}";
+        return oss.str();
+    }
+};
+
+// --- Message Convert ---
+static InferenceMessage ConvertFrameMessageToInferenceMessage(const FrameMessage& frameMessage) {
+    InferenceMessage inferenceMessage;
+    inferenceMessage.videoFrame = frameMessage.videoFrame;
+    inferenceMessage.boxes = std::vector<Box>();
+    return inferenceMessage;
+}
+
+#endif

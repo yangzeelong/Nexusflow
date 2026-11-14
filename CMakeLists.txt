@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.15 FATAL_ERROR)
 
-project(PipelineDAG VERSION 1.0.0 LANGUAGES CXX)
+project(Nexusflow VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_EXTENSIONS ON)
@@ -11,6 +11,7 @@ set(INSTALL_ROOT ${PROJECT_ROOT}/install)
 ### Define options
 option(WITH_TESTING "Enable testing" ON)
 option(WITH_BENCHMARK "Enable benchmark" ON)
+option(WITH_EXAMPLES "Enable examples" ON)
 
 if(NOT DEFINED CMAKE_BUILD_TYPE)
   message(STATUS "No build type specified, defaulting to Release")
@@ -32,9 +33,7 @@ set_property(GLOBAL PROPERTY GLOBAL_TEST_SOURCES "")
 message(STATUS "Initialized global test sources list.")
 
 add_subdirectory(src)
-add_subdirectory(examples)
 
-# 
 if(WITH_TESTING)
   enable_testing()
   add_subdirectory(tests)
@@ -43,3 +42,25 @@ endif()
 if(WITH_BENCHMARK)
   add_subdirectory(benchmarks)
 endif()
+
+if (WITH_EXAMPLES)
+  add_subdirectory(examples)
+endif()
+
+### Extensions
+# Opt-in, self-contained subprojects under extensions/<name>. Enable one or
+# more with -DNEXUSFLOW_EXTENSIONS="foo;bar". The framework itself
+# contains no extension-specific code; each extension ships its own
+# CMakeLists.txt, sources, tools and documentation.
+set(NEXUSFLOW_EXTENSIONS "" CACHE STRING
+    "Semicolon-separated list of extensions to build from extensions/<name>")
+
+foreach(ext IN LISTS NEXUSFLOW_EXTENSIONS)
+  if(NOT EXISTS "${PROJECT_ROOT}/extensions/${ext}/CMakeLists.txt")
+    message(FATAL_ERROR
+      "NEXUSFLOW_EXTENSIONS entry '${ext}' is unknown: "
+      "${PROJECT_ROOT}/extensions/${ext}/CMakeLists.txt does not exist")
+  endif()
+  message(STATUS "Enabling extension: ${ext}")
+  add_subdirectory("extensions/${ext}" "extensions/${ext}")
+endforeach()

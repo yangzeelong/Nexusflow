@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <type_traits>
+#include <stdexcept>
 
 template <class T>
 struct is_always_false : std::false_type {};

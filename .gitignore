@@ -1,9 +1,19 @@
 .*
 build
+build-*
+install/
 !README.md
 !.clang-format
 !.clangd
 !.gitignore
 !CMakeLists.txt
 
+# Runtime and conversion artifacts.
+output/
+__pycache__/
 
+# Local test media.
+data/
+
+# tmp files
+tmp
