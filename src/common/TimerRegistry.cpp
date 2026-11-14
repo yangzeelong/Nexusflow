@@ -5,6 +5,7 @@
 #include "nexusflow/Logging.hpp"
 
 namespace nexusflow {
+namespace profiling {
 namespace {
 
 struct ActiveTimer {
@@ -353,4 +354,5 @@ TimerRegistry::ScopedTimer& TimerRegistry::ScopedTimer::operator=(
     return *this;
 }
 
+} // namespace profiling
 } // namespace nexusflow

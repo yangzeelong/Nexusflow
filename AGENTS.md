@@ -12,7 +12,7 @@
 核心概念：`Message`（Copy-On-Write）、`Module`（每个模块一个工作线程）、
 `Pipeline`（YAML 声明式建图 / `PipelineBuilder` 编程式建图）、`Dispatcher`
 （每个订阅者各拿一份 Message 拷贝；Message 拷贝只是 shared_ptr 引用计数）、
-`TimerRegistry`（单轴计时 + p95 滑窗）。
+`TimerRegistry`（命名空间 `nexusflow::profiling`，单轴计时 + p95 滑窗）。
 
 可选功能（AI-Football 算法流水线等）放在 `extensions/<name>/`，通过
 `-DNEXUSFLOW_EXTENSIONS=<name>` 启用。**框架核心不得依赖任何扩展**：核心
@@ -41,7 +41,7 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | 消息分发 | `src/dispatcher/Dispatcher.hpp` |
 | YAML → DAG、拓扑排序 | `src/base/Graph.hpp`、`src/base/GraphUtils.*` |
 | 模块注册 | `include/nexusflow/ModuleFactory.hpp` |
-| 计时器（p95、单轴） | `include/nexusflow/TimerRegistry.hpp`、`src/common/TimerRegistry.*` |
+| 计时器 / profile（`nexusflow::profiling`，p95、单轴） | `include/nexusflow/TimerRegistry.hpp`、`src/common/TimerRegistry.cpp` |
 | 容器/工具（Any、队列、Optional、ViewPtr） | `include/nexusflow/common/*.hpp` |
 | 日志 | `include/nexusflow/Logging.hpp` |
 | 单测 | `tests/test/*.cpp`、`src/base/test/`、`src/common/test/` |

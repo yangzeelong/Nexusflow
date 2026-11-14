@@ -14,7 +14,7 @@
 
 | 路径 | 作用 |
 | --- | --- |
-| `include/nexusflow/`、`src/` | 框架本体（模块、消息、流水线、计时器 `src/common/TimerRegistry.*`） |
+| `include/nexusflow/`、`src/` | 框架本体（模块、消息、流水线、计时器 `include/nexusflow/TimerRegistry.hpp`，命名空间 `nexusflow::profiling`） |
 | `extensions/aifootball/` | 算法 SDK：检测/跟踪/姿态/平滑模块 + 公开 API `include/aifootball/AIFootball.hpp` |
 | `extensions/aifootball/app/` | demo app（`main.cpp`、`VideoRenderer.*`、`JsonlWriter.*`、`VideoReader.*`、`AppConfig.*`）、`config/` 配置目录；**只跑基模**：写 `observations.jsonl` + 可选渲染，触球判定与 `touches.jsonl` 已移到 Python |
 | `extensions/aifootball/touch_eval/` | 触球业务逻辑（**Python**：`py/` uv 工程，包 `touch_eval`，含判定/评估/报告与差分测试）+ 720p 配置 + `run_touch_eval.sh`（app 只跑基模写 `observations.jsonl`，C++ 侧判定实现已删除）；`tools/plot_touch_sweep.py` 逐点重跑评估画 PR 曲线（`sweep_*.csv` / `pr_*.png`）、`tools/touch_view_report.py` 打印事件级/过程级（`--coverage` 才加覆盖式诊断）、`tools/render_touch_review.py` 烧录复核视频、`tools/render_pr_errors.py` 把每个 FP/FN 渲染成带中文原因的对照图 + `pr_review/index.md`；`--playback` 另出整段 1× 实时的 `pr_review/touch_playback.mp4`（顶部中文原因、底部 pred/gt 双时间轴，TP 绿/FP 红/FN 黄）。需要中文字体，缺失会提示 `apt-get install -y fonts-wqy-microhei`，见其 `README.md` |
@@ -254,7 +254,7 @@ git -C /home/hx1/yzl/Work/AI-Football show <rev>:code/tracking.py > /tmp/trackin
 | demo：渲染/JSONL/解码/配置解析 | `extensions/aifootball/app/{VideoRenderer,JsonlWriter,VideoReader,AppConfig}.{hpp,cpp}`、`extensions/aifootball/app/main.cpp` |
 | 配置与批量脚本 | `extensions/aifootball/app/config/`、`extensions/aifootball/tools/run_all_configs.sh` |
 | 扩展构建 | `extensions/aifootball/CMakeLists.txt`、`extensions/aifootball/app/CMakeLists.txt`、`extensions/aifootball/benchmarks/CMakeLists.txt` |
-| 计时器（框架） | `include/nexusflow/TimerRegistry.hpp`、`src/common/TimerRegistry.*` |
+| 计时器（框架，`nexusflow::profiling`） | `include/nexusflow/TimerRegistry.hpp`、`src/common/TimerRegistry.cpp` |
 
 ---
 

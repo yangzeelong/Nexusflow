@@ -13,6 +13,14 @@
 
 namespace nexusflow {
 
+/// Profiling and diagnostics utilities.
+///
+/// The timer registry is public on purpose: applications and extensions
+/// instrument their own stages with the TIMER_* macros and print the collected
+/// profile. It is a diagnostics surface, not a pipeline primitive, so it is not
+/// on the same compatibility footing as Message/Module/Pipeline.
+namespace profiling {
+
 /// One timer's cumulative numbers. Every duration describes a single item, so
 /// avg/p95/min/max are directly comparable without knowing how the timer was
 /// instrumented. An item is whatever the instrumented code counted; a
@@ -218,6 +226,7 @@ private:
     bool m_active = false;
 };
 
+} // namespace profiling
 } // namespace nexusflow
 
 // ---------------------------------------------------------------------------
@@ -278,21 +287,21 @@ private:
 // --- Per-call timing -------------------------------------------------------
 
 #define TIMER_START(name) \
-    ::nexusflow::TimerRegistry::Instance().StartAverage( \
-        (name), ::nexusflow::TimerPrintPolicy::EachCall(), __FILE__, __LINE__)
+    ::nexusflow::profiling::TimerRegistry::Instance().StartAverage( \
+        (name), ::nexusflow::profiling::TimerPrintPolicy::EachCall(), __FILE__, __LINE__)
 
 #define TIMER_STOP(name) \
-    ::nexusflow::TimerRegistry::Instance().EndAverage((name))
+    ::nexusflow::profiling::TimerRegistry::Instance().EndAverage((name))
 
 // --- Aggregated timing -----------------------------------------------------
 
 #define TIMER_START_AVERAGE_MS(name, ms) \
-    ::nexusflow::TimerRegistry::Instance().StartAverage( \
-        (name), ::nexusflow::TimerPrintPolicy::EveryMs(ms), __FILE__, __LINE__)
+    ::nexusflow::profiling::TimerRegistry::Instance().StartAverage( \
+        (name), ::nexusflow::profiling::TimerPrintPolicy::EveryMs(ms), __FILE__, __LINE__)
 
 #define TIMER_START_AVERAGE_N(name, calls) \
-    ::nexusflow::TimerRegistry::Instance().StartAverage( \
-        (name), ::nexusflow::TimerPrintPolicy::EveryCalls(calls), \
+    ::nexusflow::profiling::TimerRegistry::Instance().StartAverage( \
+        (name), ::nexusflow::profiling::TimerPrintPolicy::EveryCalls(calls), \
         __FILE__, __LINE__)
 
 #define TIMER_STOP_AVERAGE(name) TIMER_STOP(name)
@@ -300,13 +309,13 @@ private:
 /// Declare that the measurement in progress covers `items` more items, so the
 /// report stays per item. Without it a measurement counts as one item.
 #define TIMER_INCREMENT_AVERAGE(name, items) \
-    ::nexusflow::TimerRegistry::Instance().IncrementAverage((name), (items))
+    ::nexusflow::profiling::TimerRegistry::Instance().IncrementAverage((name), (items))
 
 // --- Windowed timing -------------------------------------------------------
 
 #define TIMER_START_INTERVAL(name, calls) \
-    ::nexusflow::TimerRegistry::Instance().StartAverage( \
-        (name), ::nexusflow::TimerPrintPolicy::Interval(calls), \
+    ::nexusflow::profiling::TimerRegistry::Instance().StartAverage( \
+        (name), ::nexusflow::profiling::TimerPrintPolicy::Interval(calls), \
         __FILE__, __LINE__)
 
 #define TIMER_STOP_INTERVAL(name) TIMER_STOP(name)
@@ -315,19 +324,19 @@ private:
 
 #define TIMER_SCOPE(name) \
     auto NEXUSFLOW_TIMER_CONCAT(nexusflowTimer_, __LINE__) = \
-        ::nexusflow::TimerRegistry::Instance().Scope( \
-            (name), ::nexusflow::TimerPrintPolicy::EachCall(), \
+        ::nexusflow::profiling::TimerRegistry::Instance().Scope( \
+            (name), ::nexusflow::profiling::TimerPrintPolicy::EachCall(), \
             __FILE__, __LINE__)
 
 #define TIMER_SCOPE_AVERAGE_MS(name, ms) \
     auto NEXUSFLOW_TIMER_CONCAT(nexusflowTimer_, __LINE__) = \
-        ::nexusflow::TimerRegistry::Instance().Scope( \
-            (name), ::nexusflow::TimerPrintPolicy::EveryMs(ms), \
+        ::nexusflow::profiling::TimerRegistry::Instance().Scope( \
+            (name), ::nexusflow::profiling::TimerPrintPolicy::EveryMs(ms), \
             __FILE__, __LINE__)
 
 /// Record an already measured duration.
 #define TIMER_ADD_ITEMS(name, ms, items) \
-    ::nexusflow::TimerRegistry::Instance().AddItems( \
+    ::nexusflow::profiling::TimerRegistry::Instance().AddItems( \
         (name), (ms), (items), __FILE__, __LINE__)
 
 #endif

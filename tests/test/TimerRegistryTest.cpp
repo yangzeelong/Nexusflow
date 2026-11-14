@@ -6,9 +6,9 @@
 #include <thread>
 #include <vector>
 
-using nexusflow::TimerPrintPolicy;
-using nexusflow::TimerRegistry;
-using nexusflow::TimerStats;
+using nexusflow::profiling::TimerPrintPolicy;
+using nexusflow::profiling::TimerRegistry;
+using nexusflow::profiling::TimerStats;
 
 TEST(TimerRegistryTest, CountsOneItemPerMeasurementByDefault) {
     auto& registry = TimerRegistry::Instance();
