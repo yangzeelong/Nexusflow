@@ -109,6 +109,9 @@ private:
     std::chrono::milliseconds m_fusionTimeout{60000};
     int m_sourceIdleMs = 1;
     bool m_syncInputs = false;
+    // Profiling costs a name copy and a registry lock per measurement; the
+    // work loop only pays it for modules that opt in.
+    bool m_profileTimers = false;
     // Timer labels are stable per module; building them once keeps the work loop free
     // of a string concatenation on every iteration.
     std::string m_processTimerName;
