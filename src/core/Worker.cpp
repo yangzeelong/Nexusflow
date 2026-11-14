@@ -120,7 +120,12 @@ void Worker::RunFusion() {
     // TODO: 如何优化呢，现在只有单Batch, 并且需要测试下内存占用.
 
     // Key: message id, value: map of source module name and message.
-    std::unordered_map<int, std::unordered_map<std::string, Message>> messageCache; // Cache for messages.
+    // Keyed by the full 64-bit message id (this used to be int and truncated it).
+    std::unordered_map<uint64_t, std::unordered_map<std::string, Message>> messageCache;
+    // First-seen time per message id, in steady-clock milliseconds. Message
+    // timestamps come from system_clock, so they cannot be compared against the
+    // steady-clock "now" used for the timeout (that comparison never fired).
+    std::unordered_map<uint64_t, uint64_t> cacheArrivalMs;
     const int expectedInputCount = m_inputQueueMap.size(); // Expected number of inputs.
 
     // Define a timeout period.
@@ -141,6 +146,9 @@ void Worker::RunFusion() {
                 auto messageMeta = message.GetMetaData();
                 auto messageId = messageMeta.messageId;
                 auto& sourceModuleName = messageMeta.sourceName;
+                if (cacheArrivalMs.find(messageId) == cacheArrivalMs.end()) {
+                    cacheArrivalMs[messageId] = currentTimeMs;
+                }
                 messageCache[messageId][sourceModuleName] = message;
                 LOG_DEBUG("Message with ID: {} received from source module: {}", messageId, sourceModuleName);
             }
@@ -166,13 +174,18 @@ void Worker::RunFusion() {
                     LOG_ERROR("Module '{}' threw an unknown exception while processing a fused batch.",
                               m_modulePtr->GetModuleName());
                 }
+                cacheArrivalMs.erase(messageId);
                 it = messageCache.erase(it); // remove the message from cache
-            } else if (!messageMap.empty() && messageMap.begin()->second.GetMetaData().timestamp < (currentTimeMs - timeoutMs)) {
-                // timeout
-                LOG_WARN("Timeout for message with ID: {}, will be removed from cache", messageId);
-                it = messageCache.erase(it);
             } else {
-                ++it;
+                const auto arrivalIt = cacheArrivalMs.find(messageId);
+                const bool timedOut = arrivalIt != cacheArrivalMs.end() && currentTimeMs - arrivalIt->second >= timeoutMs;
+                if (timedOut) {
+                    LOG_WARN("Timeout for message with ID: {}, will be removed from cache", messageId);
+                    cacheArrivalMs.erase(arrivalIt);
+                    it = messageCache.erase(it);
+                } else {
+                    ++it;
+                }
             }
         }
 
