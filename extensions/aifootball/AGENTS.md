@@ -160,7 +160,7 @@ python3 extensions/aifootball/tools/render_jsonl.py --observations <dir>/observa
 ## 4. 测试与性能
 
 ```bash
-./build/bin/nexusflow_tests        # 单测（当前 72 个用例）
+./build/bin/nexusflow_tests        # 单测（当前 74 个用例）
 ```
 
 - 改完 SDK 算法/渲染**必须**跑；**不要为了让测试通过而改测试语义**。
@@ -260,7 +260,7 @@ git -C /home/hx1/yzl/Work/AI-Football show <rev>:code/tracking.py > /tmp/trackin
 
 ## 9. 最近做过的变更（别重复劳动，也别踩回去）
 
-- **扩展化（2026-11）**：aifootball 从 `sdk/` + `examples/` 迁到 `extensions/aifootball/`（93 个文件，`git mv` 保留历史）；框架移除 `WITH_AIFOOTBALL_SDK`，改用 `-DNEXUSFLOW_EXTENSIONS=aifootball`；扩展 CMake 自包含（CUDA/TensorRT/FFmpeg 渐进降级），Windows 上框架 72 单测与 SDK 空壳编译均已验证。
+- **扩展化（2026-11）**：aifootball 从 `sdk/` + `examples/` 迁到 `extensions/aifootball/`（93 个文件，`git mv` 保留历史）；框架移除 `WITH_AIFOOTBALL_SDK`，改用 `-DNEXUSFLOW_EXTENSIONS=aifootball`；扩展 CMake 自包含（CUDA/TensorRT/FFmpeg 渐进降级），Windows 上框架 74 单测与 SDK 空壳编译均已验证。
 - **球**：可输出全部候选（`keepOnlyBestBall: false` → `track_id=-1` 的未跟踪观测）；被过滤球按姿态支持救援（`rescued`）；选球改为打分（置信度+人脚支持−背景惩罚）。
 - **渲染**：ROI 多边形、person/球标签、被过滤球按原因着色、计数面板、`fps=<处理速率>`、渲染耗时单列（`render: X ms/frame`，与端到端 `per frame` 区分）。
 - **数据对齐**：`persons[].bbox` 改为姿态裁剪框（与 Python 比例 1.0000，关键点零变化）；`detectionBbox` 只服务渲染。
