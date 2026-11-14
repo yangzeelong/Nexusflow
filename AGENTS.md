@@ -21,9 +21,9 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | 路径 | 作用 |
 | --- | --- |
 | `include/nexusflow/` | 公开头文件（Message/Module/Pipeline/PipelineBuilder/ModuleFactory/TimerRegistry/Logging…） |
-| `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（TimerRegistry 实现与测试） |
+| `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（TimerRegistry、Logging 实现与测试） |
 | `include/nexusflow/common/` | 公开的 header-only 容器/工具：`Any`、`ConcurrentQueue`、`Optional`、`ViewPtr`（`Nexusflow::nexusflow_common` INTERFACE target） |
-| `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 79 个，见 §3） |
+| `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 91 个，见 §3） |
 | `examples/` | 3 个纯框架示例：`1-how-to-use`、`2-linear-vision-pipline`、`3-joined-vision-pipline` |
 | `benchmarks/` | Google Benchmark 基准（`nexusflow_benchmarks`） |
 | `cmake/` | `include.cmake`（第三方依赖 include）、`Summary.cmake`、`3rdparty/*.cmake`（FetchContent 定义） |
@@ -43,7 +43,7 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | 模块注册 | `include/nexusflow/ModuleFactory.hpp` |
 | 计时器 / profile（`nexusflow::profiling`，p95、单轴） | `include/nexusflow/TimerRegistry.hpp`、`src/common/TimerRegistry.cpp` |
 | 容器/工具（Any、队列、Optional、ViewPtr） | `include/nexusflow/common/*.hpp` |
-| 日志 | `include/nexusflow/Logging.hpp` |
+| 日志 | `include/nexusflow/Logging.hpp`（公开门面：Level/LoggerParam/LogRecord/LogSink/SetSink，不 include spdlog）+ `src/common/Logging.cpp`（spdlog 后端） |
 | 单测 | `tests/test/*.cpp`、`src/base/test/`、`src/common/test/` |
 
 ---
@@ -106,8 +106,8 @@ cmake --build build --config Release --parallel 16
 ./build/tests/Release/nexusflow_tests.exe
 ```
 
-实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **79 tests
-from 14 suites，PASSED 79**（MSVC 19.40）。
+实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **91 tests
+from 17 suites，PASSED 91**（MSVC 19.40）。
 
 ---
 
@@ -117,7 +117,7 @@ from 14 suites，PASSED 79**（MSVC 19.40）。
 ./build/bin/nexusflow_tests      # Unix；Windows 见上（build/tests/Release/）
 ```
 
-- 当前 79 个用例（14 个 suite）：消息 7、计时器 5、图 7、Optional 23（TestOptional 18 + OptionalTest 2 + OptionalThrowingTest 3）、Any 5、ConcurrentQueue 7、Pipeline 生命周期 5、Pipeline 错误路径 10、Pipeline 图序 1、Pipeline 计时 1、MessageMeta 3、ModuleFactory 1、Worker 行为 4。
+- 当前 91 个用例（17 个 suite）：消息 7、计时器 5、图 7、Optional 23（TestOptional 18 + OptionalTest 2 + OptionalThrowingTest 3）、Any 5、ConcurrentQueue 7、Dispatcher 4、日志 6、Pipeline 生命周期 5、Pipeline 错误路径 10、Pipeline 图序 2、Pipeline 计时 1、MessageMeta 3、Worker 行为 4、Worker 启动 2。
 - 改框架（Message/Module/Pipeline/Dispatcher/Graph/Timer）**必须**跑；不要为了
   让测试通过而改测试语义。
 

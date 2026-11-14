@@ -10,7 +10,8 @@
 #include "../../src/core/Worker.hpp"
 #include <nexusflow/Config.hpp>
 
-#include <spdlog/spdlog.h>
+#include <nexusflow/Config.hpp>
+#include <nexusflow/Logging.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -29,16 +30,16 @@ using namespace nexusflow;
 // into the test output. Restores the previous level when it goes out of scope.
 class ScopedLogSilencer {
 public:
-    explicit ScopedLogSilencer(spdlog::level::level_enum level) : m_previous(spdlog::default_logger()->level()) {
-        spdlog::set_level(level);
+    explicit ScopedLogSilencer(nexusflow::log::Level level) : m_previous(nexusflow::log::GetLogLevel()) {
+        nexusflow::log::SetLogLevel(level);
     }
-    ~ScopedLogSilencer() { spdlog::set_level(m_previous); }
+    ~ScopedLogSilencer() { nexusflow::log::SetLogLevel(m_previous); }
 
     ScopedLogSilencer(const ScopedLogSilencer&) = delete;
     ScopedLogSilencer& operator=(const ScopedLogSilencer&) = delete;
 
 private:
-    spdlog::level::level_enum m_previous;
+    nexusflow::log::Level m_previous;
 };
 
 // Emits one message only when told to, so ProcessTimed can be checked for both
@@ -108,7 +109,7 @@ TEST(WorkerBehaviorTest, ProcessTimedReportsWhetherItProducedOutput) {
 TEST(WorkerBehaviorTest, ThrowingModuleDoesNotKillTheWorker) {
     // The module failure below is expected, so keep the error-level log out of
     // the test output.
-    const ScopedLogSilencer silenceExpectedError(spdlog::level::off);
+    const ScopedLogSilencer silenceExpectedError(nexusflow::log::Level::OFF);
 
     auto source = std::make_shared<ThrowingSourceModule>("throwing_source");
     auto sink = std::make_shared<CountingSinkModule>("sink");
