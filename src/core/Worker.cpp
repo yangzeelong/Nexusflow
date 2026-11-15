@@ -4,6 +4,7 @@
 #include "nexusflow/Logging.hpp"
 #include "nexusflow/PipelineContext.hpp"
 #include "nexusflow/TimerRegistry.hpp"
+#include <algorithm>
 #include <chrono>
 #include <memory>
 #include <string>
@@ -14,22 +15,35 @@ namespace nexusflow { namespace core {
 
 namespace {
 
-// TimerRegistry::ScopedTimer copies the timer name and takes the registry lock
-// on destruction. Worker profiling is off by default, so only pay that cost for
-// modules that opt in with "profileTimers: true".
+// A profiled loop iteration measures through a timer handle interned once, so
+// enabling "profileTimers: true" costs the clock and a registry lock per
+// measurement rather than a name copy and a hash. When profiling is off the
+// scope holds no timer at all and touches nothing.
 class OptionalScopeTimer {
 public:
     OptionalScopeTimer(bool enabled, ::nexusflow::profiling::TimerRegistry& registry,
-                       const std::string& name, uint64_t windowMs, const char* file, int line) {
-        if (!enabled) {
-            return;
+                       ::nexusflow::profiling::TimerRegistry::TimerHandle handle,
+                       uint64_t windowMs, const char* file, int line)
+        : m_registry(enabled ? &registry : nullptr), m_handle(handle) {
+        if (m_registry != nullptr && m_handle != 0) {
+            m_registry->StartAverage(
+                m_handle, ::nexusflow::profiling::TimerPrintPolicy::EveryMs(windowMs),
+                file, line);
         }
-        m_timer.reset(new ::nexusflow::profiling::TimerRegistry::ScopedTimer(
-            registry.Scope(name, ::nexusflow::profiling::TimerPrintPolicy::EveryMs(windowMs), file, line)));
     }
 
+    ~OptionalScopeTimer() {
+        if (m_registry != nullptr && m_handle != 0) {
+            m_registry->EndAverage(m_handle);
+        }
+    }
+
+    OptionalScopeTimer(const OptionalScopeTimer&) = delete;
+    OptionalScopeTimer& operator=(const OptionalScopeTimer&) = delete;
+
 private:
-    std::unique_ptr<::nexusflow::profiling::TimerRegistry::ScopedTimer> m_timer;
+    ::nexusflow::profiling::TimerRegistry* m_registry = nullptr;
+    ::nexusflow::profiling::TimerRegistry::TimerHandle m_handle = 0;
 };
 
 }  // namespace
@@ -100,6 +114,12 @@ void Worker::LoadConfig() {
     // Timer labels are built once here instead of on every loop iteration.
     m_processTimerName = "Worker.Process." + moduleName;
     m_waitTimerName = "Worker.Wait." + moduleName;
+    // Interning resolves each label to a handle once, so a profiled iteration
+    // only touches the clock and the aggregate, never the name.
+    if (m_profileTimers) {
+        m_processTimer = Profiler().Intern(m_processTimerName);
+        m_waitTimer = Profiler().Intern(m_waitTimerName);
+    }
 }
 
 ErrorCode Worker::Stop() {
@@ -139,55 +159,63 @@ void Worker::WorkLoop() {
         // produced no output, yield briefly instead of spinning a core at 100%.
 
         while (!m_stopFlag.load()) {
-            if (isSourceModule) {
-                // Source Module Loop
-                Message emptyMessage;
-                bool produced = false;
-                try {
-                    OptionalScopeTimer processTimer(m_profileTimers, Profiler(), m_processTimerName, 5000,
-                                                   __FILE__, __LINE__);
-                    produced = m_modulePtr->ProcessTimed(emptyMessage);
-                    if (produced) {
-                        ++m_processedCount;
+            // Queue plumbing sits outside the module calls; a stray exception here
+            // must not take the worker thread (and with it the process) down.
+            try {
+                if (isSourceModule) {
+                    // Source Module Loop
+                    Message emptyMessage;
+                    bool produced = false;
+                    try {
+                        OptionalScopeTimer processTimer(m_profileTimers, Profiler(), m_processTimer, 5000,
+                                                        __FILE__, __LINE__);
+                        produced = m_modulePtr->ProcessTimed(emptyMessage);
+                        if (produced) {
+                            ++m_processedCount;
+                        }
+                    } catch (const std::exception& e) {
+                        LOG_ERROR("Module '{}' threw while processing: {}", moduleName, e.what());
+                    } catch (...) {
+                        LOG_ERROR("Module '{}' threw an unknown exception while processing.", moduleName);
                     }
-                } catch (const std::exception& e) {
-                    LOG_ERROR("Module '{}' threw while processing: {}", moduleName, e.what());
-                } catch (...) {
-                    LOG_ERROR("Module '{}' threw an unknown exception while processing.", moduleName);
-                }
-                if (!produced && m_sourceIdleMs > 0) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(m_sourceIdleMs));
-                }
-            } else {
-                // Sink or Filter/Transformer Module Loop
-                std::vector<Message> batchMessage;
-                {
-                    OptionalScopeTimer waitTimer(m_profileTimers, Profiler(), m_waitTimerName, 5000,
-                                                __FILE__, __LINE__);
-                    batchMessage = PullBatchMessage(m_maxBatchSize, m_batchTimeout);
-                }
-                if (batchMessage.empty()) continue;
+                    if (!produced && m_sourceIdleMs > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(m_sourceIdleMs));
+                    }
+                } else {
+                    // Sink or Filter/Transformer Module Loop
+                    std::vector<Message> batchMessage;
+                    {
+                        OptionalScopeTimer waitTimer(m_profileTimers, Profiler(), m_waitTimer, 5000,
+                                                     __FILE__, __LINE__);
+                        batchMessage = PullBatchMessage(m_maxBatchSize, m_batchTimeout);
+                    }
+                    if (batchMessage.empty()) continue;
 
-                // One item per message in the batch, so the reported cost is
-                // per message rather than per dispatch.
-                if (m_profileTimers) {
-                    Profiler().StartAverage(m_processTimerName,
-                                            ::nexusflow::profiling::TimerPrintPolicy::EveryMs(5000),
-                                            __FILE__, __LINE__);
-                    Profiler().IncrementAverage(m_processTimerName,
-                                                static_cast<uint64_t>(batchMessage.size()));
+                    // One item per message in the batch, so the reported cost is
+                    // per message rather than per dispatch.
+                    if (m_profileTimers) {
+                        Profiler().StartAverage(m_processTimer,
+                                                ::nexusflow::profiling::TimerPrintPolicy::EveryMs(5000),
+                                                __FILE__, __LINE__);
+                        Profiler().IncrementAverage(m_processTimer,
+                                                    static_cast<uint64_t>(batchMessage.size()));
+                    }
+                    try {
+                        m_modulePtr->ProcessBatch(batchMessage);
+                        m_processedCount.fetch_add(batchMessage.size(), std::memory_order_relaxed);
+                    } catch (const std::exception& e) {
+                        LOG_ERROR("Module '{}' threw while processing a batch: {}", moduleName, e.what());
+                    } catch (...) {
+                        LOG_ERROR("Module '{}' threw an unknown exception while processing a batch.", moduleName);
+                    }
+                    if (m_profileTimers) {
+                        Profiler().EndAverage(m_processTimer);
+                    }
                 }
-                try {
-                    m_modulePtr->ProcessBatch(batchMessage);
-                    m_processedCount.fetch_add(batchMessage.size(), std::memory_order_relaxed);
-                } catch (const std::exception& e) {
-                    LOG_ERROR("Module '{}' threw while processing a batch: {}", moduleName, e.what());
-                } catch (...) {
-                    LOG_ERROR("Module '{}' threw an unknown exception while processing a batch.", moduleName);
-                }
-                if (m_profileTimers) {
-                    Profiler().EndAverage(m_processTimerName);
-                }
+            } catch (const std::exception& e) {
+                LOG_ERROR("Worker for module '{}' caught an unexpected exception: {}", moduleName, e.what());
+            } catch (...) {
+                LOG_ERROR("Worker for module '{}' caught an unknown unexpected exception.", moduleName);
             }
         }
     }
@@ -197,7 +225,7 @@ void Worker::WorkLoop() {
 }
 
 void Worker::RunFusion() {
-    // TODO: 如何优化呢，现在只有单Batch, 并且需要测试下内存占用.
+    // TODO: 濡備綍浼樺寲鍛紝鐜板湪鍙湁鍗旴atch, 骞朵笖闇€瑕佹祴璇曚笅鍐呭瓨鍗犵敤.
 
     // Key: message id, value: map of source module name and message.
     // Keyed by the full 64-bit message id (this used to be int and truncated it).
@@ -210,6 +238,15 @@ void Worker::RunFusion() {
 
     // Partial fused messages are dropped after this many milliseconds.
     const uint64_t timeoutMs = static_cast<uint64_t>(m_fusionTimeout.count());
+
+    // One message id is in flight per input at most, so the cache stays close to
+    // this size; reserving keeps the per-message inserts off the rehash path.
+    messageCache.reserve(std::max<std::size_t>(expectedInputCount, 8));
+    cacheArrivalMs.reserve(std::max<std::size_t>(expectedInputCount, 8));
+
+    // Reused across iterations: a fresh vector per fused message meant one heap
+    // allocation per fused batch.
+    std::vector<Message> fusedMessageVec;
 
     while (!m_stopFlag.load()) {
         uint64_t currentTimeMs =
@@ -225,9 +262,7 @@ void Worker::RunFusion() {
                 auto messageMeta = message.GetMetaData();
                 auto messageId = messageMeta.messageId;
                 auto& sourceModuleName = messageMeta.sourceName;
-                if (cacheArrivalMs.find(messageId) == cacheArrivalMs.end()) {
-                    cacheArrivalMs[messageId] = currentTimeMs;
-                }
+                cacheArrivalMs.emplace(messageId, currentTimeMs); // Keeps the first-seen time.
                 messageCache[messageId][sourceModuleName] = message;
                 LOG_DEBUG("Message with ID: {} received from source module: {}", messageId, sourceModuleName);
             }
@@ -243,8 +278,8 @@ void Worker::RunFusion() {
                       m_modulePtr->GetModuleName());
             if (messageMap.size() == expectedInputCount) {
                 // Construct a fused message and concat to batchMessage.
-                auto fusedMessage = MakeMessage(std::move(messageMap));
-                std::vector<Message> fusedMessageVec{fusedMessage};
+                fusedMessageVec.clear();
+                fusedMessageVec.push_back(MakeMessage(std::move(messageMap)));
                 try {
                     m_modulePtr->ProcessBatch(fusedMessageVec); // process the fused message
                     m_processedCount.fetch_add(fusedMessageVec.size(), std::memory_order_relaxed);

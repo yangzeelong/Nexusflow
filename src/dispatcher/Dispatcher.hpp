@@ -41,6 +41,15 @@ public:
     void Broadcast(const Message& msg);
 
     /**
+     * @brief Broadcasts a message, moving it into the last output queue.
+     * @details The first N-1 subscribers each receive a copy and the last one
+     * receives the moved message, which saves one Message copy per broadcast.
+     * After this call the caller's message is in a moved-from state.
+     * @param msg The message to broadcast.
+     */
+    void Broadcast(Message&& msg);
+
+    /**
      * @brief Sends a message to a specific output queue.
      * @param outputName The name of the output queue to send the message to.
      * @param msg The message to send.

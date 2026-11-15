@@ -138,3 +138,78 @@ TEST(TimerRegistryTest, AggregationIsThreadSafe) {
     EXPECT_DOUBLE_EQ(stats.AvgItemMs(), 2.0 / 3.0);
     EXPECT_DOUBLE_EQ(stats.maxMs, 2.0 / 3.0);
 }
+
+TEST(TimerRegistryTest, InternedHandleAddressesTheSameTimerAsTheName) {
+    auto& registry = TimerRegistry::Instance();
+    registry.Reset();
+
+    const auto handle = registry.Intern("test.handle");
+    ASSERT_NE(handle, 0U);
+    // Interning is idempotent, and an empty name never becomes a timer.
+    EXPECT_EQ(handle, registry.Intern("test.handle"));
+    EXPECT_NE(handle, registry.Intern("test.handle.other"));
+    EXPECT_EQ(registry.Intern(""), 0U);
+
+    // The two families feed the same aggregate: one measurement by handle, one
+    // by name.
+    registry.AddItems(handle, 10.0);
+    registry.AddItems("test.handle", 20.0);
+
+    TimerStats byName;
+    TimerStats byHandle;
+    ASSERT_TRUE(registry.GetStats("test.handle", byName));
+    ASSERT_TRUE(registry.GetStats(handle, byHandle));
+    EXPECT_EQ(byName.items, 2U);
+    EXPECT_EQ(byHandle.items, 2U);
+    EXPECT_DOUBLE_EQ(byHandle.totalMs, 30.0);
+    EXPECT_EQ(byHandle.name, "test.handle");
+    EXPECT_EQ(byHandle.minMs, 10.0);
+    EXPECT_EQ(byHandle.maxMs, 20.0);
+}
+
+TEST(TimerRegistryTest, HandleFormsMeasureAndScopeLikeTheNameForms) {
+    auto& registry = TimerRegistry::Instance();
+    registry.Reset();
+
+    const auto handle = registry.Intern("test.handle.scope");
+    {
+        auto scope = registry.Scope(handle, TimerPrintPolicy::EveryCalls(1000));
+        (void)scope;
+    }
+
+    TimerStats stats;
+    ASSERT_TRUE(registry.GetStats(handle, stats));
+    EXPECT_EQ(stats.items, 1U);
+    EXPECT_GT(stats.totalMs, 0.0);
+
+    // A handle keeps its meaning across a reset, and the next measurement
+    // re-captures the call site exactly as a fresh name would.
+    registry.Reset();
+    EXPECT_FALSE(registry.GetStats(handle, stats));
+    EXPECT_TRUE(registry.Snapshot().empty());
+
+    registry.StartAverage(handle, TimerPrintPolicy::EveryCalls(1000), __FILE__, __LINE__);
+    registry.IncrementAverage(handle, 4);
+    registry.IncrementAverage(handle, 6);
+    registry.EndAverage(handle);
+    ASSERT_TRUE(registry.GetStats(handle, stats));
+    EXPECT_EQ(stats.items, 10U);
+    EXPECT_EQ(stats.file, __FILE__);
+}
+
+TEST(TimerRegistryTest, InvalidHandleIsANoOp) {
+    auto& registry = TimerRegistry::Instance();
+    registry.Reset();
+
+    // 0 is what Intern() returns for an uninterned name; every handle form has
+    // to tolerate it so callers can treat a missing timer as "measure nothing".
+    registry.StartAverage(0U, TimerPrintPolicy::EveryCalls(1));
+    registry.IncrementAverage(0U, 5);
+    EXPECT_DOUBLE_EQ(registry.EndAverage(0U), 0.0);
+    registry.AddItems(0U, 10.0);
+
+    TimerStats stats;
+    EXPECT_FALSE(registry.GetStats(0U, stats));
+    EXPECT_TRUE(registry.Snapshot().empty());
+}
+
