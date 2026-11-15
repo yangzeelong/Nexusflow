@@ -68,7 +68,10 @@ public:
     ErrorCode DeInit();
 
     /**
-     * @brief Returns queue and module counters. Safe to call while the pipeline runs.
+     * @brief Returns edge and module counters. Safe to call while the pipeline runs.
+     * @details The modules are read before the edges, so a reader taking a module
+     * and then the edge it writes into never sees a message that left the module
+     * but has not reached the edge yet.
      */
     PipelineSnapshot GetSnapshot() const;
 

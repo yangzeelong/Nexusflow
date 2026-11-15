@@ -154,26 +154,56 @@ public:
      * @brief Number of messages this worker has processed so far.
      * A source invocation that produced output counts one; batches count their size.
      */
-    std::uint64_t ProcessedCount() const { return m_processedCount.load(std::memory_order_relaxed); }
+    std::uint64_t ProcessedCount() const {
+        ObserveCounters();
+        return m_processedCount;
+    }
 
     /**
      * @brief Messages this worker dropped: outputs a module could not hand to a
      *        downstream queue, plus partial fused messages that hit the fusion
      *        timeout. processed + dropped accounts for everything the module saw.
      */
-    std::uint64_t DroppedCount() const { return m_droppedCount.load(std::memory_order_relaxed); }
+    std::uint64_t DroppedCount() const {
+        ObserveCounters();
+        return m_droppedCount;
+    }
 
-    /// Bumps the drop counter. Public so ModuleActor can report drops that the
-    /// module made on the consumer side of the pipeline (the dispatcher counter
-    /// covers the producer side).
-    void RecordDropped(std::uint64_t count = 1) { m_droppedCount.fetch_add(count, std::memory_order_relaxed); }
+    /// Returns false once a second thread recorded a drop or a failure, i.e.
+    /// once this worker's counters no longer have a single writer.
+    bool CountersAreSingleWriter() const {
+        return m_counterWriters.load(std::memory_order_relaxed) == 1U && m_extraWriters.load(std::memory_order_relaxed) == 0U;
+    }
+
+    /// Bumps the drop counter.
+    /// @details Normally called from this worker's own loop, which is the only
+    /// writer, so the counter is a plain increment. RecordDropped() is public so
+    /// a second thread can report a drop too; when that happens this switches to
+    /// a mutex-protected atomic add and PublishCounters() takes the same lock.
+    /// See the comment on the counter members for why the plain increment is
+    /// worth the extra branch.
+    void RecordDropped(std::uint64_t count = 1) {
+        if (CountersAreSingleWriter()) {
+            m_droppedCount += count;
+            return;
+        }
+        // A second writer exists: fall back to a locked read-modify-write and let
+        // the loop thread take the same lock from now on.
+        m_extraWriters.fetch_add(1, std::memory_order_relaxed);
+        m_counterWriters.store(0, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(m_writerMutex);
+        m_droppedCount += count;
+    }
 
     /**
      * @brief Partial fused messages this worker dropped after the fusion timeout.
      * @details A subset of DroppedCount(), broken out because it is a different
      * failure: the inputs arrived, one of them just arrived too late.
      */
-    std::uint64_t FusionExpiredCount() const { return m_fusionExpiredCount.load(std::memory_order_relaxed); }
+    std::uint64_t FusionExpiredCount() const {
+        ObserveCounters();
+        return m_fusionExpiredCount;
+    }
 
     /**
      * @brief Invocations that threw. processed + dropped + failed accounts for
@@ -181,10 +211,21 @@ public:
      *        nor handed downstream, so without this the two counters would add
      *        up to less than the module's input.
      */
-    std::uint64_t FailedCount() const { return m_failedCount.load(std::memory_order_relaxed); }
+    std::uint64_t FailedCount() const {
+        ObserveCounters();
+        return m_failedCount;
+    }
 
-    /// Bumps the failure counter (one per throwing invocation, not per message).
-    void RecordFailed() { m_failedCount.fetch_add(1, std::memory_order_relaxed); }
+    void RecordFailed() {
+        if (CountersAreSingleWriter()) {
+            ++m_failedCount;
+            return;
+        }
+        m_extraWriters.fetch_add(1, std::memory_order_relaxed);
+        m_counterWriters.store(0, std::memory_order_relaxed);
+        std::lock_guard<std::mutex> lock(m_writerMutex);
+        ++m_failedCount;
+    }
 
     /** @brief Signals the loop to return without joining (used by the drain). */
     /**
@@ -254,11 +295,57 @@ private:
     std::atomic<bool> m_stopFlag{false};
     /// Fusion only: set by the shutdown drain, see RequestDrain().
     std::atomic<bool> m_drainRequested{false};
-    std::atomic<std::uint64_t> m_processedCount{0};
-    std::atomic<std::uint64_t> m_droppedCount{0};
+
+    /*
+     * Counters. Every one of them is written from this worker's own loop, which
+     * is the only thread that runs modules of this worker, so a plain increment
+     * is enough and costs ~0.3 ns instead of the ~3.4 ns a locked read-modify-
+     * write costs (measured on this machine, see docs/telemetry.md). Readers
+     * take snapshots from another thread, so the loop publishes the numbers with
+     * PublishCounters() and every reader calls ObserveCounters(), which is the
+     * matching acquire fence, first.
+     *
+     * RecordDropped()/RecordFailed() are public, so a caller could bump them
+     * from a second thread. The moment that happens m_counterWriters drops to 0
+     * and every writer, the loop included, takes m_writerMutex and uses an
+     * atomic add: correctness first, and the fallback costs nothing while there
+     * is only one writer.
+     */
+    std::uint64_t m_processedCount = 0;
+    std::uint64_t m_droppedCount = 0;
     /// Subset of m_droppedCount: fusion groups dropped after the timeout.
-    std::atomic<std::uint64_t> m_fusionExpiredCount{0};
-    std::atomic<std::uint64_t> m_failedCount{0};
+    std::uint64_t m_fusionExpiredCount = 0;
+    std::uint64_t m_failedCount = 0;
+    /// 1 while the loop thread is the only writer, 0 once anybody else has
+    /// recorded a drop or a failure.
+    std::atomic<unsigned> m_counterWriters{1};
+    std::atomic<unsigned> m_extraWriters{0};
+    mutable std::mutex m_writerMutex;
+
+    /// Acquire-side bookend: everyone who reads a counter loads this first.
+    /// Cheap enough for a snapshot, and it keeps the plain counter's reads from
+    /// being reordered before the writes the loop published.
+    void ObserveCounters() const {
+        if (m_counterWriters.load(std::memory_order_relaxed) == 1U && m_extraWriters.load(std::memory_order_relaxed) == 0U) {
+            std::atomic_thread_fence(std::memory_order_acquire);
+            return;
+        }
+        m_writerMutex.lock();
+        m_writerMutex.unlock();
+        std::atomic_thread_fence(std::memory_order_acquire);
+    }
+
+    /// Publishers everything this worker recorded. Called by the loop thread
+    /// once per iteration; also the release-side bookend for readers.
+    void PublishCounters() const {
+        if (m_counterWriters.load(std::memory_order_relaxed) == 1U && m_extraWriters.load(std::memory_order_relaxed) == 0U) {
+            std::atomic_thread_fence(std::memory_order_seq_cst);
+            return;
+        }
+        m_writerMutex.lock();
+        m_writerMutex.unlock();
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+    }
 
     // Wakes a caller waiting for the loop to leave (see WaitForStopRequest()).
     mutable std::mutex m_loopMutex;

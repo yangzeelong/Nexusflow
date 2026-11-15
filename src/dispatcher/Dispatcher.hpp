@@ -80,7 +80,10 @@ public:
      * the owning module's dropped counter: a queued message that never arrived
      * belongs to the module that tried to send it.
      */
-    std::uint64_t DroppedCount() const { return m_droppedCount.load(std::memory_order_relaxed); }
+    std::uint64_t DroppedCount() const {
+        std::atomic_thread_fence(std::memory_order_acquire);
+        return m_droppedCount;
+    }
 
     /**
      * @brief Returns the edges this dispatcher writes to.
@@ -141,7 +144,10 @@ private:
     }
 
     void RecordDroppedPush(const std::string& outputName) {
-        m_droppedCount.fetch_add(1, std::memory_order_relaxed);
+        // The owning module's worker thread is the only writer, but a drop is
+        // rare enough that the ordering cost does not matter.
+        m_droppedCount += 1;
+        std::atomic_thread_fence(std::memory_order_release);
         if (m_shuttingDown && m_shuttingDown->load(std::memory_order_relaxed)) {
             LOG_DEBUG("Broadcast to output queue {} failed during shutdown: the queue is already closed", outputName);
             return;
@@ -151,7 +157,9 @@ private:
 
     ViewPtr<Config> m_configView;
     std::unordered_map<std::string, ViewPtr<MessageQueue>> m_subscriberMap;
-    std::atomic<std::uint64_t> m_droppedCount{0};
+    /// Only the owning module's worker thread writes this (Broadcast and SendTo
+    /// run there), so it is a plain counter; readers fence in DroppedCount().
+    std::uint64_t m_droppedCount = 0;
     std::atomic<bool>* m_shuttingDown = nullptr;
 };
 

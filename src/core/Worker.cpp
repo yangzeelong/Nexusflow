@@ -186,12 +186,14 @@ void Worker::WorkLoop() {
                         if (produced) {
                             ++m_processedCount;
                         }
+                        // Hand the counters to snapshot readers once per iteration.
+                        PublishCounters();
                     } catch (const std::exception& e) {
                         LOG_ERROR("Module '{}' threw while processing: {}", moduleName, e.what());
-                        m_failedCount.fetch_add(1, std::memory_order_relaxed);
+                        ++m_failedCount;
                     } catch (...) {
                         LOG_ERROR("Module '{}' threw an unknown exception while processing.", moduleName);
-                        m_failedCount.fetch_add(1, std::memory_order_relaxed);
+                        ++m_failedCount;
                     }
                     if (!produced && m_sourceIdleMs > 0) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(m_sourceIdleMs));
@@ -217,13 +219,13 @@ void Worker::WorkLoop() {
                     }
                     try {
                         m_modulePtr->ProcessBatch(batchMessage);
-                        m_processedCount.fetch_add(batchMessage.size(), std::memory_order_relaxed);
+                        m_processedCount += batchMessage.size();
                     } catch (const std::exception& e) {
                         LOG_ERROR("Module '{}' threw while processing a batch: {}", moduleName, e.what());
-                        m_failedCount.fetch_add(1, std::memory_order_relaxed);
+                        ++m_failedCount;
                     } catch (...) {
                         LOG_ERROR("Module '{}' threw an unknown exception while processing a batch.", moduleName);
-                        m_failedCount.fetch_add(1, std::memory_order_relaxed);
+                        ++m_failedCount;
                     }
                     if (m_profileTimers) {
                         Profiler().EndAverage(m_processTimer);
@@ -238,6 +240,9 @@ void Worker::WorkLoop() {
     }
 
     ::nexusflow::log::detail::ResetThreadSink();
+    // The loop is done writing, so a snapshot taken while we join still sees
+    // every message this run recorded.
+    PublishCounters();
     // Release anyone waiting on WaitForStopRequest(); this has to happen before
     // the thread says it is done, otherwise the join would race the flag.
     {
@@ -306,7 +311,7 @@ void Worker::RunFusion() {
                 fusedMessageVec.push_back(MakeMessage(std::move(messageMap)));
                 try {
                     m_modulePtr->ProcessBatch(fusedMessageVec); // process the fused message
-                    m_processedCount.fetch_add(fusedMessageVec.size(), std::memory_order_relaxed);
+                    m_processedCount += fusedMessageVec.size();
                 } catch (const std::exception& e) {
                     LOG_ERROR("Module '{}' threw while processing a fused batch: {}", m_modulePtr->GetModuleName(), e.what());
                 } catch (...) {
@@ -344,24 +349,24 @@ void Worker::RunFusion() {
                             expectedInputCount > messageMap.size() ? expectedInputCount - messageMap.size() : 0;
                         try {
                             m_modulePtr->ProcessBatch(fusedMessageVec);
-                            m_processedCount.fetch_add(fusedMessageVec.size(), std::memory_order_relaxed);
+                            m_processedCount += fusedMessageVec.size();
                         } catch (const std::exception& e) {
                             LOG_ERROR("Module '{}' threw while processing a partially fused batch: {}",
                                       m_modulePtr->GetModuleName(), e.what());
-                            m_failedCount.fetch_add(1, std::memory_order_relaxed);
+                            ++m_failedCount;
                         } catch (...) {
                             LOG_ERROR("Module '{}' threw an unknown exception while processing a partially fused batch.",
                                       m_modulePtr->GetModuleName());
-                            m_failedCount.fetch_add(1, std::memory_order_relaxed);
+                            ++m_failedCount;
                         }
-                        m_droppedCount.fetch_add(missing, std::memory_order_relaxed);
-                        m_fusionExpiredCount.fetch_add(missing, std::memory_order_relaxed);
+                        m_droppedCount += missing;
+                        m_fusionExpiredCount += missing;
                     } else {
                         LOG_WARN("Timeout for message with ID: {}, will be removed from cache", messageId);
                         // Every partial in the cache is one fused message that will
                         // never reach the module, so it counts as dropped output.
-                        m_droppedCount.fetch_add(messageMap.size(), std::memory_order_relaxed);
-                        m_fusionExpiredCount.fetch_add(messageMap.size(), std::memory_order_relaxed);
+                        m_droppedCount += messageMap.size();
+                        m_fusionExpiredCount += messageMap.size();
                     }
                     cacheArrivalMs.erase(arrivalIt);
                     it = messageCache.erase(it);
@@ -381,6 +386,11 @@ void Worker::RunFusion() {
             }
         }
 #endif
+
+        // One iteration is one snapshot boundary. RunFusion() reaches here
+        // once per pass whatever happened inside it, including the paths that
+        // only drop or only forward, so readers see every recorded number.
+        PublishCounters();
     }
 }
 
