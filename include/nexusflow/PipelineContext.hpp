@@ -6,10 +6,10 @@
 
 #include <atomic>
 #include <cstdint>
-#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace nexusflow {
@@ -65,9 +65,30 @@ public:
         double Average() const { return samples == 0 ? 0.0 : total / static_cast<double>(samples); }
     };
 
-    /// Adds one sample to a named metric. Cheap enough for the hot path (a map
-    /// lookup under a mutex); modules should prefer batching when possible.
-    void Report(const std::string& name, double value);
+    /// A metric name resolved once, so a module on the hot path pays one map
+    /// lookup instead of hashing a string per sample. 0 means "not resolved".
+    using MetricHandle = std::uint64_t;
+
+    /**
+     * @brief Resolves a metric name to a handle, creating it on first use.
+     * @details A module must prefix its own name ("<module>.<metric>"), because
+     * the context is shared by the whole pipeline and two modules reporting
+     * "latency" would otherwise be indistinguishable. A name without a dot gets
+     * the prefix of the caller-less form "<unnamed>." rejected at the call site
+     * in debug builds only; at runtime the name is kept as given, but
+     * GetReportedMetrics() reports it verbatim, so the convention is the
+     * caller's contract.
+     */
+    MetricHandle Intern(const std::string& name);
+
+    /// Adds one sample to an interned metric. This is the hot-path form: a
+    /// target is recorded under its handle, so no string is hashed per sample.
+    void Record(MetricHandle handle, double value);
+
+    /// Adds one sample to a named metric, interning the name first. Convenient
+    /// for setup code and tests; a hot loop should hold the handle instead.
+    void Record(const std::string& name, double value);
+
     std::vector<Metric> GetReportedMetrics() const;
 
     /// Set by Pipeline::Stop() before the queues and workers are torn down, so a
@@ -84,7 +105,10 @@ private:
     profiling::MetricsCollector m_profiler;
 
     mutable std::mutex m_metricsMutex;
-    std::map<std::string, Metric> m_metrics;
+    /// Indexed by handle - 1; appended by Intern() and never removed, so a handle
+    /// stays valid for the life of the context.
+    std::vector<Metric> m_metrics;
+    std::unordered_map<std::string, MetricHandle> m_metricNames;
 
     std::atomic<bool> m_stopRequested{false};
 };

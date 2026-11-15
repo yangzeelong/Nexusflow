@@ -79,7 +79,11 @@ protected:
     ErrorCode Init() override {
         context = GetContext();
         if (context) {
-            context->Report("init", 1.0);
+            // Metric names carry the module name: the context is shared by the
+            // whole pipeline, so a bare "init" would collide across modules.
+            m_initMetric = context->Intern(GetModuleName() + ".init");
+            m_framesMetric = context->Intern(GetModuleName() + ".frames");
+            context->Record(m_initMetric, 1.0);
         }
         return ErrorCode::SUCCESS;
     }
@@ -87,11 +91,15 @@ protected:
     void Process(Message& inputMessage) override {
         (void)inputMessage;
         if (context) {
-            context->Report("frames", 947.0);
+            context->Record(m_framesMetric, 947.0);
         }
         LOG_DEBUG("[context-test] processed a frame");
         Broadcast(std::move(MakeMessage(1)));
     }
+
+private:
+    PipelineContext::MetricHandle m_initMetric = 0;
+    PipelineContext::MetricHandle m_framesMetric = 0;
 };
 
 class ContextSinkModule : public Module {
@@ -187,12 +195,12 @@ TEST(PipelineContextTest, ReportedMetricsAreAccumulated) {
     bool sawInit = false;
     bool sawFrames = false;
     for (const auto& metric : context->GetReportedMetrics()) {
-        if (metric.name == "init") {
+        if (metric.name == "context-source.init") {
             sawInit = true;
             EXPECT_EQ(metric.samples, 1u);
             EXPECT_DOUBLE_EQ(metric.last, 1.0);
         }
-        if (metric.name == "frames") {
+        if (metric.name == "context-source.frames") {
             sawFrames = true;
             EXPECT_GT(metric.samples, 0u);
             EXPECT_GT(metric.Average(), 0.0);
@@ -204,10 +212,39 @@ TEST(PipelineContextTest, ReportedMetricsAreAccumulated) {
     ASSERT_EQ(pipeline->DeInit(), ErrorCode::SUCCESS);
 }
 
+// Interning is idempotent: the same name resolves to the same handle, and a
+// handle keeps accumulating under its slot instead of creating a second entry.
+TEST(PipelineContextTest, InternedMetricHandleIsReusedForTheSameName) {
+    PipelineContext context("intern-test");
+
+    const PipelineContext::MetricHandle first = context.Intern("mod.latency");
+    const PipelineContext::MetricHandle again = context.Intern("mod.latency");
+    ASSERT_NE(first, PipelineContext::MetricHandle(0));
+    EXPECT_EQ(first, again);
+
+    context.Record(first, 2.0);
+    context.Record(first, 4.0);
+    context.Record("mod.latency", 6.0);
+
+    const std::vector<PipelineContext::Metric> metrics = context.GetReportedMetrics();
+    ASSERT_EQ(metrics.size(), std::size_t(1));
+    EXPECT_EQ(metrics[0].name, "mod.latency");
+    EXPECT_EQ(metrics[0].samples, 3u);
+    EXPECT_DOUBLE_EQ(metrics[0].last, 6.0);
+    EXPECT_DOUBLE_EQ(metrics[0].Average(), 4.0);
+}
+
+// A handle from nowhere must be ignored rather than index out of bounds.
+TEST(PipelineContextTest, UnknownMetricHandleIsIgnored) {
+    PipelineContext context("bad-handle-test");
+    context.Record(PipelineContext::MetricHandle(0), 1.0);
+    context.Record(PipelineContext::MetricHandle(99), 1.0);
+    EXPECT_TRUE(context.GetReportedMetrics().empty());
+}
+
 TEST(PipelineContextTest, StopRequestsTheStopToken) {
     ScopedGlobalSink quiet(std::make_shared<NullSink>());
-    auto source = std::make_shared<ContextSourceModule>("context-source");
-    auto sink = std::make_shared<ContextSinkModule>("context-sink");
+    auto source = std::make_shared<ContextSourceModule>("context-source");    auto sink = std::make_shared<ContextSinkModule>("context-sink");
     auto pipeline = BuildContextPipeline(source, sink);
     ASSERT_NE(pipeline, nullptr);
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);

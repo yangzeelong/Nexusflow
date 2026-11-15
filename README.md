@@ -234,7 +234,8 @@ pipeline->Init();
 
 auto context = pipeline->GetContext();
 context->SetSink(customSink);          // logs from this pipeline's module threads
-context->Report("frames", 1.0);        // module-defined metric samples
+auto frames = context->Intern("detect.frames");  // resolve the name once
+context->Record(frames, 1.0);          // module-defined metric samples
 const auto metrics = context->GetReportedMetrics();
 const bool stopping = context->StopRequested();
 ```
@@ -242,9 +243,15 @@ const bool stopping = context->StopRequested();
 - `SetSink` routes records produced on this pipeline's module threads to the given
   sink. Without one, the process-wide facade sink is used, so existing programs do
   not change.
-- `Report` accumulates `samples`, `total` and `last` per metric name; read them back
-  with `GetReportedMetrics()`. `Pipeline::GetMetrics()` keeps reporting the
-  framework queues and module counters.
+- `Intern` resolves a metric name to a handle and `Record` adds a sample to it,
+  accumulating `samples`, `total` and `last`. Holding the handle keeps the hot path
+  to one map lookup instead of hashing a string per sample;
+  `Record(name, value)` is the convenient form. Read the samples back with
+  `GetReportedMetrics()`, and `Pipeline::GetSnapshot()` reports the framework edges
+  and module counters.
+- Metric names are prefixed with the module name (`"detect.frames"`), because the
+  context is shared by the whole pipeline and a bare `"latency"` from two modules
+  would be indistinguishable.
 - `RequestStop` is called by `Pipeline::Stop()` before the queues are shut down, so
   long-running modules can leave their loop cooperatively.
 - `Profiler()` returns a per-pipeline `nexusflow::profiling::MetricsCollector`, so two

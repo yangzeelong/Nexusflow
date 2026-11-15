@@ -25,23 +25,41 @@ bool PipelineContext::HasOwnSink() const {
     return static_cast<bool>(m_sink);
 }
 
-void PipelineContext::Report(const std::string& name, double value) {
+PipelineContext::MetricHandle PipelineContext::Intern(const std::string& name) {
     std::lock_guard<std::mutex> lock(m_metricsMutex);
-    Metric& metric = m_metrics[name];
+    const auto existing = m_metricNames.find(name);
+    if (existing != m_metricNames.end()) {
+        return existing->second;
+    }
+    Metric metric;
     metric.name = name;
+    m_metrics.push_back(std::move(metric));
+    const MetricHandle handle = static_cast<MetricHandle>(m_metrics.size());
+    m_metricNames.emplace(name, handle);
+    return handle;
+}
+
+void PipelineContext::Record(MetricHandle handle, double value) {
+    if (handle == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(m_metricsMutex);
+    // Resolve inside the lock: a handle is only valid for this context, and a
+    // stale or foreign one must not index into the vector.
+    if (handle > m_metrics.size()) {
+        return;
+    }
+    Metric& metric = m_metrics[static_cast<std::size_t>(handle - 1)];
     ++metric.samples;
     metric.total += value;
     metric.last = value;
 }
 
+void PipelineContext::Record(const std::string& name, double value) { Record(Intern(name), value); }
+
 std::vector<PipelineContext::Metric> PipelineContext::GetReportedMetrics() const {
     std::lock_guard<std::mutex> lock(m_metricsMutex);
-    std::vector<Metric> metrics;
-    metrics.reserve(m_metrics.size());
-    for (const auto& entry : m_metrics) {
-        metrics.push_back(entry.second);
-    }
-    return metrics;
+    return m_metrics;
 }
 
 void PipelineContext::RequestStop() { m_stopRequested.store(true, std::memory_order_relaxed); }
