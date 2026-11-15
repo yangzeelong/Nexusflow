@@ -222,6 +222,37 @@ for (const auto& module : metrics.modules) {
 A queue reports `capacity == 0` when it is unbounded, and `highWaterMark` is the
 deepest backlog observed so far.
 
+## Pipeline Context
+
+Each pipeline owns one context object that its modules can reach through
+`Module::GetContext()`. It bundles the services that are genuinely shared by a
+whole pipeline, instead of forcing them through process-wide singletons:
+
+```cpp
+auto pipeline = nexusflow::Pipeline::CreateFromYaml("graph.yaml");
+pipeline->Init();
+
+auto context = pipeline->GetContext();
+context->SetSink(customSink);          // logs from this pipeline's module threads
+context->Report("frames", 1.0);        // module-defined metric samples
+const auto metrics = context->GetReportedMetrics();
+const bool stopping = context->StopRequested();
+```
+
+- `SetSink` routes records produced on this pipeline's module threads to the given
+  sink. Without one, the process-wide facade sink is used, so existing programs do
+  not change.
+- `Report` accumulates `samples`, `total` and `last` per metric name; read them back
+  with `GetReportedMetrics()`. `Pipeline::GetMetrics()` keeps reporting the
+  framework queues and module counters.
+- `RequestStop` is called by `Pipeline::Stop()` before the queues are shut down, so
+  long-running modules can leave their loop cooperatively.
+- `Profiler()` returns a per-pipeline `nexusflow::profiling::TimerRegistry`, so two
+  pipelines that use identical module names no longer merge their timing samples.
+
+The context is created by `Pipeline::Impl` during `Init()`; modules that never call
+`GetContext()` behave exactly as before.
+
 ## Core Component: The `nexusflow::Message`
 
 The `nexusflow::Message` is the universal, thread-safe data wrapper that flows through the pipeline. It is designed to be both highly performant and exceptionally safe.

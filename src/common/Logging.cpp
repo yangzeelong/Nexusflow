@@ -397,6 +397,10 @@ std::shared_ptr<LogSink>& CurrentSink() {
     return sink;
 }
 
+// Sink override installed per pipeline worker thread by PipelineContext; empty
+// means the process-wide sink above is used.
+thread_local std::shared_ptr<LogSink> t_threadSink;
+
 }  // namespace
 
 void SetLogLevel(Level level) { CurrentLevel().store(level, std::memory_order_relaxed); }
@@ -451,7 +455,9 @@ void Write(Level level, const char* file, int line, const char* function, std::s
     record.message = std::move(message);
 
     std::shared_ptr<LogSink> sink;
-    {
+    if (t_threadSink) {
+        sink = t_threadSink;
+    } else {
         std::lock_guard<std::mutex> lock(SinkMutex());
         sink = CurrentSink();
     }
@@ -459,6 +465,10 @@ void Write(Level level, const char* file, int line, const char* function, std::s
         sink->Write(record);
     }
 }
+
+void SetThreadSink(std::shared_ptr<LogSink> sink) { t_threadSink = std::move(sink); }
+
+void ResetThreadSink() { t_threadSink.reset(); }
 
 }  // namespace detail
 }  // namespace log

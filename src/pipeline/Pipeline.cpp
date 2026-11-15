@@ -13,6 +13,7 @@
 #include <memory>
 #include <nexusflow/ErrorCode.hpp>
 #include <nexusflow/Module.hpp>
+#include <nexusflow/PipelineContext.hpp>
 #include <nexusflow/Pipeline.hpp>
 #include <string>
 #include <unordered_map>
@@ -189,6 +190,11 @@ ErrorCode Pipeline::Stop() {
     }
 
     LOG_DEBUG("Stopping pipeline...");
+    // Let cooperative modules observe that the pipeline is going away before the
+    // queues are torn down.
+    if (m_pImpl->context) {
+        m_pImpl->context->RequestStop();
+    }
     // Shut the queues down first: blocked producers/consumers wake up, and the
     // worker loops can observe the stop flag before we join them.
     for (auto& queue : m_pImpl->queues) {
@@ -229,6 +235,13 @@ PipelineMetrics Pipeline::GetMetrics() const {
         metrics.modules.push_back(std::move(module));
     }
     return metrics;
+}
+
+std::shared_ptr<PipelineContext> Pipeline::GetContext() const {
+    if (!m_pImpl) {
+        return nullptr;
+    }
+    return m_pImpl->context;
 }
 
 }; // namespace nexusflow

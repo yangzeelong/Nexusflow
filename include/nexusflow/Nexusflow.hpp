@@ -7,6 +7,7 @@
 #include <nexusflow/ModuleFactory.hpp>
 #include <nexusflow/Pipeline.hpp>
 #include <nexusflow/PipelineBuilder.hpp>
+#include <nexusflow/PipelineContext.hpp>
 #include <nexusflow/TypeTraits.hpp>
 #include <nexusflow/TimerRegistry.hpp>
 #include <nexusflow/common/Any.hpp>

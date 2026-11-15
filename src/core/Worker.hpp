@@ -14,6 +14,11 @@
 #include <string>
 #include <unordered_map>
 
+namespace nexusflow {
+class PipelineContext;
+namespace profiling { class TimerRegistry; }
+}  // namespace nexusflow
+
 namespace nexusflow { namespace core {
 
 /**
@@ -26,7 +31,8 @@ namespace nexusflow { namespace core {
  */
 class Worker {
 public:
-    Worker(const std::shared_ptr<Module>& modulePtr, const ViewPtr<Config>& configPtr);
+    Worker(const std::shared_ptr<Module>& modulePtr, const ViewPtr<Config>& configPtr,
+           const std::shared_ptr<PipelineContext>& context = nullptr);
 
     /**
      * @brief Destructor. Ensures the worker thread is properly joined.
@@ -81,6 +87,10 @@ private:
      *        Called once from the constructor so the hot loop does no config lookups.
      *        All values fall back to the historical defaults when absent.
      */
+    /// Registry the work loop reports to: the pipeline context's own registry
+    /// when one is attached, otherwise the process-wide singleton.
+    profiling::TimerRegistry& Profiler();
+
     void LoadConfig();
 
     void RunFusion();
@@ -106,6 +116,7 @@ private:
 private:
     std::shared_ptr<Module> m_modulePtr = nullptr;
     ViewPtr<Config> m_configPtr;
+    std::shared_ptr<PipelineContext> m_context;
     std::unordered_map<std::string, ViewPtr<MessageQueue>> m_inputQueueMap;
 
     std::atomic<bool> m_stopFlag{false};

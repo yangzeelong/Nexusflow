@@ -16,6 +16,7 @@
 class Graph;
 namespace nexusflow {
 class PipelineBuilder;
+class PipelineContext;
 }
 
 namespace nexusflow {
@@ -78,6 +79,12 @@ public:
      * @brief Returns queue/module counters. Safe to call while the pipeline runs.
      */
     PipelineMetrics GetMetrics() const;
+
+    /**
+     * @brief Returns this pipeline's context: per-pipeline log sink, profiler,
+     * stop token and metrics reported by modules. Null before Init().
+     */
+    std::shared_ptr<PipelineContext> GetContext() const;
 
     ~Pipeline();
 

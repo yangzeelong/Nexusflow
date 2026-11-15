@@ -160,7 +160,7 @@ python3 extensions/aifootball/tools/render_jsonl.py --observations <dir>/observa
 ## 4. 测试与性能
 
 ```bash
-./build/bin/nexusflow_tests        # 单测（当前 94 个用例）
+./build/bin/nexusflow_tests        # 单测（当前 99 个用例）
 ```
 
 - 改完 SDK 算法/渲染**必须**跑；**不要为了让测试通过而改测试语义**。

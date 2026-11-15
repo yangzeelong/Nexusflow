@@ -4,8 +4,10 @@
 #include "nexusflow/ErrorCode.hpp"
 #include "nexusflow/Message.hpp"
 #include "nexusflow/Logging.hpp"
+#include "nexusflow/PipelineContext.hpp"
 
 #include <chrono>
+#include <utility>
 
 namespace nexusflow {
 
@@ -128,6 +130,10 @@ bool Module::SendTo(const std::string& outputName, const Message& msg) {
 }
 
 const std::string& Module::GetModuleName() const { return m_moduleName; }
+
+void Module::AttachContext(std::shared_ptr<PipelineContext> context) { m_context = std::move(context); }
+
+std::shared_ptr<PipelineContext> Module::GetContext() const { return m_context; }
 
 void Module::SetDispatcher(const std::shared_ptr<dispatcher::Dispatcher>& dispatcher) { m_dispatcherPtr = dispatcher; }
 

@@ -2,6 +2,7 @@
 #include "nexusflow/ErrorCode.hpp"
 #include "nexusflow/Message.hpp"
 #include "nexusflow/Logging.hpp"
+#include "nexusflow/PipelineContext.hpp"
 #include "nexusflow/TimerRegistry.hpp"
 #include <chrono>
 #include <memory>
@@ -18,14 +19,13 @@ namespace {
 // modules that opt in with "profileTimers: true".
 class OptionalScopeTimer {
 public:
-    OptionalScopeTimer(bool enabled, const std::string& name, uint64_t windowMs,
-                       const char* file, int line) {
+    OptionalScopeTimer(bool enabled, ::nexusflow::profiling::TimerRegistry& registry,
+                       const std::string& name, uint64_t windowMs, const char* file, int line) {
         if (!enabled) {
             return;
         }
         m_timer.reset(new ::nexusflow::profiling::TimerRegistry::ScopedTimer(
-            ::nexusflow::profiling::TimerRegistry::Instance().Scope(
-                name, ::nexusflow::profiling::TimerPrintPolicy::EveryMs(windowMs), file, line)));
+            registry.Scope(name, ::nexusflow::profiling::TimerPrintPolicy::EveryMs(windowMs), file, line)));
     }
 
 private:
@@ -35,11 +35,17 @@ private:
 }  // namespace
 
 
-Worker::Worker(const std::shared_ptr<Module>& modulePtr, const ViewPtr<Config>& configPtr) {
+Worker::Worker(const std::shared_ptr<Module>& modulePtr, const ViewPtr<Config>& configPtr,
+               const std::shared_ptr<PipelineContext>& context) {
     m_modulePtr = modulePtr;
     m_configPtr = configPtr;
+    m_context = context;
     m_stopFlag = false;
     LoadConfig();
+}
+
+profiling::TimerRegistry& Worker::Profiler() {
+    return m_context ? m_context->Profiler() : ::nexusflow::profiling::TimerRegistry::Instance();
 }
 
 Worker::~Worker() {
@@ -107,6 +113,12 @@ ErrorCode Worker::Stop() {
 void Worker::WorkLoop() {
     LOG_DEBUG("Worker for module '{}' started", m_modulePtr->GetModuleName());
 
+    // Route this worker's records to the pipeline's sink when it installed one;
+    // the thread-local override keeps the hot macro path free of plumbing.
+    if (m_context && m_context->HasOwnSink()) {
+        ::nexusflow::log::detail::SetThreadSink(m_context->GetSink());
+    }
+
     bool isSourceModule = m_inputQueueMap.empty(); // Check if this is a source module.
 
     LOG_DEBUG("Worker for module '{}' is running. Is source module: {}. Is sync inputs: {}.", m_modulePtr->GetModuleName(),
@@ -132,7 +144,7 @@ void Worker::WorkLoop() {
                 Message emptyMessage;
                 bool produced = false;
                 try {
-                    OptionalScopeTimer processTimer(m_profileTimers, m_processTimerName, 5000,
+                    OptionalScopeTimer processTimer(m_profileTimers, Profiler(), m_processTimerName, 5000,
                                                    __FILE__, __LINE__);
                     produced = m_modulePtr->ProcessTimed(emptyMessage);
                     if (produced) {
@@ -150,7 +162,7 @@ void Worker::WorkLoop() {
                 // Sink or Filter/Transformer Module Loop
                 std::vector<Message> batchMessage;
                 {
-                    OptionalScopeTimer waitTimer(m_profileTimers, m_waitTimerName, 5000,
+                    OptionalScopeTimer waitTimer(m_profileTimers, Profiler(), m_waitTimerName, 5000,
                                                 __FILE__, __LINE__);
                     batchMessage = PullBatchMessage(m_maxBatchSize, m_batchTimeout);
                 }
@@ -159,9 +171,11 @@ void Worker::WorkLoop() {
                 // One item per message in the batch, so the reported cost is
                 // per message rather than per dispatch.
                 if (m_profileTimers) {
-                    TIMER_START_AVERAGE_MS(m_processTimerName, 5000);
-                    TIMER_INCREMENT_AVERAGE(m_processTimerName,
-                                            static_cast<uint64_t>(batchMessage.size()));
+                    Profiler().StartAverage(m_processTimerName,
+                                            ::nexusflow::profiling::TimerPrintPolicy::EveryMs(5000),
+                                            __FILE__, __LINE__);
+                    Profiler().IncrementAverage(m_processTimerName,
+                                                static_cast<uint64_t>(batchMessage.size()));
                 }
                 try {
                     m_modulePtr->ProcessBatch(batchMessage);
@@ -172,12 +186,13 @@ void Worker::WorkLoop() {
                     LOG_ERROR("Module '{}' threw an unknown exception while processing a batch.", moduleName);
                 }
                 if (m_profileTimers) {
-                    TIMER_STOP_AVERAGE(m_processTimerName);
+                    Profiler().EndAverage(m_processTimerName);
                 }
             }
         }
     }
 
+    ::nexusflow::log::detail::ResetThreadSink();
     LOG_DEBUG("Worker for module '{}' finished.", m_modulePtr->GetModuleName());
 }
 
