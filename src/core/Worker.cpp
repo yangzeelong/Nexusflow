@@ -11,6 +11,30 @@
 
 namespace nexusflow { namespace core {
 
+namespace {
+
+// TimerRegistry::ScopedTimer copies the timer name and takes the registry lock
+// on destruction. Worker profiling is off by default, so only pay that cost for
+// modules that opt in with "profileTimers: true".
+class OptionalScopeTimer {
+public:
+    OptionalScopeTimer(bool enabled, const std::string& name, uint64_t windowMs,
+                       const char* file, int line) {
+        if (!enabled) {
+            return;
+        }
+        m_timer.reset(new ::nexusflow::profiling::TimerRegistry::ScopedTimer(
+            ::nexusflow::profiling::TimerRegistry::Instance().Scope(
+                name, ::nexusflow::profiling::TimerPrintPolicy::EveryMs(windowMs), file, line)));
+    }
+
+private:
+    std::unique_ptr<::nexusflow::profiling::TimerRegistry::ScopedTimer> m_timer;
+};
+
+}  // namespace
+
+
 Worker::Worker(const std::shared_ptr<Module>& modulePtr, const ViewPtr<Config>& configPtr) {
     m_modulePtr = modulePtr;
     m_configPtr = configPtr;
@@ -65,6 +89,7 @@ void Worker::LoadConfig() {
     m_sourceIdleMs = sourceIdleMs;
 
     m_syncInputs = m_configPtr->GetValueOrDefault<bool>("syncInputs", m_syncInputs);
+    m_profileTimers = m_configPtr->GetValueOrDefault<bool>("profileTimers", m_profileTimers);
 
     // Timer labels are built once here instead of on every loop iteration.
     m_processTimerName = "Worker.Process." + moduleName;
@@ -107,7 +132,8 @@ void Worker::WorkLoop() {
                 Message emptyMessage;
                 bool produced = false;
                 try {
-                    TIMER_SCOPE_AVERAGE_MS(m_processTimerName, 5000);
+                    OptionalScopeTimer processTimer(m_profileTimers, m_processTimerName, 5000,
+                                                   __FILE__, __LINE__);
                     produced = m_modulePtr->ProcessTimed(emptyMessage);
                 } catch (const std::exception& e) {
                     LOG_ERROR("Module '{}' threw while processing: {}", moduleName, e.what());
@@ -121,16 +147,19 @@ void Worker::WorkLoop() {
                 // Sink or Filter/Transformer Module Loop
                 std::vector<Message> batchMessage;
                 {
-                    TIMER_SCOPE_AVERAGE_MS(m_waitTimerName, 5000);
+                    OptionalScopeTimer waitTimer(m_profileTimers, m_waitTimerName, 5000,
+                                                __FILE__, __LINE__);
                     batchMessage = PullBatchMessage(m_maxBatchSize, m_batchTimeout);
                 }
                 if (batchMessage.empty()) continue;
 
                 // One item per message in the batch, so the reported cost is
                 // per message rather than per dispatch.
-                TIMER_START_AVERAGE_MS(m_processTimerName, 5000);
-                TIMER_INCREMENT_AVERAGE(m_processTimerName,
-                                        static_cast<uint64_t>(batchMessage.size()));
+                if (m_profileTimers) {
+                    TIMER_START_AVERAGE_MS(m_processTimerName, 5000);
+                    TIMER_INCREMENT_AVERAGE(m_processTimerName,
+                                            static_cast<uint64_t>(batchMessage.size()));
+                }
                 try {
                     m_modulePtr->ProcessBatch(batchMessage);
                 } catch (const std::exception& e) {
@@ -138,7 +167,9 @@ void Worker::WorkLoop() {
                 } catch (...) {
                     LOG_ERROR("Module '{}' threw an unknown exception while processing a batch.", moduleName);
                 }
-                TIMER_STOP_AVERAGE(m_processTimerName);
+                if (m_profileTimers) {
+                    TIMER_STOP_AVERAGE(m_processTimerName);
+                }
             }
         }
     }

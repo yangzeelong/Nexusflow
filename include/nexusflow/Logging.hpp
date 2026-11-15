@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
@@ -103,74 +104,129 @@ inline const char* FileName(const char* path) {
 }
 
 // Parses the precision of floating-point placeholders such as "{:.2f}".
-inline bool ParseFixedSpec(const std::string& spec, int& precision) {
-    if (spec.empty()) {
+inline bool ParseFixedSpec(const char* begin, const char* end, int& precision) {
+    if (begin == end || *begin != '.') {
         return false;
     }
-    const std::size_t dot = spec.find('.');
-    if (dot == std::string::npos) {
-        return false;
-    }
-    std::size_t cursor = dot + 1;
+    const char* cursor = begin + 1;
     int value = 0;
     bool hasDigit = false;
-    while (cursor < spec.size() && spec[cursor] >= '0' && spec[cursor] <= '9') {
-        value = value * 10 + (spec[cursor] - '0');
+    while (cursor != end && *cursor >= '0' && *cursor <= '9') {
+        value = value * 10 + (*cursor - '0');
         ++cursor;
         hasDigit = true;
     }
     if (!hasDigit) {
         return false;
     }
-    if (cursor < spec.size() && spec[cursor] == 'f') {
+    if (cursor != end && *cursor == 'f') {
         ++cursor;
     }
-    if (cursor != spec.size()) {
+    if (cursor != end) {
         return false;
     }
     precision = value;
     return true;
 }
 
-inline std::string ToText(const std::string& value, const std::string&) { return value; }
-inline std::string ToText(const char* value, const std::string&) { return value != nullptr ? std::string(value) : std::string("(null)"); }
-inline std::string ToText(char* value, const std::string& spec) { return ToText(static_cast<const char*>(value), spec); }
-inline std::string ToText(bool value, const std::string&) { return value ? "true" : "false"; }
-inline std::string ToText(char value, const std::string&) { return std::string(1, value); }
+// Appends one argument. The common cases avoid std::ostringstream: numbers go
+// through snprintf into a stack buffer and strings are appended directly, so a
+// log call stays allocation-light. Unusual types fall back to a stream.
+inline void AppendValue(std::string& out, const std::string& value, const char*, const char*) {
+    out += value;
+}
 
-template <typename T>
-inline typename std::enable_if<!std::is_floating_point<T>::value, std::string>::type ToText(const T& value,
-                                                                                            const std::string&) {
-    std::ostringstream stream;
-    stream << value;
-    return stream.str();
+inline void AppendValue(std::string& out, const char* value, const char*, const char*) {
+    out += (value != nullptr) ? value : "(null)";
+}
+
+inline void AppendValue(std::string& out, char* value, const char* specBegin, const char* specEnd) {
+    AppendValue(out, static_cast<const char*>(value), specBegin, specEnd);
+}
+
+template <std::size_t N>
+inline void AppendValue(std::string& out, const char (&value)[N], const char* specBegin, const char* specEnd) {
+    AppendValue(out, static_cast<const char*>(value), specBegin, specEnd);
+}
+
+template <std::size_t N>
+inline void AppendValue(std::string& out, char (&value)[N], const char* specBegin, const char* specEnd) {
+    AppendValue(out, static_cast<const char*>(value), specBegin, specEnd);
+}
+
+inline void AppendValue(std::string& out, bool value, const char*, const char*) {
+    out += value ? "true" : "false";
+}
+
+inline void AppendValue(std::string& out, char value, const char*, const char*) {
+    out += value;
 }
 
 template <typename T>
-inline typename std::enable_if<std::is_floating_point<T>::value, std::string>::type ToText(const T& value,
-                                                                                           const std::string& spec) {
+inline typename std::enable_if<std::is_integral<T>::value && !std::is_same<T, bool>::value &&
+                                   !std::is_same<T, char>::value,
+                               void>::type
+AppendValue(std::string& out, T value, const char*, const char*) {
+    char buffer[32];
+    int written = 0;
+    if (std::is_signed<T>::value) {
+        written = std::snprintf(buffer, sizeof(buffer), "%lld", static_cast<long long>(value));
+    } else {
+        written = std::snprintf(buffer, sizeof(buffer), "%llu", static_cast<unsigned long long>(value));
+    }
+    if (written > 0) {
+        out.append(buffer, static_cast<std::size_t>(written));
+    }
+}
+
+template <typename T>
+inline typename std::enable_if<std::is_floating_point<T>::value, void>::type
+AppendValue(std::string& out, T value, const char* specBegin, const char* specEnd) {
+    char buffer[64];
+    int precision = 0;
+    int written = 0;
+    if (ParseFixedSpec(specBegin, specEnd, precision)) {
+        written = std::snprintf(buffer, sizeof(buffer), "%.*f", precision, static_cast<double>(value));
+    } else {
+        written = std::snprintf(buffer, sizeof(buffer), "%.6g", static_cast<double>(value));
+    }
+    if (written > 0) {
+        out.append(buffer, static_cast<std::size_t>(written));
+    }
+}
+
+template <typename T>
+inline typename std::enable_if<std::is_enum<T>::value, void>::type
+AppendValue(std::string& out, T value, const char* specBegin, const char* specEnd) {
+    AppendValue(out, static_cast<typename std::underlying_type<T>::type>(value), specBegin, specEnd);
+}
+
+// Fallback for user-defined types.
+template <typename T>
+inline typename std::enable_if<!std::is_integral<T>::value && !std::is_floating_point<T>::value &&
+                                   !std::is_enum<T>::value,
+                               void>::type
+AppendValue(std::string& out, const T& value, const char* specBegin, const char* specEnd) {
     std::ostringstream stream;
     int precision = 0;
-    if (ParseFixedSpec(spec, precision)) {
+    if (ParseFixedSpec(specBegin, specEnd, precision)) {
         stream << std::fixed << std::setprecision(precision);
     }
     stream << value;
-    return stream.str();
+    out += stream.str();
 }
 
 // Terminal case: append what is left of the format string.
-inline void AppendFormatted(std::string& out, const char*& cursor) {
-    if (cursor == nullptr) {
-        return;
+inline void FormatInto(std::string& out, const char* format) {
+    if (format != nullptr) {
+        out.append(format, std::strlen(format));
     }
-    out += cursor;
-    cursor += std::strlen(cursor);
 }
 
 // Consumes one argument per "{}" / "{:spec}" placeholder and appends literals.
-template <typename T, typename... Rest>
-void AppendFormatted(std::string& out, const char*& cursor, const T& value, const Rest&... rest) {
-    bool consumed = false;
+template <typename First, typename... Rest>
+void FormatInto(std::string& out, const char* format, const First& first, const Rest&... rest) {
+    const char* cursor = format;
     while (cursor != nullptr && *cursor != '\0') {
         if (*cursor == '{') {
             if (cursor[1] == '{') {
@@ -182,15 +238,15 @@ void AppendFormatted(std::string& out, const char*& cursor, const T& value, cons
             while (*close != '\0' && *close != '}') {
                 ++close;
             }
-            const std::string placeholder(cursor + 1, static_cast<std::size_t>(close - (cursor + 1)));
-            std::string spec;
-            if (!placeholder.empty() && placeholder[0] == ':') {
-                spec = placeholder.substr(1);
+            const char* specBegin = cursor + 1;
+            const char* specEnd = close;
+            if (specBegin != specEnd && *specBegin == ':') {
+                ++specBegin;
             }
-            out += ToText(value, spec);
+            AppendValue(out, first, specBegin, specEnd);
             cursor = (*close == '}') ? close + 1 : close;
-            consumed = true;
-            break;
+            FormatInto(out, cursor, rest...);
+            return;
         }
         if (*cursor == '}' && cursor[1] == '}') {
             out += '}';
@@ -200,26 +256,24 @@ void AppendFormatted(std::string& out, const char*& cursor, const T& value, cons
         out += *cursor;
         ++cursor;
     }
-    if (!consumed) {
-        // More arguments than placeholders: keep the extra values visible.
-        out += ' ';
-        out += ToText(value, std::string());
-    }
-    AppendFormatted(out, cursor, rest...);
+    // More arguments than placeholders: keep the extra values visible.
+    out += ' ';
+    AppendValue(out, first, nullptr, nullptr);
+    FormatInto(out, cursor, rest...);
 }
 
 // Minimal replacement for fmt: "{}" and "{:.Nf}" are the only supported
 // placeholders (that is all the framework uses). Braces can be escaped with
-// "{{" / "}}".
+// "{{" / "}}". Values are written into one buffer instead of a stream per
+// placeholder, which is what keeps LOG_* cheap enough for hot loops.
 template <typename... Args>
 std::string Format(const char* format, const Args&... args) {
     std::string out;
     if (format == nullptr) {
         return out;
     }
-    out.reserve(std::strlen(format) + 32);
-    const char* cursor = format;
-    AppendFormatted(out, cursor, args...);
+    out.reserve(std::strlen(format) + 16 * sizeof...(Args));
+    FormatInto(out, format, args...);
     return out;
 }
 
@@ -231,8 +285,9 @@ std::string Format(const std::string& format, const Args&... args) {
     return Format(format.c_str(), args...);
 }
 
-// Implemented in src/common/Logging.cpp.
-void Write(Level level, const char* file, int line, const char* function, const std::string& message);
+// Implemented in src/common/Logging.cpp. 'message' is taken by value so
+// the temporary produced by Format() can be moved into the record.
+void Write(Level level, const char* file, int line, const char* function, std::string message);
 
 // Helper for time-based logging state.
 struct LogEveryTState {

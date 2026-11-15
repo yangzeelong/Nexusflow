@@ -59,12 +59,7 @@ const char* LevelName(Level level) {
     return "";
 }
 
-std::string PadTo(std::string text, std::size_t width) {
-    if (text.size() < width) {
-        text.append(width - text.size(), ' ');
-    }
-    return text;
-}
+
 
 // loguru's default palette: cyan / blue / bold / yellow / red / light red.
 const char* LevelColor(Level level) {
@@ -148,40 +143,60 @@ bool StdoutSupportsColor() {
 
 // "YYYY-MM-DD HH:mm:ss.mmm +HH:MM", matching loguru's default time format. The
 // default line drops the offset, custom sinks still get it in the record.
+// "YYYY-MM-DD HH:mm:ss" is cached per thread per second: localtime() and the
+// UTC offset lookup dominate the per-record cost and only change once a second.
+struct TimestampCache {
+    std::time_t second = 0;
+    long offsetMinutes = 0;
+    std::string dateTime;
+};
+
 std::string FormatTimestamp() {
     const std::chrono::system_clock::time_point now = std::chrono::system_clock::now();
     const std::time_t seconds = std::chrono::system_clock::to_time_t(now);
-    const long long millis =
-        static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000);
+    const long long millis = static_cast<long long>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000);
 
-    std::tm localTime{};
+    thread_local TimestampCache cache;
+    if (cache.dateTime.empty() || cache.second != seconds) {
+        std::tm localTime{};
 #ifdef _WIN32
-    localtime_s(&localTime, &seconds);
+        localtime_s(&localTime, &seconds);
 #else
-    localtime_r(&seconds, &localTime);
+        localtime_r(&seconds, &localTime);
 #endif
 
-    // UTC offset of that instant, including DST. mktime() reads the broken down
-    // time as local time, the *mkgmtime family reads it as UTC; the difference is
-    // the offset in seconds.
-    std::tm localForOffset = localTime;
-    std::tm utcForOffset = localTime;
-    const std::time_t asLocal = std::mktime(&localForOffset);
+        // UTC offset of that instant, including DST. mktime() reads the broken
+        // down time as local time, the *mkgmtime family reads it as UTC.
+        std::tm localForOffset = localTime;
+        std::tm utcForOffset = localTime;
+        const std::time_t asLocal = std::mktime(&localForOffset);
 #ifdef _WIN32
-    const std::time_t asUtc = _mkgmtime(&utcForOffset);
+        const std::time_t asUtc = _mkgmtime(&utcForOffset);
 #else
-    const std::time_t asUtc = timegm(&utcForOffset);
+        const std::time_t asUtc = timegm(&utcForOffset);
 #endif
-    long offsetMinutes = 0;
-    if (asLocal != static_cast<std::time_t>(-1) && asUtc != static_cast<std::time_t>(-1)) {
-        offsetMinutes = static_cast<long>((asLocal - asUtc) / 60);
+        long offsetMinutes = 0;
+        if (asLocal != static_cast<std::time_t>(-1) && asUtc != static_cast<std::time_t>(-1)) {
+            offsetMinutes = static_cast<long>((asLocal - asUtc) / 60);
+        }
+
+        char buffer[32];
+        std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d", localTime.tm_year + 1900,
+                      localTime.tm_mon + 1, localTime.tm_mday, localTime.tm_hour, localTime.tm_min, localTime.tm_sec);
+        cache.dateTime.assign(buffer);
+        cache.offsetMinutes = offsetMinutes;
+        cache.second = seconds;
     }
 
-    char buffer[64];
-    std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d.%03lld %+03ld:%02ld", localTime.tm_year + 1900,
-                  localTime.tm_mon + 1, localTime.tm_mday, localTime.tm_hour, localTime.tm_min, localTime.tm_sec, millis,
-                  offsetMinutes / 60, std::labs(offsetMinutes % 60));
-    return std::string(buffer);
+    char suffix[16];
+    std::snprintf(suffix, sizeof(suffix), ".%03lld %+03ld:%02ld", millis, cache.offsetMinutes / 60,
+                  std::labs(cache.offsetMinutes % 60));
+    std::string timestamp;
+    timestamp.reserve(cache.dateTime.size() + 16);
+    timestamp.assign(cache.dateTime);
+    timestamp += suffix;
+    return timestamp;
 }
 
 char PathSeparator() {
@@ -204,66 +219,77 @@ std::uint64_t NativeThreadId() {
 #endif
 }
 
-// "YYYY-MM-DD HH:mm:ss.mmm +HH:MM" -> "YYYY-MM-DD HH:mm:ss.mmm".
-std::string DateTimeText(const LogRecord& record) {
-    if (record.timestamp.size() >= 23) {
-        return record.timestamp.substr(0, 23);
+// "YYYY-MM-DD HH:mm:ss.mmm +HH:MM" -> "YYYY-MM-DD HH:mm:ss.mmm", appended
+// straight into the output buffer.
+void AppendDateTime(std::string& out, const LogRecord& record) {
+    const std::size_t length = record.timestamp.size() >= 23 ? 23 : record.timestamp.size();
+    out.append(record.timestamp.data(), length);
+}
+
+void AppendThread(std::string& out, const LogRecord& record) {
+    char buffer[32];
+    const int length =
+        std::snprintf(buffer, sizeof(buffer), "T%llu", static_cast<unsigned long long>(record.threadId));
+    if (length > 0) {
+        out.append(buffer, static_cast<std::size_t>(length));
     }
-    return record.timestamp;
 }
 
-std::string FileAndLine(const LogRecord& record) {
-    std::string location = record.file != nullptr ? record.file : "";
-    location += ':';
-    location += std::to_string(record.line);
-    return location;
+void AppendLocation(std::string& out, const LogRecord& record) {
+    out.append(record.file != nullptr ? record.file : "");
+    char buffer[24];
+    const int length = std::snprintf(buffer, sizeof(buffer), ":%d", record.line);
+    if (length > 0) {
+        out.append(buffer, static_cast<std::size_t>(length));
+    }
 }
 
-std::string ThreadText(const LogRecord& record) { return "T" + std::to_string(record.threadId); }
+void AppendLevel(std::string& out, Level level) {
+    char buffer[16];
+    const int length =
+        std::snprintf(buffer, sizeof(buffer), "%-*s", static_cast<int>(kLevelWidth), LevelName(level));
+    if (length > 0) {
+        out.append(buffer, static_cast<std::size_t>(length));
+    }
+}
 
 // Plain layout (console without a terminal, and the log file):
 //   2026-11-14 22:13:01.084 | INFO  | T19088 | main.cpp:47 - message
-std::string PlainLine(const LogRecord& record) {
-    std::string line;
-    line.reserve(140);
-    line += DateTimeText(record);
+void AppendPlainLine(std::string& line, const LogRecord& record) {
+    AppendDateTime(line, record);
     line += " | ";
-    line += PadTo(LevelName(record.level), kLevelWidth);
+    AppendLevel(line, record.level);
     line += " | ";
-    line += ThreadText(record);
+    AppendThread(line, record);
     line += " | ";
-    line += FileAndLine(record);
+    AppendLocation(line, record);
     line += " - ";
     line += record.message;
-    return line;
 }
 
 // Same layout with loguru's colors: green time, level colored tag and message,
 // gray thread id, cyan location.
-std::string ColoredLine(const LogRecord& record) {
+void AppendColoredLine(std::string& line, const LogRecord& record) {
     const char* levelColor = LevelColor(record.level);
-    std::string line;
-    line.reserve(188);
     line += kTimeColor;
-    line += DateTimeText(record);
+    AppendDateTime(line, record);
     line += kReset;
     line += " | ";
     line += levelColor;
-    line += PadTo(LevelName(record.level), kLevelWidth);
+    AppendLevel(line, record.level);
     line += kReset;
     line += " | ";
     line += kThreadColor;
-    line += ThreadText(record);
+    AppendThread(line, record);
     line += kReset;
     line += " | ";
     line += kLocationColor;
-    line += FileAndLine(record);
+    AppendLocation(line, record);
     line += kReset;
     line += " - ";
     line += levelColor;
     line += record.message;
     line += kReset;
-    return line;
 }
 
 std::mutex& ParamMutex() {
@@ -295,7 +321,10 @@ std::shared_ptr<spdlog::logger> MakeFileLogger(const LoggerParam& param) {
     auto fileLogger = std::make_shared<spdlog::logger>(name, std::move(sink));
     fileLogger->set_pattern("%v");
     fileLogger->set_level(spdlog::level::trace);
-    fileLogger->flush_on(spdlog::level::trace);
+    // Errors reach the file immediately; routine lines are flushed at most once
+    // per second in DefaultSink::Write, which keeps the hot path out of a flush
+    // syscall per record.
+    fileLogger->flush_on(spdlog::level::err);
     return fileLogger;
 }
 
@@ -320,12 +349,30 @@ public:
 
     void Write(const LogRecord& record) override {
         std::lock_guard<std::mutex> lock(m_mutex);
-        std::string text = m_consoleColors ? ColoredLine(record) : PlainLine(record);
+        std::string text;
+        text.reserve(192 + record.message.size());
+        if (m_consoleColors) {
+            AppendColoredLine(text, record);
+        } else {
+            AppendPlainLine(text, record);
+        }
         text += '\n';
         std::fwrite(text.data(), 1, text.size(), stdout);
-        std::fflush(stdout);
+        // A terminal wants the line immediately; redirected output is batched by
+        // stdio, so only errors jump the queue there.
+        if (m_consoleColors || record.level >= Level::ERR) {
+            std::fflush(stdout);
+        }
         if (m_fileLogger) {
-            m_fileLogger->trace("{}", PlainLine(record));
+            std::string plain;
+            plain.reserve(192 + record.message.size());
+            AppendPlainLine(plain, record);
+            m_fileLogger->trace("{}", plain);
+            const auto now = std::chrono::steady_clock::now();
+            if (record.level >= Level::ERR || now - m_lastFileFlush >= std::chrono::seconds(1)) {
+                m_fileLogger->flush();
+                m_lastFileFlush = now;
+            }
         }
     }
 
@@ -333,6 +380,7 @@ private:
     std::mutex m_mutex;
     bool m_consoleColors;
     std::shared_ptr<spdlog::logger> m_fileLogger;
+    std::chrono::steady_clock::time_point m_lastFileFlush = std::chrono::steady_clock::now();
 };
 
 std::shared_ptr<LogSink> MakeDefaultSink() {
@@ -388,7 +436,7 @@ std::shared_ptr<LogSink> GetSink() {
 
 namespace detail {
 
-void Write(Level level, const char* file, int line, const char* function, const std::string& message) {
+void Write(Level level, const char* file, int line, const char* function, std::string message) {
     if (!IsLevelEnabled(level)) {
         return;
     }
@@ -400,7 +448,7 @@ void Write(Level level, const char* file, int line, const char* function, const 
     record.file = file != nullptr ? FileName(file) : "";
     record.line = line;
     record.function = function != nullptr ? function : "";
-    record.message = message;
+    record.message = std::move(message);
 
     std::shared_ptr<LogSink> sink;
     {
