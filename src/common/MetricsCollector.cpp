@@ -1,4 +1,4 @@
-#include "nexusflow/TimerRegistry.hpp"
+#include "nexusflow/MetricsCollector.hpp"
 
 #include <algorithm>
 #include <unordered_map>
@@ -24,7 +24,7 @@ struct ActiveTimer {
 /// is never erased, so measuring the same timer again reuses its vector and its
 /// capacity instead of allocating one per measurement, and the key is a small
 /// integer rather than a string, so a lookup hashes no name.
-thread_local std::unordered_map<TimerRegistry::TimerHandle,
+thread_local std::unordered_map<MetricsCollector::TimerHandle,
                                 std::vector<ActiveTimer>> g_activeTimers;
 
 /// Strip the directory from __FILE__ so the printed profile stays readable.
@@ -77,12 +77,12 @@ TimerPrintPolicy TimerPrintPolicy::Interval(uint64_t calls) {
     return policy;
 }
 
-TimerRegistry& TimerRegistry::Instance() {
-    static TimerRegistry registry;
+MetricsCollector& MetricsCollector::Instance() {
+    static MetricsCollector registry;
     return registry;
 }
 
-TimerRegistry::TimerHandle TimerRegistry::Intern(const std::string& name) {
+MetricsCollector::TimerHandle MetricsCollector::Intern(const std::string& name) {
     if (name.empty()) return 0;
     std::lock_guard<std::mutex> lock(m_mutex);
     const auto found = m_names.find(name);
@@ -96,7 +96,7 @@ TimerRegistry::TimerHandle TimerRegistry::Intern(const std::string& name) {
     return handle;
 }
 
-TimerRegistry::TimerHandle TimerRegistry::FindInterned(
+MetricsCollector::TimerHandle MetricsCollector::FindInterned(
     const std::string& name) const {
     // The stop/read forms must not intern: a measurement that was never started
     // is not a timer, and it should not show up in Snapshot() either.
@@ -106,21 +106,21 @@ TimerRegistry::TimerHandle TimerRegistry::FindInterned(
     return found == m_names.end() ? 0 : found->second;
 }
 
-TimerRegistry::Slot* TimerRegistry::FindSlot(TimerHandle handle) {
+MetricsCollector::Slot* MetricsCollector::FindSlot(TimerHandle handle) {
     if (handle == 0 || handle > static_cast<TimerHandle>(m_slots.size())) {
         return nullptr;
     }
     return &m_slots[static_cast<std::size_t>(handle - 1)];
 }
 
-const TimerRegistry::Slot* TimerRegistry::FindSlot(TimerHandle handle) const {
+const MetricsCollector::Slot* MetricsCollector::FindSlot(TimerHandle handle) const {
     if (handle == 0 || handle > static_cast<TimerHandle>(m_slots.size())) {
         return nullptr;
     }
     return &m_slots[static_cast<std::size_t>(handle - 1)];
 }
 
-void TimerRegistry::Accumulate(Aggregate& aggregate, double elapsedMs,
+void MetricsCollector::Accumulate(Aggregate& aggregate, double elapsedMs,
                                uint64_t items, const char* file, int line) {
     // Normalizing here is what keeps every reported duration on the item axis:
     // a measurement that covered N items contributes elapsedMs / N, so min,
@@ -148,7 +148,7 @@ void TimerRegistry::Accumulate(Aggregate& aggregate, double elapsedMs,
     }
 }
 
-TimerStats TimerRegistry::MakeStats(const std::string& name,
+TimerStats MetricsCollector::MakeStats(const std::string& name,
                                     const Aggregate& aggregate) {
     TimerStats stats;
     stats.name = name;
@@ -161,35 +161,35 @@ TimerStats TimerRegistry::MakeStats(const std::string& name,
     return stats;
 }
 
-void TimerRegistry::StartAverage(const std::string& name,
+void MetricsCollector::StartAverage(const std::string& name,
                                  TimerPrintPolicy policy,
                                  const char* file, int line) {
     StartAverage(Intern(name), policy, file, line);
 }
 
-void TimerRegistry::StartAverage(TimerHandle handle, TimerPrintPolicy policy,
+void MetricsCollector::StartAverage(TimerHandle handle, TimerPrintPolicy policy,
                                  const char* file, int line) {
     if (handle == 0) return;
     g_activeTimers[handle].push_back(
         ActiveTimer{std::chrono::steady_clock::now(), policy, 0, file, line});
 }
 
-void TimerRegistry::IncrementAverage(const std::string& name, uint64_t items) {
+void MetricsCollector::IncrementAverage(const std::string& name, uint64_t items) {
     IncrementAverage(FindInterned(name), items);
 }
 
-void TimerRegistry::IncrementAverage(TimerHandle handle, uint64_t items) {
+void MetricsCollector::IncrementAverage(TimerHandle handle, uint64_t items) {
     if (handle == 0) return;
     const auto it = g_activeTimers.find(handle);
     if (it == g_activeTimers.end() || it->second.empty()) return;
     it->second.back().items += items;
 }
 
-double TimerRegistry::EndAverage(const std::string& name) {
+double MetricsCollector::EndAverage(const std::string& name) {
     return EndAverage(FindInterned(name));
 }
 
-double TimerRegistry::EndAverage(TimerHandle handle) {
+double MetricsCollector::EndAverage(TimerHandle handle) {
     if (handle == 0) return 0.0;
     const auto it = g_activeTimers.find(handle);
     if (it == g_activeTimers.end() || it->second.empty()) return 0.0;
@@ -214,13 +214,13 @@ double TimerRegistry::EndAverage(TimerHandle handle) {
     return elapsedMs;
 }
 
-void TimerRegistry::AddItems(const std::string& name, double elapsedMs,
+void MetricsCollector::AddItems(const std::string& name, double elapsedMs,
                              uint64_t items,
                              const char* file, int line) {
     AddItems(Intern(name), elapsedMs, items, file, line);
 }
 
-void TimerRegistry::AddItems(TimerHandle handle, double elapsedMs,
+void MetricsCollector::AddItems(TimerHandle handle, double elapsedMs,
                              uint64_t items,
                              const char* file, int line) {
     elapsedMs = std::max(0.0, elapsedMs);
@@ -230,7 +230,7 @@ void TimerRegistry::AddItems(TimerHandle handle, double elapsedMs,
     Accumulate(slot->aggregate, elapsedMs, items, file, line);
 }
 
-TimerRegistry::CompletedSample TimerRegistry::AddItemsWithPolicy(
+MetricsCollector::CompletedSample MetricsCollector::AddItemsWithPolicy(
     TimerHandle handle, double elapsedMs, uint64_t items,
     const TimerPrintPolicy& policy,
     std::chrono::steady_clock::time_point started,
@@ -302,7 +302,7 @@ TimerRegistry::CompletedSample TimerRegistry::AddItemsWithPolicy(
     return completed;
 }
 
-bool TimerRegistry::GetStats(const std::string& name, TimerStats& stats) const {
+bool MetricsCollector::GetStats(const std::string& name, TimerStats& stats) const {
     std::lock_guard<std::mutex> lock(m_mutex);
     const auto found = m_names.find(name);
     if (found == m_names.end()) return false;
@@ -314,7 +314,7 @@ bool TimerRegistry::GetStats(const std::string& name, TimerStats& stats) const {
     return true;
 }
 
-bool TimerRegistry::GetStats(TimerHandle handle, TimerStats& stats) const {
+bool MetricsCollector::GetStats(TimerHandle handle, TimerStats& stats) const {
     std::lock_guard<std::mutex> lock(m_mutex);
     const Slot* slot = FindSlot(handle);
     if (slot == nullptr || slot->aggregate.calls == 0) return false;
@@ -324,7 +324,7 @@ bool TimerRegistry::GetStats(TimerHandle handle, TimerStats& stats) const {
     return true;
 }
 
-std::vector<TimerStats> TimerRegistry::Snapshot() const {
+std::vector<TimerStats> MetricsCollector::Snapshot() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     std::vector<TimerStats> snapshot;
     snapshot.reserve(m_slots.size());
@@ -339,13 +339,13 @@ std::vector<TimerStats> TimerRegistry::Snapshot() const {
     return snapshot;
 }
 
-void TimerRegistry::Print() const {
+void MetricsCollector::Print() const {
     for (const auto& stats : Snapshot()) {
         PrintStats(stats);
     }
 }
 
-void TimerRegistry::PrintStats(const TimerStats& stats) const {
+void MetricsCollector::PrintStats(const TimerStats& stats) const {
     // One count and one unit: an item, so a line is directly comparable with
     // the next one regardless of how each timer was instrumented. Throughput
     // comes from the same count, which means items/s is the rate of the work
@@ -360,7 +360,7 @@ void TimerRegistry::PrintStats(const TimerStats& stats) const {
              stats.AvgItemMs(), stats.p95Ms, stats.minMs, stats.maxMs);
 }
 
-void TimerRegistry::PrintWindow(const CompletedSample& sample) const {
+void MetricsCollector::PrintWindow(const CompletedSample& sample) const {
     // The window is the run since the previous report, so qps comes from wall
     // time while the average comes from the service time the calls took.
     const double wallMs = sample.windowWallMs;
@@ -373,7 +373,7 @@ void TimerRegistry::PrintWindow(const CompletedSample& sample) const {
              sample.name, sample.windowItems, wallMs, itemsPerSecond, avgItemMs);
 }
 
-void TimerRegistry::PrintSample(const CompletedSample& sample) const {
+void MetricsCollector::PrintSample(const CompletedSample& sample) const {
     if (sample.items <= 1) {
         LOG_INFO("Execute '{}' once cost: {:.3f} ms",
                  sample.name, sample.elapsedMs);
@@ -384,7 +384,7 @@ void TimerRegistry::PrintSample(const CompletedSample& sample) const {
              sample.elapsedMs / static_cast<double>(sample.items));
 }
 
-bool TimerRegistry::PrintIfDue(uint64_t intervalMs) {
+bool MetricsCollector::PrintIfDue(uint64_t intervalMs) {
     const auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lock(m_reportMutex);
     if (m_lastReport.time_since_epoch().count() != 0 &&
@@ -397,7 +397,7 @@ bool TimerRegistry::PrintIfDue(uint64_t intervalMs) {
     return true;
 }
 
-void TimerRegistry::Reset() {
+void MetricsCollector::Reset() {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         // Handles stay valid: a reset clears what was measured, so the slots
@@ -412,19 +412,19 @@ void TimerRegistry::Reset() {
     m_lastReport = std::chrono::steady_clock::time_point();
 }
 
-TimerRegistry::ScopedTimer TimerRegistry::Scope(const std::string& name,
+MetricsCollector::ScopedTimer MetricsCollector::Scope(const std::string& name,
                                                TimerPrintPolicy policy,
                                                const char* file, int line) {
     return ScopedTimer(*this, name, policy, file, line);
 }
 
-TimerRegistry::ScopedTimer TimerRegistry::Scope(TimerHandle handle,
+MetricsCollector::ScopedTimer MetricsCollector::Scope(TimerHandle handle,
                                                TimerPrintPolicy policy,
                                                const char* file, int line) {
     return ScopedTimer(*this, handle, policy, file, line);
 }
 
-TimerRegistry::ScopedTimer::ScopedTimer(TimerRegistry& registry,
+MetricsCollector::ScopedTimer::ScopedTimer(MetricsCollector& registry,
                                         std::string name,
                                         TimerPrintPolicy policy,
                                         const char* file, int line)
@@ -435,7 +435,7 @@ TimerRegistry::ScopedTimer::ScopedTimer(TimerRegistry& registry,
     }
 }
 
-TimerRegistry::ScopedTimer::ScopedTimer(TimerRegistry& registry,
+MetricsCollector::ScopedTimer::ScopedTimer(MetricsCollector& registry,
                                         TimerHandle handle,
                                         TimerPrintPolicy policy,
                                         const char* file, int line)
@@ -446,13 +446,13 @@ TimerRegistry::ScopedTimer::ScopedTimer(TimerRegistry& registry,
     }
 }
 
-TimerRegistry::ScopedTimer::~ScopedTimer() {
+MetricsCollector::ScopedTimer::~ScopedTimer() {
     if (m_active && m_registry != nullptr) {
         m_registry->EndAverage(m_handle);
     }
 }
 
-TimerRegistry::ScopedTimer::ScopedTimer(ScopedTimer&& other) noexcept
+MetricsCollector::ScopedTimer::ScopedTimer(ScopedTimer&& other) noexcept
     : m_registry(other.m_registry),
       m_handle(other.m_handle),
       m_active(other.m_active) {
@@ -460,7 +460,7 @@ TimerRegistry::ScopedTimer::ScopedTimer(ScopedTimer&& other) noexcept
     other.m_active = false;
 }
 
-TimerRegistry::ScopedTimer& TimerRegistry::ScopedTimer::operator=(
+MetricsCollector::ScopedTimer& MetricsCollector::ScopedTimer::operator=(
     ScopedTimer&& other) noexcept {
     if (this == &other) return *this;
     if (m_active && m_registry != nullptr) {

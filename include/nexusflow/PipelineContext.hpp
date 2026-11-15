@@ -2,7 +2,7 @@
 #define NEXUSFLOW_PIPELINE_CONTEXT_HPP
 
 #include <nexusflow/Logging.hpp>
-#include <nexusflow/TimerRegistry.hpp>
+#include <nexusflow/MetricsCollector.hpp>
 
 #include <atomic>
 #include <cstdint>
@@ -51,7 +51,7 @@ public:
     /// Per-pipeline timer registry. Modules instrumented with the TIMER_* macros
     /// still report to the process-wide registry; use Profiler() directly (or
     /// the worker's `profileTimers` path) when timings must stay isolated.
-    profiling::TimerRegistry& Profiler() { return m_profiler; }
+    profiling::MetricsCollector& Profiler() { return m_profiler; }
 
     /**
      * @brief One accumulated custom metric reported by a module.
@@ -81,7 +81,7 @@ private:
     mutable std::mutex m_sinkMutex;
     std::shared_ptr<log::LogSink> m_sink;
 
-    profiling::TimerRegistry m_profiler;
+    profiling::MetricsCollector m_profiler;
 
     mutable std::mutex m_metricsMutex;
     std::map<std::string, Metric> m_metrics;

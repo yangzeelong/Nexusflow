@@ -1,5 +1,5 @@
-#ifndef NEXUSFLOW_TIMER_REGISTRY_HPP
-#define NEXUSFLOW_TIMER_REGISTRY_HPP
+#ifndef NEXUSFLOW_METRICS_COLLECTOR_HPP
+#define NEXUSFLOW_METRICS_COLLECTOR_HPP
 
 #include <algorithm>
 #include <chrono>
@@ -16,10 +16,10 @@ namespace nexusflow {
 
 /// Profiling and diagnostics utilities.
 ///
-/// The timer registry is public on purpose: applications and extensions
-/// instrument their own stages with the TIMER_* macros and print the collected
-/// profile. It is a diagnostics surface, not a pipeline primitive, so it is not
-/// on the same compatibility footing as Message/Module/Pipeline.
+/// The collector is public on purpose: applications and extensions instrument
+/// their own stages with the TIMER_* macros and print the collected profile. It
+/// is a diagnostics surface, not a pipeline primitive, so it is not on the same
+/// compatibility footing as Message/Module/Pipeline.
 namespace profiling {
 
 /// One timer's cumulative numbers. Every duration describes a single item, so
@@ -74,7 +74,7 @@ struct TimerPrintPolicy {
     static TimerPrintPolicy Interval(uint64_t calls);
 };
 
-class TimerRegistry {
+class MetricsCollector {
 public:
     class ScopedTimer;
 
@@ -85,7 +85,7 @@ public:
     /// and 0 means "not interned" — every handle form treats 0 as a no-op.
     using TimerHandle = uint64_t;
 
-    static TimerRegistry& Instance();
+    static MetricsCollector& Instance();
 
     /// Resolve a timer name to a handle, interning it on first use. Call this
     /// once — at startup, or on the first message — and use the handle from
@@ -257,11 +257,11 @@ private:
     std::chrono::steady_clock::time_point m_lastReport;
 };
 
-class TimerRegistry::ScopedTimer {
+class MetricsCollector::ScopedTimer {
 public:
-    ScopedTimer(TimerRegistry& registry, std::string name,
+    ScopedTimer(MetricsCollector& registry, std::string name,
                 TimerPrintPolicy policy, const char* file, int line);
-    ScopedTimer(TimerRegistry& registry, TimerHandle handle,
+    ScopedTimer(MetricsCollector& registry, TimerHandle handle,
                 TimerPrintPolicy policy, const char* file, int line);
     ~ScopedTimer();
 
@@ -272,7 +272,7 @@ public:
     ScopedTimer& operator=(ScopedTimer&& other) noexcept;
 
 private:
-    TimerRegistry* m_registry = nullptr;
+    MetricsCollector* m_registry = nullptr;
     TimerHandle m_handle = 0;
     bool m_active = false;
 };
@@ -329,12 +329,12 @@ private:
 // handle to the same macros — they accept either:
 //
 //     const auto decodeTimer =
-//         TimerRegistry::Instance().Intern(moduleName + ".Decode");
+//         MetricsCollector::Instance().Intern(moduleName + ".Decode");
 //     TIMER_SCOPE_AVERAGE_MS(decodeTimer, 5000);
 //
 // Each macro forwards __FILE__/__LINE__, which the registry reports next to the
 // timer so a printed profile points back at the code that produced it. Use
-// these macros instead of calling TimerRegistry directly.
+// these macros instead of calling MetricsCollector directly.
 //
 // Wrap arguments that contain a comma (template arguments, for example) in
 // parentheses, or bind the value to a local first.
@@ -346,20 +346,20 @@ private:
 // --- Per-call timing -------------------------------------------------------
 
 #define TIMER_START(name) \
-    ::nexusflow::profiling::TimerRegistry::Instance().StartAverage( \
+    ::nexusflow::profiling::MetricsCollector::Instance().StartAverage( \
         (name), ::nexusflow::profiling::TimerPrintPolicy::EachCall(), __FILE__, __LINE__)
 
 #define TIMER_STOP(name) \
-    ::nexusflow::profiling::TimerRegistry::Instance().EndAverage((name))
+    ::nexusflow::profiling::MetricsCollector::Instance().EndAverage((name))
 
 // --- Aggregated timing -----------------------------------------------------
 
 #define TIMER_START_AVERAGE_MS(name, ms) \
-    ::nexusflow::profiling::TimerRegistry::Instance().StartAverage( \
+    ::nexusflow::profiling::MetricsCollector::Instance().StartAverage( \
         (name), ::nexusflow::profiling::TimerPrintPolicy::EveryMs(ms), __FILE__, __LINE__)
 
 #define TIMER_START_AVERAGE_N(name, calls) \
-    ::nexusflow::profiling::TimerRegistry::Instance().StartAverage( \
+    ::nexusflow::profiling::MetricsCollector::Instance().StartAverage( \
         (name), ::nexusflow::profiling::TimerPrintPolicy::EveryCalls(calls), \
         __FILE__, __LINE__)
 
@@ -368,12 +368,12 @@ private:
 /// Declare that the measurement in progress covers `items` more items, so the
 /// report stays per item. Without it a measurement counts as one item.
 #define TIMER_INCREMENT_AVERAGE(name, items) \
-    ::nexusflow::profiling::TimerRegistry::Instance().IncrementAverage((name), (items))
+    ::nexusflow::profiling::MetricsCollector::Instance().IncrementAverage((name), (items))
 
 // --- Windowed timing -------------------------------------------------------
 
 #define TIMER_START_INTERVAL(name, calls) \
-    ::nexusflow::profiling::TimerRegistry::Instance().StartAverage( \
+    ::nexusflow::profiling::MetricsCollector::Instance().StartAverage( \
         (name), ::nexusflow::profiling::TimerPrintPolicy::Interval(calls), \
         __FILE__, __LINE__)
 
@@ -383,19 +383,19 @@ private:
 
 #define TIMER_SCOPE(name) \
     auto NEXUSFLOW_TIMER_CONCAT(nexusflowTimer_, __LINE__) = \
-        ::nexusflow::profiling::TimerRegistry::Instance().Scope( \
+        ::nexusflow::profiling::MetricsCollector::Instance().Scope( \
             (name), ::nexusflow::profiling::TimerPrintPolicy::EachCall(), \
             __FILE__, __LINE__)
 
 #define TIMER_SCOPE_AVERAGE_MS(name, ms) \
     auto NEXUSFLOW_TIMER_CONCAT(nexusflowTimer_, __LINE__) = \
-        ::nexusflow::profiling::TimerRegistry::Instance().Scope( \
+        ::nexusflow::profiling::MetricsCollector::Instance().Scope( \
             (name), ::nexusflow::profiling::TimerPrintPolicy::EveryMs(ms), \
             __FILE__, __LINE__)
 
 /// Record an already measured duration.
 #define TIMER_ADD_ITEMS(name, ms, items) \
-    ::nexusflow::profiling::TimerRegistry::Instance().AddItems( \
+    ::nexusflow::profiling::MetricsCollector::Instance().AddItems( \
         (name), (ms), (items), __FILE__, __LINE__)
 
 #endif

@@ -247,7 +247,7 @@ const bool stopping = context->StopRequested();
   framework queues and module counters.
 - `RequestStop` is called by `Pipeline::Stop()` before the queues are shut down, so
   long-running modules can leave their loop cooperatively.
-- `Profiler()` returns a per-pipeline `nexusflow::profiling::TimerRegistry`, so two
+- `Profiler()` returns a per-pipeline `nexusflow::profiling::MetricsCollector`, so two
   pipelines that use identical module names no longer merge their timing samples.
 
 The context is created by `Pipeline::Impl` during `Init()`; modules that never call

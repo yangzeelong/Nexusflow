@@ -1,7 +1,7 @@
 #include "VideoReader.hpp"
 
 #include <nexusflow/Logging.hpp>
-#include <nexusflow/TimerRegistry.hpp>
+#include <nexusflow/MetricsCollector.hpp>
 
 extern "C" {
 #include <libavcodec/avcodec.h>

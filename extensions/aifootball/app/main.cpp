@@ -6,7 +6,7 @@
 
 #include <aifootball/AIFootball.hpp>
 #include <nexusflow/Logging.hpp>
-#include <nexusflow/TimerRegistry.hpp>
+#include <nexusflow/MetricsCollector.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -63,7 +63,7 @@ RunOptions ReadOptions(const app::CommandParser& cli,
 }
 
 void PrintTimerSnapshot() {
-    auto stats = nexusflow::profiling::TimerRegistry::Instance().Snapshot();
+    auto stats = nexusflow::profiling::MetricsCollector::Instance().Snapshot();
     std::sort(stats.begin(), stats.end(), [](const auto& lhs, const auto& rhs) {
         return lhs.totalMs > rhs.totalMs;
     });

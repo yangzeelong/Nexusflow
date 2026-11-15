@@ -1,4 +1,4 @@
-#include "nexusflow/TimerRegistry.hpp"
+#include "nexusflow/MetricsCollector.hpp"
 
 #include "gtest/gtest.h"
 
@@ -7,11 +7,11 @@
 #include <vector>
 
 using nexusflow::profiling::TimerPrintPolicy;
-using nexusflow::profiling::TimerRegistry;
+using nexusflow::profiling::MetricsCollector;
 using nexusflow::profiling::TimerStats;
 
-TEST(TimerRegistryTest, CountsOneItemPerMeasurementByDefault) {
-    auto& registry = TimerRegistry::Instance();
+TEST(MetricsCollectorTest, CountsOneItemPerMeasurementByDefault) {
+    auto& registry = MetricsCollector::Instance();
     registry.Reset();
 
     registry.AddItems("test.aggregate", 10.0);
@@ -30,8 +30,8 @@ TEST(TimerRegistryTest, CountsOneItemPerMeasurementByDefault) {
     EXPECT_DOUBLE_EQ(stats.p95Ms, 20.0);
 }
 
-TEST(TimerRegistryTest, DeclaredItemsNormalizeEveryDuration) {
-    auto& registry = TimerRegistry::Instance();
+TEST(MetricsCollectorTest, DeclaredItemsNormalizeEveryDuration) {
+    auto& registry = MetricsCollector::Instance();
     registry.Reset();
 
     // One measurement covering four items: the reported numbers describe a
@@ -49,8 +49,8 @@ TEST(TimerRegistryTest, DeclaredItemsNormalizeEveryDuration) {
     EXPECT_DOUBLE_EQ(stats.p95Ms, 10.0);
 }
 
-TEST(TimerRegistryTest, SupportsScopedAndIncrementedItems) {
-    auto& registry = TimerRegistry::Instance();
+TEST(MetricsCollectorTest, SupportsScopedAndIncrementedItems) {
+    auto& registry = MetricsCollector::Instance();
     registry.Reset();
 
     registry.StartAverage("test.scoped", TimerPrintPolicy::EveryMs(1000));
@@ -92,8 +92,8 @@ TEST(TimerRegistryTest, SupportsScopedAndIncrementedItems) {
     EXPECT_EQ(stats.items, 2U);
 }
 
-TEST(TimerRegistryTest, ReportingPoliciesDoNotAffectAggregation) {
-    auto& registry = TimerRegistry::Instance();
+TEST(MetricsCollectorTest, ReportingPoliciesDoNotAffectAggregation) {
+    auto& registry = MetricsCollector::Instance();
     registry.Reset();
 
     // Windowed reporting resets its window every N measurements, and the
@@ -112,8 +112,8 @@ TEST(TimerRegistryTest, ReportingPoliciesDoNotAffectAggregation) {
     EXPECT_GT(stats.totalMs, 0.0);
 }
 
-TEST(TimerRegistryTest, AggregationIsThreadSafe) {
-    auto& registry = TimerRegistry::Instance();
+TEST(MetricsCollectorTest, AggregationIsThreadSafe) {
+    auto& registry = MetricsCollector::Instance();
     registry.Reset();
 
     constexpr int kThreadCount = 4;
@@ -139,8 +139,8 @@ TEST(TimerRegistryTest, AggregationIsThreadSafe) {
     EXPECT_DOUBLE_EQ(stats.maxMs, 2.0 / 3.0);
 }
 
-TEST(TimerRegistryTest, InternedHandleAddressesTheSameTimerAsTheName) {
-    auto& registry = TimerRegistry::Instance();
+TEST(MetricsCollectorTest, InternedHandleAddressesTheSameTimerAsTheName) {
+    auto& registry = MetricsCollector::Instance();
     registry.Reset();
 
     const auto handle = registry.Intern("test.handle");
@@ -167,8 +167,8 @@ TEST(TimerRegistryTest, InternedHandleAddressesTheSameTimerAsTheName) {
     EXPECT_EQ(byHandle.maxMs, 20.0);
 }
 
-TEST(TimerRegistryTest, HandleFormsMeasureAndScopeLikeTheNameForms) {
-    auto& registry = TimerRegistry::Instance();
+TEST(MetricsCollectorTest, HandleFormsMeasureAndScopeLikeTheNameForms) {
+    auto& registry = MetricsCollector::Instance();
     registry.Reset();
 
     const auto handle = registry.Intern("test.handle.scope");
@@ -197,8 +197,8 @@ TEST(TimerRegistryTest, HandleFormsMeasureAndScopeLikeTheNameForms) {
     EXPECT_EQ(stats.file, __FILE__);
 }
 
-TEST(TimerRegistryTest, InvalidHandleIsANoOp) {
-    auto& registry = TimerRegistry::Instance();
+TEST(MetricsCollectorTest, InvalidHandleIsANoOp) {
+    auto& registry = MetricsCollector::Instance();
     registry.Reset();
 
     // 0 is what Intern() returns for an uninterned name; every handle form has

@@ -3,7 +3,7 @@
 #include "nexusflow/Message.hpp"
 #include "nexusflow/Logging.hpp"
 #include "nexusflow/PipelineContext.hpp"
-#include "nexusflow/TimerRegistry.hpp"
+#include "nexusflow/MetricsCollector.hpp"
 #include <algorithm>
 #include <chrono>
 #include <memory>
@@ -21,8 +21,8 @@ namespace {
 // scope holds no timer at all and touches nothing.
 class OptionalScopeTimer {
 public:
-    OptionalScopeTimer(bool enabled, ::nexusflow::profiling::TimerRegistry& registry,
-                       ::nexusflow::profiling::TimerRegistry::TimerHandle handle,
+    OptionalScopeTimer(bool enabled, ::nexusflow::profiling::MetricsCollector& registry,
+                       ::nexusflow::profiling::MetricsCollector::TimerHandle handle,
                        uint64_t windowMs, const char* file, int line)
         : m_registry(enabled ? &registry : nullptr), m_handle(handle) {
         if (m_registry != nullptr && m_handle != 0) {
@@ -42,8 +42,8 @@ public:
     OptionalScopeTimer& operator=(const OptionalScopeTimer&) = delete;
 
 private:
-    ::nexusflow::profiling::TimerRegistry* m_registry = nullptr;
-    ::nexusflow::profiling::TimerRegistry::TimerHandle m_handle = 0;
+    ::nexusflow::profiling::MetricsCollector* m_registry = nullptr;
+    ::nexusflow::profiling::MetricsCollector::TimerHandle m_handle = 0;
 };
 
 }  // namespace
@@ -58,8 +58,8 @@ Worker::Worker(const std::shared_ptr<Module>& modulePtr, const ViewPtr<Config>& 
     LoadConfig();
 }
 
-profiling::TimerRegistry& Worker::Profiler() {
-    return m_context ? m_context->Profiler() : ::nexusflow::profiling::TimerRegistry::Instance();
+profiling::MetricsCollector& Worker::Profiler() {
+    return m_context ? m_context->Profiler() : ::nexusflow::profiling::MetricsCollector::Instance();
 }
 
 Worker::~Worker() {

@@ -6,7 +6,7 @@
 #include "nexusflow/ErrorCode.hpp"
 #include "nexusflow/Logging.hpp"
 #include "nexusflow/Module.hpp"
-#include "nexusflow/TimerRegistry.hpp"
+#include "nexusflow/MetricsCollector.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -19,7 +19,7 @@
 
 namespace nexusflow {
 class PipelineContext;
-namespace profiling { class TimerRegistry; }
+namespace profiling { class MetricsCollector; }
 }  // namespace nexusflow
 
 namespace nexusflow { namespace core {
@@ -199,7 +199,7 @@ private:
      */
     /// Registry the work loop reports to: the pipeline context's own registry
     /// when one is attached, otherwise the process-wide singleton.
-    profiling::TimerRegistry& Profiler();
+    profiling::MetricsCollector& Profiler();
 
     void LoadConfig();
 
@@ -263,8 +263,8 @@ private:
     // those labels once too, so a profiled iteration measures without name work.
     std::string m_processTimerName;
     std::string m_waitTimerName;
-    profiling::TimerRegistry::TimerHandle m_processTimer = 0;
-    profiling::TimerRegistry::TimerHandle m_waitTimer = 0;
+    profiling::MetricsCollector::TimerHandle m_processTimer = 0;
+    profiling::MetricsCollector::TimerHandle m_waitTimer = 0;
 };
 
 }} // namespace nexusflow::core

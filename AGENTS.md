@@ -12,7 +12,7 @@
 核心概念：`Message`（Copy-On-Write）、`Module`（每个模块一个工作线程）、
 `Pipeline`（YAML 声明式建图 / `PipelineBuilder` 编程式建图）、`Dispatcher`
 （每个订阅者各拿一份 Message 拷贝；Message 拷贝只是 shared_ptr 引用计数）、
-`TimerRegistry`（命名空间 `nexusflow::profiling`，单轴计时 + p95 滑窗）。
+`MetricsCollector`（命名空间 `nexusflow::profiling`，单轴计时 + p95 滑窗）。
 
 可选功能（AI-Football 算法流水线等）放在 `extensions/<name>/`，通过
 `-DNEXUSFLOW_EXTENSIONS=<name>` 启用。**框架核心不得依赖任何扩展**：核心
@@ -20,8 +20,8 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 
 | 路径 | 作用 |
 | --- | --- |
-| `include/nexusflow/` | 公开头文件（Message/Module/Pipeline/PipelineBuilder/ModuleFactory/TimerRegistry/Logging…） |
-| `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（TimerRegistry、Logging 实现与测试） |
+| `include/nexusflow/` | 公开头文件（Message/Module/Pipeline/PipelineBuilder/ModuleFactory/MetricsCollector/Logging…） |
+| `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（MetricsCollector、Logging 实现与测试） |
 | `include/nexusflow/common/` | 公开的 header-only 容器/工具：`Any`、`ConcurrentQueue`、`Optional`、`ViewPtr`（`Nexusflow::nexusflow_common` INTERFACE target） |
 | `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 99 个，见 §3） |
 | `examples/` | 3 个纯框架示例：`1-how-to-use`、`2-linear-vision-pipline`、`3-joined-vision-pipline` |
@@ -41,7 +41,7 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | 消息分发 | `src/dispatcher/Dispatcher.hpp` |
 | YAML → DAG、拓扑排序 | `src/base/Graph.hpp`、`src/base/GraphUtils.*` |
 | 模块注册 | `include/nexusflow/ModuleFactory.hpp` |
-| 计时器 / profile（`nexusflow::profiling`，p95、单轴） | `include/nexusflow/TimerRegistry.hpp`、`src/common/TimerRegistry.cpp` |
+| 计时器 / profile（`nexusflow::profiling`，p95、单轴） | `include/nexusflow/MetricsCollector.hpp`、`src/common/MetricsCollector.cpp` |
 | 容器/工具（Any、队列、Optional、ViewPtr） | `include/nexusflow/common/*.hpp` |
 | 日志 | `include/nexusflow/Logging.hpp`（公开门面：Level/LoggerParam/LogRecord/LogSink/SetSink，不 include spdlog）+ `src/common/Logging.cpp`（spdlog 后端） |
 | 每 pipeline 上下文（日志 sink / profiler / 自定义指标 / 停止令牌） | `include/nexusflow/PipelineContext.hpp`、`src/pipeline/PipelineContext.cpp` |
