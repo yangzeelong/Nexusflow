@@ -46,6 +46,14 @@ public:
         return dispatcherDrops + workerDrops;
     }
 
+    /// Subset of DroppedCount() that expired in the fusion group instead of
+    /// being refused by a queue.
+    std::uint64_t FusionExpiredCount() const { return m_worker ? m_worker->FusionExpiredCount() : 0; }
+
+    /// Invocations that threw. processed + dropped + failed accounts for
+    /// everything the module was handed.
+    std::uint64_t FailedCount() const { return m_worker ? m_worker->FailedCount() : 0; }
+
     ErrorCode Init();
 
     ErrorCode DeInit();

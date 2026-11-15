@@ -168,6 +168,24 @@ public:
     /// covers the producer side).
     void RecordDropped(std::uint64_t count = 1) { m_droppedCount.fetch_add(count, std::memory_order_relaxed); }
 
+    /**
+     * @brief Partial fused messages this worker dropped after the fusion timeout.
+     * @details A subset of DroppedCount(), broken out because it is a different
+     * failure: the inputs arrived, one of them just arrived too late.
+     */
+    std::uint64_t FusionExpiredCount() const { return m_fusionExpiredCount.load(std::memory_order_relaxed); }
+
+    /**
+     * @brief Invocations that threw. processed + dropped + failed accounts for
+     *        everything the module saw: a throwing batch is neither processed
+     *        nor handed downstream, so without this the two counters would add
+     *        up to less than the module's input.
+     */
+    std::uint64_t FailedCount() const { return m_failedCount.load(std::memory_order_relaxed); }
+
+    /// Bumps the failure counter (one per throwing invocation, not per message).
+    void RecordFailed() { m_failedCount.fetch_add(1, std::memory_order_relaxed); }
+
     /** @brief Signals the loop to return without joining (used by the drain). */
     /**
      * @brief Tells the worker loop to return, and clears a previous request.
@@ -238,6 +256,9 @@ private:
     std::atomic<bool> m_drainRequested{false};
     std::atomic<std::uint64_t> m_processedCount{0};
     std::atomic<std::uint64_t> m_droppedCount{0};
+    /// Subset of m_droppedCount: fusion groups dropped after the timeout.
+    std::atomic<std::uint64_t> m_fusionExpiredCount{0};
+    std::atomic<std::uint64_t> m_failedCount{0};
 
     // Wakes a caller waiting for the loop to leave (see WaitForStopRequest()).
     mutable std::mutex m_loopMutex;

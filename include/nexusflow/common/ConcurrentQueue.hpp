@@ -55,6 +55,16 @@ public:
         return stats;
     }
 
+    /**
+     * @brief Forgets the deepest backlog seen so far.
+     * @details Only the water mark restarts; pushed/popped keep growing so two
+     * snapshots are still subtractable.
+     */
+    void resetHighWaterMark() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_highWaterMark = m_queue.size();
+    }
+
     // Disable copy and move semantics to ensure a single owner.
     ConcurrentQueue(const ConcurrentQueue&) = delete;
     ConcurrentQueue& operator=(const ConcurrentQueue&) = delete;

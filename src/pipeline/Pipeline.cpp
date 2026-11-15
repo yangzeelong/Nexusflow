@@ -361,34 +361,61 @@ ErrorCode Pipeline::Stop() {
     return ErrorCode::SUCCESS;
 }
 
-PipelineMetrics Pipeline::GetMetrics() const {
-    PipelineMetrics metrics;
+PipelineSnapshot Pipeline::GetSnapshot() const {
+    PipelineSnapshot metrics;
     if (!m_pImpl) {
         return metrics;
     }
+    if (m_pImpl->graph) {
+        metrics.name = m_pImpl->graph->getName();
+    }
 
-    metrics.queues.reserve(m_pImpl->queues.size());
+    metrics.edges.reserve(m_pImpl->queues.size());
     for (std::size_t i = 0; i < m_pImpl->queues.size(); ++i) {
         const auto stats = m_pImpl->queues[i]->GetStats();
-        QueueMetrics queue;
-        queue.name = i < m_pImpl->queueNames.size() ? m_pImpl->queueNames[i] : std::string();
-        queue.capacity = stats.capacity;
-        queue.size = stats.size;
-        queue.highWaterMark = stats.highWaterMark;
-        queue.pushed = stats.pushed;
-        queue.popped = stats.popped;
-        metrics.queues.push_back(std::move(queue));
+        EdgeSnapshot edge;
+        // The edge name is "from -> to"; the snapshot keeps the two ends apart so
+        // a reader can look up either side without splitting a string.
+        if (i < m_pImpl->queueNames.size()) {
+            const std::string& edgeName = m_pImpl->queueNames[i];
+            const std::string::size_type arrow = edgeName.find(" -> ");
+            if (arrow != std::string::npos) {
+                edge.from = edgeName.substr(0, arrow);
+                edge.to = edgeName.substr(arrow + 4);
+            } else {
+                edge.from = edgeName;
+            }
+        }
+        edge.capacity = stats.capacity;
+        edge.size = stats.size;
+        edge.maxSize = stats.highWaterMark;
+        edge.pushedTotal = stats.pushed;
+        edge.poppedTotal = stats.popped;
+        metrics.edges.push_back(std::move(edge));
     }
 
     metrics.modules.reserve(m_pImpl->actorOrderedNodes.size());
     for (const auto& actor : m_pImpl->actorOrderedNodes) {
-        ModuleMetrics module;
+        ModuleSnapshot module;
         module.name = actor->GetModuleName();
-        module.processed = actor->ProcessedCount();
-        module.dropped = actor->DroppedCount();
+        module.processedTotal = actor->ProcessedCount();
+        module.droppedTotal = actor->DroppedCount();
+        module.fusionExpiredTotal = actor->FusionExpiredCount();
+        module.failedTotal = actor->FailedCount();
         metrics.modules.push_back(std::move(module));
     }
     return metrics;
+}
+
+void Pipeline::ResetMetrics() {
+    if (!m_pImpl) {
+        return;
+    }
+    for (const auto& queue : m_pImpl->queues) {
+        if (queue) {
+            queue->resetHighWaterMark();
+        }
+    }
 }
 
 std::shared_ptr<PipelineContext> Pipeline::GetContext() const {
