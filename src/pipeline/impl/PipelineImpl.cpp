@@ -1,7 +1,9 @@
 #include "PipelineImpl.hpp"
 #include "base/Graph.hpp"
 #include <nexusflow/ModuleFactory.hpp>
+#include <memory>
 #include <stdexcept>
+#include <string>
 #include <unordered_set>
 
 namespace nexusflow {
@@ -41,7 +43,7 @@ std::shared_ptr<ActorNode> Pipeline::Impl::GetOrCreateActorNode(const std::share
     }
 
     // 2. 创建 ActiveNode 并存入 map
-    auto actorNode = std::make_shared<ActorNode>(module, config);
+    auto actorNode = std::make_shared<ActorNode>(module, config, context);
     actorModuleMap.emplace(nodeName, actorNode);
 
     return actorNode;
@@ -53,6 +55,10 @@ ErrorCode Pipeline::Impl::Init() {
         return ErrorCode::UNINITIALIZED_ERROR;
     }
     LOG_TRACE("Try init pipeline with graph, [graphName={}]", graph->getName());
+
+    // One context per pipeline instance; rebuilt when Init() runs again.
+    context = std::make_shared<PipelineContext>(graph->getName().empty() ? std::string("pipeline")
+                                                                        : graph->getName());
 
     auto edgeList = graph->toEdgeListBFS();
     LOG_TRACE("edgeList size: {}", edgeList.size());

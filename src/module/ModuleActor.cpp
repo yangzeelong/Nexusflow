@@ -4,13 +4,15 @@
 
 namespace nexusflow {
 
-ModuleActor::ModuleActor(const std::shared_ptr<Module>& module, const Config& config) {
+ModuleActor::ModuleActor(const std::shared_ptr<Module>& module, const Config& config,
+                         const std::shared_ptr<PipelineContext>& context) {
     m_config = std::make_unique<Config>(config);
 
     ViewPtr<Config> configView{m_config.get()};
 
     m_module = module;
-    m_worker = std::make_shared<core::Worker>(m_module, configView);
+    m_module->AttachContext(context);
+    m_worker = std::make_shared<core::Worker>(m_module, configView, context);
 
     ViewPtr<Module> moduleView{m_module.get()};
     m_dispatcher = std::make_shared<dispatcher::Dispatcher>(configView);

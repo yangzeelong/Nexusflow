@@ -289,6 +289,12 @@ std::string Format(const std::string& format, const Args&... args) {
 // the temporary produced by Format() can be moved into the record.
 void Write(Level level, const char* file, int line, const char* function, std::string message);
 
+// Per-thread sink override installed by the pipeline worker threads. While one
+// is set, records produced on this thread go to it instead of the process-wide
+// sink. This is an internal hook; applications use PipelineContext::SetSink().
+void SetThreadSink(std::shared_ptr<LogSink> sink);
+void ResetThreadSink();
+
 // Helper for time-based logging state.
 struct LogEveryTState {
     std::mutex mutex;

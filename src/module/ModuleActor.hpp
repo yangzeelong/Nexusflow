@@ -12,7 +12,8 @@ namespace nexusflow {
 
 class ModuleActor {
 public:
-    ModuleActor(const std::shared_ptr<Module>& module, const Config& config);
+    ModuleActor(const std::shared_ptr<Module>& module, const Config& config,
+                const std::shared_ptr<PipelineContext>& context = nullptr);
 
     ~ModuleActor();
 

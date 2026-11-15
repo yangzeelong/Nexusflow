@@ -19,6 +19,7 @@ class Dispatcher;
 
 namespace nexusflow {
 class Pipeline;
+class PipelineContext;
 namespace core { class Worker; }
 }
 
@@ -103,6 +104,19 @@ public:
      */
     const std::string& GetModuleName() const;
 
+    /**
+     * @brief Attaches the pipeline context this module belongs to.
+     * Called by the framework before Init(); a module normally only reads it.
+     * Passing nullptr detaches the module (used by standalone tests).
+     */
+    void AttachContext(std::shared_ptr<PipelineContext> context);
+
+    /**
+     * @brief Returns the context attached by the framework, or nullptr when the
+     * module does not belong to a pipeline (e.g. a unit test constructing it).
+     */
+    std::shared_ptr<PipelineContext> GetContext() const;
+
 protected:
     // --- Protected API for Derived Classes ---
 
@@ -137,6 +151,9 @@ private:
     void SetDispatcher(const std::shared_ptr<dispatcher::Dispatcher>& dispatcher);
 
     std::string m_moduleName;
+
+    // Set by ModuleActor from the owning pipeline; null for standalone modules.
+    std::shared_ptr<PipelineContext> m_context;
 
     // The internal dispatcher handle.
     std::shared_ptr<dispatcher::Dispatcher> m_dispatcherPtr;

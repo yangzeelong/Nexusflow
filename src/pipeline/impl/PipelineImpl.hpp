@@ -7,6 +7,7 @@
 #include "dispatcher/Dispatcher.hpp"
 #include "module/ModuleActor.hpp"
 #include <nexusflow/Pipeline.hpp>
+#include <nexusflow/PipelineContext.hpp>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,9 @@ using ActorNode = ModuleActor;
 class Pipeline::Impl {
 public:
     std::unique_ptr<Graph> graph;
+
+    // Shared services handed to every module of this pipeline.
+    std::shared_ptr<PipelineContext> context;
     std::vector<MessageQueueUPtr> queues;
 
     // Edge queue configuration and names, used by Pipeline::GetMetrics().
