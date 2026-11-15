@@ -99,7 +99,7 @@ void Module::DispatchOutput(const PendingOutput& output, double elapsedMs) {
         }
     } else if (m_dispatcherPtr != nullptr) {
         LOG_DEBUG("Module '{}' broadcasting message.", m_moduleName);
-        m_dispatcherPtr->Broadcast(routed);
+        m_dispatcherPtr->Broadcast(std::move(routed));
     }
 }
 
@@ -111,6 +111,19 @@ void Module::Broadcast(const Message& message) {
     if (m_dispatcherPtr != nullptr) {
         LOG_DEBUG("Module '{}' broadcasting message.", m_moduleName);
         m_dispatcherPtr->Broadcast(message);
+    } else {
+        LOG_WARN("Module '{}' has no handle, cannot broadcast message.", m_moduleName);
+    }
+}
+
+void Module::Broadcast(Message&& message) {
+    if (m_processing) {
+        m_pendingOutputs.push_back(PendingOutput{false, std::string(), std::move(message)});
+        return;
+    }
+    if (m_dispatcherPtr != nullptr) {
+        LOG_DEBUG("Module '{}' broadcasting message.", m_moduleName);
+        m_dispatcherPtr->Broadcast(std::move(message));
     } else {
         LOG_WARN("Module '{}' has no handle, cannot broadcast message.", m_moduleName);
     }

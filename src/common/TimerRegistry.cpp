@@ -1,6 +1,7 @@
 #include "nexusflow/TimerRegistry.hpp"
 
 #include <algorithm>
+#include <unordered_map>
 
 #include "nexusflow/Logging.hpp"
 
@@ -19,7 +20,12 @@ struct ActiveTimer {
     int line = 0;
 };
 
-thread_local std::map<std::string, std::vector<ActiveTimer>> g_activeTimers;
+/// Open measurements of the calling thread, keyed by interned handle. An entry
+/// is never erased, so measuring the same timer again reuses its vector and its
+/// capacity instead of allocating one per measurement, and the key is a small
+/// integer rather than a string, so a lookup hashes no name.
+thread_local std::unordered_map<TimerRegistry::TimerHandle,
+                                std::vector<ActiveTimer>> g_activeTimers;
 
 /// Strip the directory from __FILE__ so the printed profile stays readable.
 std::string BaseName(const char* path) {
@@ -76,13 +82,54 @@ TimerRegistry& TimerRegistry::Instance() {
     return registry;
 }
 
+TimerRegistry::TimerHandle TimerRegistry::Intern(const std::string& name) {
+    if (name.empty()) return 0;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto found = m_names.find(name);
+    if (found != m_names.end()) return found->second;
+
+    Slot slot;
+    slot.name = name;
+    m_slots.push_back(std::move(slot));
+    const TimerHandle handle = static_cast<TimerHandle>(m_slots.size());
+    m_names.emplace(m_slots.back().name, handle);
+    return handle;
+}
+
+TimerRegistry::TimerHandle TimerRegistry::FindInterned(
+    const std::string& name) const {
+    // The stop/read forms must not intern: a measurement that was never started
+    // is not a timer, and it should not show up in Snapshot() either.
+    if (name.empty()) return 0;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const auto found = m_names.find(name);
+    return found == m_names.end() ? 0 : found->second;
+}
+
+TimerRegistry::Slot* TimerRegistry::FindSlot(TimerHandle handle) {
+    if (handle == 0 || handle > static_cast<TimerHandle>(m_slots.size())) {
+        return nullptr;
+    }
+    return &m_slots[static_cast<std::size_t>(handle - 1)];
+}
+
+const TimerRegistry::Slot* TimerRegistry::FindSlot(TimerHandle handle) const {
+    if (handle == 0 || handle > static_cast<TimerHandle>(m_slots.size())) {
+        return nullptr;
+    }
+    return &m_slots[static_cast<std::size_t>(handle - 1)];
+}
+
 void TimerRegistry::Accumulate(Aggregate& aggregate, double elapsedMs,
                                uint64_t items, const char* file, int line) {
     // Normalizing here is what keeps every reported duration on the item axis:
     // a measurement that covered N items contributes elapsedMs / N, so min,
     // max and the percentile window stay comparable with the average.
     const uint64_t counted = ItemCount(items);
-    const double perItemMs = elapsedMs / static_cast<double>(counted);
+    // One item per measurement is the common case; skipping the division there
+    // keeps the enabled path a few instructions shorter.
+    const double perItemMs = counted == 1
+        ? elapsedMs : elapsedMs / static_cast<double>(counted);
 
     ++aggregate.calls;
     aggregate.items += counted;
@@ -117,29 +164,44 @@ TimerStats TimerRegistry::MakeStats(const std::string& name,
 void TimerRegistry::StartAverage(const std::string& name,
                                  TimerPrintPolicy policy,
                                  const char* file, int line) {
-    g_activeTimers[name].push_back(
+    StartAverage(Intern(name), policy, file, line);
+}
+
+void TimerRegistry::StartAverage(TimerHandle handle, TimerPrintPolicy policy,
+                                 const char* file, int line) {
+    if (handle == 0) return;
+    g_activeTimers[handle].push_back(
         ActiveTimer{std::chrono::steady_clock::now(), policy, 0, file, line});
 }
 
 void TimerRegistry::IncrementAverage(const std::string& name, uint64_t items) {
-    auto it = g_activeTimers.find(name);
+    IncrementAverage(FindInterned(name), items);
+}
+
+void TimerRegistry::IncrementAverage(TimerHandle handle, uint64_t items) {
+    if (handle == 0) return;
+    const auto it = g_activeTimers.find(handle);
     if (it == g_activeTimers.end() || it->second.empty()) return;
     it->second.back().items += items;
 }
 
 double TimerRegistry::EndAverage(const std::string& name) {
-    auto it = g_activeTimers.find(name);
+    return EndAverage(FindInterned(name));
+}
+
+double TimerRegistry::EndAverage(TimerHandle handle) {
+    if (handle == 0) return 0.0;
+    const auto it = g_activeTimers.find(handle);
     if (it == g_activeTimers.end() || it->second.empty()) return 0.0;
 
     const ActiveTimer active = it->second.back();
     it->second.pop_back();
-    if (it->second.empty()) g_activeTimers.erase(it);
 
     const auto ended = std::chrono::steady_clock::now();
     const double elapsedMs = std::chrono::duration<double, std::milli>(
         ended - active.started).count();
     const CompletedSample completed = AddItemsWithPolicy(
-        name, elapsedMs, active.items, active.policy, active.started,
+        handle, elapsedMs, active.items, active.policy, active.started,
         ended, active.file, active.line);
     if (completed.printSample) PrintSample(completed);
     if (completed.printAverage) {
@@ -155,13 +217,21 @@ double TimerRegistry::EndAverage(const std::string& name) {
 void TimerRegistry::AddItems(const std::string& name, double elapsedMs,
                              uint64_t items,
                              const char* file, int line) {
+    AddItems(Intern(name), elapsedMs, items, file, line);
+}
+
+void TimerRegistry::AddItems(TimerHandle handle, double elapsedMs,
+                             uint64_t items,
+                             const char* file, int line) {
     elapsedMs = std::max(0.0, elapsedMs);
     std::lock_guard<std::mutex> lock(m_mutex);
-    Accumulate(m_stats[name], elapsedMs, items, file, line);
+    Slot* slot = FindSlot(handle);
+    if (slot == nullptr) return;
+    Accumulate(slot->aggregate, elapsedMs, items, file, line);
 }
 
 TimerRegistry::CompletedSample TimerRegistry::AddItemsWithPolicy(
-    const std::string& name, double elapsedMs, uint64_t items,
+    TimerHandle handle, double elapsedMs, uint64_t items,
     const TimerPrintPolicy& policy,
     std::chrono::steady_clock::time_point started,
     std::chrono::steady_clock::time_point ended,
@@ -169,14 +239,19 @@ TimerRegistry::CompletedSample TimerRegistry::AddItemsWithPolicy(
     elapsedMs = std::max(0.0, elapsedMs);
 
     CompletedSample completed;
-    completed.name = name;
     completed.elapsedMs = elapsedMs;
     completed.items = ItemCount(items);
     completed.printSample = policy.printEachCall;
 
     const uint64_t counted = ItemCount(items);
     std::lock_guard<std::mutex> lock(m_mutex);
-    Aggregate& aggregate = m_stats[name];
+    Slot* slot = FindSlot(handle);
+    if (slot == nullptr) {
+        completed.printSample = false;
+        return completed;
+    }
+
+    Aggregate& aggregate = slot->aggregate;
     Accumulate(aggregate, elapsedMs, items, file, line);
     ++aggregate.callsSincePrint;
     aggregate.windowItems += counted;
@@ -213,11 +288,15 @@ TimerRegistry::CompletedSample TimerRegistry::AddItemsWithPolicy(
             aggregate.windowItems = 0;
             aggregate.windowServiceMs = 0.0;
         } else {
-            completed.stats = MakeStats(name, aggregate);
+            completed.stats = MakeStats(slot->name, aggregate);
             // Only computed for a report: the percentile walks the window,
             // which is not worth doing on every measurement of a hot timer.
             completed.stats.p95Ms = aggregate.recent.Percentile(0.95);
         }
+    }
+    if (completed.printSample || completed.printAverage) {
+        // Only a report needs the name, so a hot measurement copies no string.
+        completed.name = slot->name;
     }
 
     return completed;
@@ -225,21 +304,36 @@ TimerRegistry::CompletedSample TimerRegistry::AddItemsWithPolicy(
 
 bool TimerRegistry::GetStats(const std::string& name, TimerStats& stats) const {
     std::lock_guard<std::mutex> lock(m_mutex);
-    const auto it = m_stats.find(name);
-    if (it == m_stats.end()) return false;
+    const auto found = m_names.find(name);
+    if (found == m_names.end()) return false;
+    const Slot* slot = FindSlot(found->second);
+    if (slot == nullptr || slot->aggregate.calls == 0) return false;
 
-    stats = MakeStats(name, it->second);
-    stats.p95Ms = it->second.recent.Percentile(0.95);
+    stats = MakeStats(slot->name, slot->aggregate);
+    stats.p95Ms = slot->aggregate.recent.Percentile(0.95);
+    return true;
+}
+
+bool TimerRegistry::GetStats(TimerHandle handle, TimerStats& stats) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const Slot* slot = FindSlot(handle);
+    if (slot == nullptr || slot->aggregate.calls == 0) return false;
+
+    stats = MakeStats(slot->name, slot->aggregate);
+    stats.p95Ms = slot->aggregate.recent.Percentile(0.95);
     return true;
 }
 
 std::vector<TimerStats> TimerRegistry::Snapshot() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     std::vector<TimerStats> snapshot;
-    snapshot.reserve(m_stats.size());
-    for (const auto& entry : m_stats) {
-        TimerStats stats = MakeStats(entry.first, entry.second);
-        stats.p95Ms = entry.second.recent.Percentile(0.95);
+    snapshot.reserve(m_slots.size());
+    for (const auto& slot : m_slots) {
+        // A slot outlives a Reset(), which is why an untouched one is skipped
+        // rather than removed: a reset profile shows what was measured since.
+        if (slot.aggregate.calls == 0) continue;
+        TimerStats stats = MakeStats(slot.name, slot.aggregate);
+        stats.p95Ms = slot.aggregate.recent.Percentile(0.95);
         snapshot.push_back(std::move(stats));
     }
     return snapshot;
@@ -306,7 +400,13 @@ bool TimerRegistry::PrintIfDue(uint64_t intervalMs) {
 void TimerRegistry::Reset() {
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        m_stats.clear();
+        // Handles stay valid: a reset clears what was measured, so the slots
+        // are kept (and skipped by Snapshot()) instead of being removed. The
+        // next measurement of a slot re-captures its call site, exactly as it
+        // would after the name had never been seen.
+        for (auto& slot : m_slots) {
+            slot.aggregate = Aggregate();
+        }
     }
     std::lock_guard<std::mutex> lock(m_reportMutex);
     m_lastReport = std::chrono::steady_clock::time_point();
@@ -318,23 +418,43 @@ TimerRegistry::ScopedTimer TimerRegistry::Scope(const std::string& name,
     return ScopedTimer(*this, name, policy, file, line);
 }
 
+TimerRegistry::ScopedTimer TimerRegistry::Scope(TimerHandle handle,
+                                               TimerPrintPolicy policy,
+                                               const char* file, int line) {
+    return ScopedTimer(*this, handle, policy, file, line);
+}
+
 TimerRegistry::ScopedTimer::ScopedTimer(TimerRegistry& registry,
                                         std::string name,
                                         TimerPrintPolicy policy,
                                         const char* file, int line)
-    : m_registry(&registry), m_name(std::move(name)), m_active(true) {
-    m_registry->StartAverage(m_name, policy, file, line);
+    : m_registry(&registry), m_handle(registry.Intern(name)) {
+    if (m_handle != 0) {
+        m_registry->StartAverage(m_handle, policy, file, line);
+        m_active = true;
+    }
+}
+
+TimerRegistry::ScopedTimer::ScopedTimer(TimerRegistry& registry,
+                                        TimerHandle handle,
+                                        TimerPrintPolicy policy,
+                                        const char* file, int line)
+    : m_registry(&registry), m_handle(handle) {
+    if (m_handle != 0) {
+        m_registry->StartAverage(m_handle, policy, file, line);
+        m_active = true;
+    }
 }
 
 TimerRegistry::ScopedTimer::~ScopedTimer() {
     if (m_active && m_registry != nullptr) {
-        m_registry->EndAverage(m_name);
+        m_registry->EndAverage(m_handle);
     }
 }
 
 TimerRegistry::ScopedTimer::ScopedTimer(ScopedTimer&& other) noexcept
     : m_registry(other.m_registry),
-      m_name(std::move(other.m_name)),
+      m_handle(other.m_handle),
       m_active(other.m_active) {
     other.m_registry = nullptr;
     other.m_active = false;
@@ -344,10 +464,10 @@ TimerRegistry::ScopedTimer& TimerRegistry::ScopedTimer::operator=(
     ScopedTimer&& other) noexcept {
     if (this == &other) return *this;
     if (m_active && m_registry != nullptr) {
-        m_registry->EndAverage(m_name);
+        m_registry->EndAverage(m_handle);
     }
     m_registry = other.m_registry;
-    m_name = std::move(other.m_name);
+    m_handle = other.m_handle;
     m_active = other.m_active;
     other.m_registry = nullptr;
     other.m_active = false;

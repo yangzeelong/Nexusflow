@@ -127,6 +127,14 @@ protected:
     void Broadcast(const Message& msg);
 
     /**
+     * @brief Broadcasts a message, moving it into the last downstream queue.
+     * @details Equivalent to Broadcast(const Message&) but avoids one copy for
+     * the last subscriber. After the call the message is in a moved-from state.
+     * @param msg The message to be sent.
+     */
+    void Broadcast(Message&& msg);
+
+    /**
      * @brief Sends a message to a specific downstream output.
      * @param outputName The name of the output port to send the message to.
      * @param msg The message to be sent.

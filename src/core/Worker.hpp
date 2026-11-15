@@ -6,6 +6,7 @@
 #include "nexusflow/ErrorCode.hpp"
 #include "nexusflow/Logging.hpp"
 #include "nexusflow/Module.hpp"
+#include "nexusflow/TimerRegistry.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -132,9 +133,12 @@ private:
     // work loop only pays it for modules that opt in.
     bool m_profileTimers = false;
     // Timer labels are stable per module; building them once keeps the work loop free
-    // of a string concatenation on every iteration.
+    // of a string concatenation on every iteration. The handles are interned from
+    // those labels once too, so a profiled iteration measures without name work.
     std::string m_processTimerName;
     std::string m_waitTimerName;
+    profiling::TimerRegistry::TimerHandle m_processTimer = 0;
+    profiling::TimerRegistry::TimerHandle m_waitTimer = 0;
 };
 
 }} // namespace nexusflow::core

@@ -8,6 +8,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -77,7 +78,20 @@ class TimerRegistry {
 public:
     class ScopedTimer;
 
+    /// Interned timer name. Intern() resolves a name to a handle once, so a
+    /// measurement can then address the timer by handle: the handle forms of
+    /// the calls below skip the per-call name hashing and string copy that the
+    /// name forms pay. A handle stays valid for the lifetime of the registry,
+    /// and 0 means "not interned" — every handle form treats 0 as a no-op.
+    using TimerHandle = uint64_t;
+
     static TimerRegistry& Instance();
+
+    /// Resolve a timer name to a handle, interning it on first use. Call this
+    /// once — at startup, or on the first message — and use the handle from
+    /// then on. The name forms below intern internally, so the only difference
+    /// between the two families is where the name is resolved.
+    TimerHandle Intern(const std::string& name);
 
     // Start and end one measurement on the calling thread. Nested measurements
     // with the same name are supported by a thread-local stack. A measurement
@@ -105,6 +119,19 @@ public:
     // Time one scope. The print policy is a parameter rather than a family of
     // overloads; the macros below build it, so call sites never name it.
     ScopedTimer Scope(const std::string& name, TimerPrintPolicy policy,
+                      const char* file = "", int line = 0);
+
+    // Handle forms: same behaviour, but the name is already resolved, so a
+    // measurement only touches an index, the clock and the aggregate. Prefer
+    // them in code that measures per message or per frame.
+    void StartAverage(TimerHandle handle, TimerPrintPolicy policy,
+                      const char* file = "", int line = 0);
+    void IncrementAverage(TimerHandle handle, uint64_t items = 1);
+    double EndAverage(TimerHandle handle);
+    void AddItems(TimerHandle handle, double elapsedMs, uint64_t items = 1,
+                  const char* file = "", int line = 0);
+    bool GetStats(TimerHandle handle, TimerStats& stats) const;
+    ScopedTimer Scope(TimerHandle handle, TimerPrintPolicy policy,
                       const char* file = "", int line = 0);
 
 private:
@@ -163,6 +190,14 @@ private:
         RecentWindow recent;
     };
 
+    /// One interned timer: the name is kept so reports stay readable and the
+    /// aggregate is what measurements update. Slots are addressed by
+    /// handle - 1 and are never removed, which is what keeps handles stable.
+    struct Slot {
+        std::string name;
+        Aggregate aggregate;
+    };
+
     struct CompletedSample {
         std::string name;
         double elapsedMs = 0.0;
@@ -192,8 +227,17 @@ private:
     static TimerStats MakeStats(const std::string& name,
                                 const Aggregate& aggregate);
 
+    /// Resolve a handle to its slot. The caller holds m_mutex, and the result
+    /// must not outlive the lock: interning can reallocate m_slots.
+    Slot* FindSlot(TimerHandle handle);
+    const Slot* FindSlot(TimerHandle handle) const;
+
+    /// Handle of a name that was interned before, or 0. Unlike Intern() this
+    /// never adds a timer, so stopping or reading an unknown name stays free.
+    TimerHandle FindInterned(const std::string& name) const;
+
     CompletedSample AddItemsWithPolicy(
-        const std::string& name, double elapsedMs, uint64_t items,
+        TimerHandle handle, double elapsedMs, uint64_t items,
         const TimerPrintPolicy& policy,
         std::chrono::steady_clock::time_point started,
         std::chrono::steady_clock::time_point ended,
@@ -203,7 +247,12 @@ private:
     void PrintSample(const CompletedSample& sample) const;
 
     mutable std::mutex m_mutex;
-    std::map<std::string, Aggregate> m_stats;
+    /// Interned timers, indexed by handle - 1. Appended by Intern() and never
+    /// removed, so a handle names the same slot forever.
+    std::vector<Slot> m_slots;
+    /// name -> handle, so the name forms resolve in one hash lookup. Guarded by
+    /// m_mutex together with m_slots, which interning appends to.
+    std::unordered_map<std::string, TimerHandle> m_names;
     mutable std::mutex m_reportMutex;
     std::chrono::steady_clock::time_point m_lastReport;
 };
@@ -211,6 +260,8 @@ private:
 class TimerRegistry::ScopedTimer {
 public:
     ScopedTimer(TimerRegistry& registry, std::string name,
+                TimerPrintPolicy policy, const char* file, int line);
+    ScopedTimer(TimerRegistry& registry, TimerHandle handle,
                 TimerPrintPolicy policy, const char* file, int line);
     ~ScopedTimer();
 
@@ -222,7 +273,7 @@ public:
 
 private:
     TimerRegistry* m_registry = nullptr;
-    std::string m_name;
+    TimerHandle m_handle = 0;
     bool m_active = false;
 };
 
@@ -232,10 +283,10 @@ private:
 // ---------------------------------------------------------------------------
 // Instrumentation macros
 //
-// Every macro takes a single timer name. Call sites compose it as
-// "<module>.<label>", using the owning module's name (usually
-// Module::GetModuleName()) so a timer stays attributable when a helper runs
-// for several modules.
+// Every macro takes a single timer: a name, or a handle interned from one. Call
+// sites compose the name as "<module>.<label>", using the owning module's name
+// (usually Module::GetModuleName()) so a timer stays attributable when a helper
+// runs for several modules.
 //
 // One measurement counts one item. Per-call timing, useful while bringing a
 // stage up:
@@ -272,6 +323,14 @@ private:
 // gap is then reported by a later measurement of the same name.
 //
 //     TIMER_SCOPE_AVERAGE_MS(moduleName + ".Preprocess", 5000);
+//
+// A name costs a hash lookup and a string copy on every measurement. When a
+// timer runs per message or per frame, intern the name once and hand the
+// handle to the same macros — they accept either:
+//
+//     const auto decodeTimer =
+//         TimerRegistry::Instance().Intern(moduleName + ".Decode");
+//     TIMER_SCOPE_AVERAGE_MS(decodeTimer, 5000);
 //
 // Each macro forwards __FILE__/__LINE__, which the registry reports next to the
 // timer so a printed profile points back at the code that produced it. Use

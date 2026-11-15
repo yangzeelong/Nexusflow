@@ -1,6 +1,9 @@
 #include "Dispatcher.hpp"
 #include "nexusflow/Config.hpp"
 
+#include <iterator>
+#include <utility>
+
 namespace nexusflow { namespace dispatcher {
 
 Dispatcher::Dispatcher(const ViewPtr<Config>& configView) { m_configView = configView; };
@@ -16,6 +19,23 @@ void Dispatcher::Broadcast(const Message& message) {
         if (!subscriber->push(message)) {
             LOG_WARN("Broadcast to output queue {} failed: the queue is shut down", pair.first);
         }
+    }
+}
+
+void Dispatcher::Broadcast(Message&& message) {
+    if (m_subscriberMap.empty()) {
+        return;
+    }
+    auto it = m_subscriberMap.begin();
+    const auto last = std::prev(m_subscriberMap.end());
+    for (; it != last; ++it) {
+        if (!it->second->push(message)) {
+            LOG_WARN("Broadcast to output queue {} failed: the queue is shut down", it->first);
+        }
+    }
+    // The last subscriber takes ownership of the message instead of copying it.
+    if (!last->second->push(std::move(message))) {
+        LOG_WARN("Broadcast to output queue {} failed: the queue is shut down", last->first);
     }
 }
 
