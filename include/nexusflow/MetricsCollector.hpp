@@ -22,15 +22,23 @@ namespace nexusflow {
 /// compatibility footing as Message/Module/Pipeline.
 namespace profiling {
 
-/// One timer's cumulative numbers. Every duration describes a single item, so
-/// avg/p95/min/max are directly comparable without knowing how the timer was
-/// instrumented. An item is whatever the instrumented code counted; a
-/// measurement that declares nothing counts one item.
-struct TimerStats {
+/// The samples one timer collected, cumulative over the run. Every duration
+/// describes a single item, so avg/p95/min/max are directly comparable without
+/// knowing how the timer was instrumented. An item is whatever the instrumented
+/// code counted; a measurement that declares nothing counts one item.
+///
+/// Read it through `MetricsCollector::GetStats()` or `Snapshot()`. There is no
+/// throughput here on purpose: a rate needs a wall-clock span, which these
+/// cumulative samples do not carry. Take two snapshots and divide the delta of
+/// `items` by the delta of wall-clock time if a rate is what the caller needs.
+struct MetricSamples {
     std::string name;
     /// Items measured so far.
     uint64_t items = 0;
-    double totalMs = 0.0;
+    /// Sum of the per-item durations. Named "sum", not "total", because a
+    /// duration can only be added up while a count is the total of what
+    /// happened — and this field sits next to `items` in printouts.
+    double sumMs = 0.0;
     /// Durations of one item, not of one call: a call that declared N items
     /// contributes elapsedMs / N, which keeps the tail comparable with the
     /// average instead of mixing per-call and per-item numbers.
@@ -48,7 +56,6 @@ struct TimerStats {
     int line = 0;
 
     double AvgItemMs() const;
-    double ItemQps() const;
 
     /// "file.cpp:123" with the directory stripped, for the printed profile.
     std::string Where() const;
@@ -109,8 +116,8 @@ public:
     void AddItems(const std::string& name, double elapsedMs, uint64_t items = 1,
                   const char* file = "", int line = 0);
 
-    bool GetStats(const std::string& name, TimerStats& stats) const;
-    std::vector<TimerStats> Snapshot() const;
+    bool GetStats(const std::string& name, MetricSamples& stats) const;
+    std::vector<MetricSamples> Snapshot() const;
 
     void Print() const;
     bool PrintIfDue(uint64_t intervalMs = 1000);
@@ -130,7 +137,7 @@ public:
     double EndAverage(TimerHandle handle);
     void AddItems(TimerHandle handle, double elapsedMs, uint64_t items = 1,
                   const char* file = "", int line = 0);
-    bool GetStats(TimerHandle handle, TimerStats& stats) const;
+    bool GetStats(TimerHandle handle, MetricSamples& stats) const;
     ScopedTimer Scope(TimerHandle handle, TimerPrintPolicy policy,
                       const char* file = "", int line = 0);
 
@@ -175,7 +182,7 @@ private:
         /// item count is what the profile is about.
         uint64_t calls = 0;
         uint64_t items = 0;
-        double totalMs = 0.0;
+        double sumMs = 0.0;
         double minMs = 0.0;
         double maxMs = 0.0;
         uint64_t callsSincePrint = 0;
@@ -205,7 +212,7 @@ private:
         bool printSample = false;
         bool printAverage = false;
         /// Cumulative report, filled when the policy is not windowed.
-        TimerStats stats;
+        MetricSamples stats;
         /// Windowed report: the window that just closed.
         bool windowed = false;
         uint64_t windowItems = 0;
@@ -224,7 +231,7 @@ private:
                            uint64_t items, const char* file, int line);
     /// Read one aggregate back out. p95Ms stays 0 because it walks the window,
     /// so the callers that report it fill it in.
-    static TimerStats MakeStats(const std::string& name,
+    static MetricSamples MakeStats(const std::string& name,
                                 const Aggregate& aggregate);
 
     /// Resolve a handle to its slot. The caller holds m_mutex, and the result
@@ -242,7 +249,7 @@ private:
         std::chrono::steady_clock::time_point started,
         std::chrono::steady_clock::time_point ended,
         const char* file, int line);
-    void PrintStats(const TimerStats& stats) const;
+    void PrintStats(const MetricSamples& stats) const;
     void PrintWindow(const CompletedSample& sample) const;
     void PrintSample(const CompletedSample& sample) const;
 

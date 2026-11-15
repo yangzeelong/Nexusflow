@@ -65,7 +65,7 @@ RunOptions ReadOptions(const app::CommandParser& cli,
 void PrintTimerSnapshot() {
     auto stats = nexusflow::profiling::MetricsCollector::Instance().Snapshot();
     std::sort(stats.begin(), stats.end(), [](const auto& lhs, const auto& rhs) {
-        return lhs.totalMs > rhs.totalMs;
+        return lhs.sumMs > rhs.sumMs;
     });
 
     std::cout << "\nTimer profile (per item):\n";
@@ -83,7 +83,7 @@ void PrintTimerSnapshot() {
                   << std::right << std::setw(12) << item.items
                   << std::setw(14) << item.AvgItemMs()
                   << std::setw(12) << item.p95Ms
-                  << std::setw(14) << item.totalMs
+                  << std::setw(14) << item.sumMs
                   << std::setw(12) << item.minMs
                   << std::setw(12) << item.maxMs
                   << ' ' << std::left << item.Where() << '\n';

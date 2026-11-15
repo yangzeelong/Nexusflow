@@ -37,19 +37,14 @@ std::string BaseName(const char* path) {
 
 } // namespace
 
-std::string TimerStats::Where() const {
+std::string MetricSamples::Where() const {
     if (file.empty()) return {};
     if (line <= 0) return BaseName(file.c_str());
     return BaseName(file.c_str()) + ":" + std::to_string(line);
 }
 
-double TimerStats::AvgItemMs() const {
-    return items == 0 ? 0.0 : totalMs / static_cast<double>(items);
-}
-
-double TimerStats::ItemQps() const {
-    const double seconds = totalMs / 1000.0;
-    return seconds <= 0.0 ? 0.0 : static_cast<double>(items) / seconds;
+double MetricSamples::AvgItemMs() const {
+    return items == 0 ? 0.0 : sumMs / static_cast<double>(items);
 }
 
 TimerPrintPolicy TimerPrintPolicy::EachCall() {
@@ -133,7 +128,7 @@ void MetricsCollector::Accumulate(Aggregate& aggregate, double elapsedMs,
 
     ++aggregate.calls;
     aggregate.items += counted;
-    aggregate.totalMs += elapsedMs;
+    aggregate.sumMs += elapsedMs;
     aggregate.recent.Push(perItemMs);
     if (aggregate.calls == 1) {
         aggregate.minMs = perItemMs;
@@ -148,12 +143,12 @@ void MetricsCollector::Accumulate(Aggregate& aggregate, double elapsedMs,
     }
 }
 
-TimerStats MetricsCollector::MakeStats(const std::string& name,
+MetricSamples MetricsCollector::MakeStats(const std::string& name,
                                     const Aggregate& aggregate) {
-    TimerStats stats;
+    MetricSamples stats;
     stats.name = name;
     stats.items = aggregate.items;
-    stats.totalMs = aggregate.totalMs;
+    stats.sumMs = aggregate.sumMs;
     stats.minMs = aggregate.minMs;
     stats.maxMs = aggregate.maxMs;
     stats.file = aggregate.file;
@@ -302,7 +297,7 @@ MetricsCollector::CompletedSample MetricsCollector::AddItemsWithPolicy(
     return completed;
 }
 
-bool MetricsCollector::GetStats(const std::string& name, TimerStats& stats) const {
+bool MetricsCollector::GetStats(const std::string& name, MetricSamples& stats) const {
     std::lock_guard<std::mutex> lock(m_mutex);
     const auto found = m_names.find(name);
     if (found == m_names.end()) return false;
@@ -314,7 +309,7 @@ bool MetricsCollector::GetStats(const std::string& name, TimerStats& stats) cons
     return true;
 }
 
-bool MetricsCollector::GetStats(TimerHandle handle, TimerStats& stats) const {
+bool MetricsCollector::GetStats(TimerHandle handle, MetricSamples& stats) const {
     std::lock_guard<std::mutex> lock(m_mutex);
     const Slot* slot = FindSlot(handle);
     if (slot == nullptr || slot->aggregate.calls == 0) return false;
@@ -324,15 +319,15 @@ bool MetricsCollector::GetStats(TimerHandle handle, TimerStats& stats) const {
     return true;
 }
 
-std::vector<TimerStats> MetricsCollector::Snapshot() const {
+std::vector<MetricSamples> MetricsCollector::Snapshot() const {
     std::lock_guard<std::mutex> lock(m_mutex);
-    std::vector<TimerStats> snapshot;
+    std::vector<MetricSamples> snapshot;
     snapshot.reserve(m_slots.size());
     for (const auto& slot : m_slots) {
         // A slot outlives a Reset(), which is why an untouched one is skipped
         // rather than removed: a reset profile shows what was measured since.
         if (slot.aggregate.calls == 0) continue;
-        TimerStats stats = MakeStats(slot.name, slot.aggregate);
+        MetricSamples stats = MakeStats(slot.name, slot.aggregate);
         stats.p95Ms = slot.aggregate.recent.Percentile(0.95);
         snapshot.push_back(std::move(stats));
     }
@@ -345,18 +340,20 @@ void MetricsCollector::Print() const {
     }
 }
 
-void MetricsCollector::PrintStats(const TimerStats& stats) const {
+void MetricsCollector::PrintStats(const MetricSamples& stats) const {
     // One count and one unit: an item, so a line is directly comparable with
-    // the next one regardless of how each timer was instrumented. Throughput
-    // comes from the same count, which means items/s is the rate of the work
-    // the timer measures rather than of its call pattern.
+    // the next one regardless of how each timer was instrumented.
+    //
+    // Only service time is printed here. A rate needs a wall-clock span, and
+    // these numbers are cumulative over the whole run — the interval report
+    // (PrintWindow) is the one that knows its own window and can print items/s.
     //
     // p95 covers the recent window while min/max cover the whole run, so a
     // pipeline whose tail is worsening shows p95 climbing towards max.
-    LOG_INFO("Execute '{}' for {} items cost: {:.3f} ms, qps: {:.3f} items/s, "
+    LOG_INFO("Execute '{}' for {} items cost: {:.3f} ms, "
              "avg: {:.3f} ms/item, p95: {:.3f} ms/item, "
              "min/max: {:.3f}/{:.3f} ms/item",
-             stats.name, stats.items, stats.totalMs, stats.ItemQps(),
+             stats.name, stats.items, stats.sumMs,
              stats.AvgItemMs(), stats.p95Ms, stats.minMs, stats.maxMs);
 }
 

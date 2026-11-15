@@ -8,7 +8,7 @@
 
 using nexusflow::profiling::TimerPrintPolicy;
 using nexusflow::profiling::MetricsCollector;
-using nexusflow::profiling::TimerStats;
+using nexusflow::profiling::MetricSamples;
 
 TEST(MetricsCollectorTest, CountsOneItemPerMeasurementByDefault) {
     auto& registry = MetricsCollector::Instance();
@@ -17,13 +17,14 @@ TEST(MetricsCollectorTest, CountsOneItemPerMeasurementByDefault) {
     registry.AddItems("test.aggregate", 10.0);
     registry.AddItems("test.aggregate", 20.0);
 
-    TimerStats stats;
+    MetricSamples stats;
     ASSERT_TRUE(registry.GetStats("test.aggregate", stats));
     EXPECT_EQ(stats.items, 2U);
-    EXPECT_DOUBLE_EQ(stats.totalMs, 30.0);
+    EXPECT_DOUBLE_EQ(stats.sumMs, 30.0);
     // Every duration is per item, so a two-item timer reports both samples.
     EXPECT_DOUBLE_EQ(stats.AvgItemMs(), 15.0);
-    EXPECT_DOUBLE_EQ(stats.ItemQps(), 200.0 / 3.0);
+    // No throughput field: a rate needs a wall-clock span, which cumulative
+    // samples do not carry. Two snapshots give it back — see README.
     EXPECT_DOUBLE_EQ(stats.minMs, 10.0);
     EXPECT_DOUBLE_EQ(stats.maxMs, 20.0);
     // Nearest rank over both items: 0.95 * (2 - 1) rounds to the maximum.
@@ -39,10 +40,10 @@ TEST(MetricsCollectorTest, DeclaredItemsNormalizeEveryDuration) {
     registry.AddItems("test.batch", 40.0, 4);
     registry.AddItems("test.batch", 80.0, 8);
 
-    TimerStats stats;
+    MetricSamples stats;
     ASSERT_TRUE(registry.GetStats("test.batch", stats));
     EXPECT_EQ(stats.items, 12U);
-    EXPECT_DOUBLE_EQ(stats.totalMs, 120.0);
+    EXPECT_DOUBLE_EQ(stats.sumMs, 120.0);
     EXPECT_DOUBLE_EQ(stats.AvgItemMs(), 10.0);
     EXPECT_DOUBLE_EQ(stats.minMs, 10.0);
     EXPECT_DOUBLE_EQ(stats.maxMs, 10.0);
@@ -59,10 +60,10 @@ TEST(MetricsCollectorTest, SupportsScopedAndIncrementedItems) {
     const double elapsedMs = registry.EndAverage("test.scoped");
 
     EXPECT_GT(elapsedMs, 0.0);
-    TimerStats stats;
+    MetricSamples stats;
     ASSERT_TRUE(registry.GetStats("test.scoped", stats));
     EXPECT_EQ(stats.items, 5U);
-    EXPECT_DOUBLE_EQ(stats.totalMs, elapsedMs);
+    EXPECT_DOUBLE_EQ(stats.sumMs, elapsedMs);
     EXPECT_DOUBLE_EQ(stats.AvgItemMs(), elapsedMs / 5.0);
     // The single call is normalized by the declared count.
     EXPECT_DOUBLE_EQ(stats.maxMs, elapsedMs / 5.0);
@@ -73,7 +74,7 @@ TEST(MetricsCollectorTest, SupportsScopedAndIncrementedItems) {
     }
     ASSERT_TRUE(registry.GetStats("test.raii", stats));
     EXPECT_EQ(stats.items, 1U);
-    EXPECT_GT(stats.totalMs, 0.0);
+    EXPECT_GT(stats.sumMs, 0.0);
 
     {
         auto timer =
@@ -106,10 +107,10 @@ TEST(MetricsCollectorTest, ReportingPoliciesDoNotAffectAggregation) {
     registry.StartAverage("test.interval", TimerPrintPolicy::EveryCalls(2));
     registry.EndAverage("test.interval");
 
-    TimerStats stats;
+    MetricSamples stats;
     ASSERT_TRUE(registry.GetStats("test.interval", stats));
     EXPECT_EQ(stats.items, 9U);
-    EXPECT_GT(stats.totalMs, 0.0);
+    EXPECT_GT(stats.sumMs, 0.0);
 }
 
 TEST(MetricsCollectorTest, AggregationIsThreadSafe) {
@@ -129,10 +130,10 @@ TEST(MetricsCollectorTest, AggregationIsThreadSafe) {
     }
     for (auto& worker : workers) worker.join();
 
-    TimerStats stats;
+    MetricSamples stats;
     ASSERT_TRUE(registry.GetStats("test.concurrent", stats));
     EXPECT_EQ(stats.items, static_cast<uint64_t>(kThreadCount * kItemsPerThread * 3));
-    EXPECT_DOUBLE_EQ(stats.totalMs,
+    EXPECT_DOUBLE_EQ(stats.sumMs,
                      static_cast<double>(kThreadCount * kItemsPerThread * 2));
     // 2 ms per measurement spread over 3 items.
     EXPECT_DOUBLE_EQ(stats.AvgItemMs(), 2.0 / 3.0);
@@ -155,13 +156,13 @@ TEST(MetricsCollectorTest, InternedHandleAddressesTheSameTimerAsTheName) {
     registry.AddItems(handle, 10.0);
     registry.AddItems("test.handle", 20.0);
 
-    TimerStats byName;
-    TimerStats byHandle;
+    MetricSamples byName;
+    MetricSamples byHandle;
     ASSERT_TRUE(registry.GetStats("test.handle", byName));
     ASSERT_TRUE(registry.GetStats(handle, byHandle));
     EXPECT_EQ(byName.items, 2U);
     EXPECT_EQ(byHandle.items, 2U);
-    EXPECT_DOUBLE_EQ(byHandle.totalMs, 30.0);
+    EXPECT_DOUBLE_EQ(byHandle.sumMs, 30.0);
     EXPECT_EQ(byHandle.name, "test.handle");
     EXPECT_EQ(byHandle.minMs, 10.0);
     EXPECT_EQ(byHandle.maxMs, 20.0);
@@ -177,10 +178,10 @@ TEST(MetricsCollectorTest, HandleFormsMeasureAndScopeLikeTheNameForms) {
         (void)scope;
     }
 
-    TimerStats stats;
+    MetricSamples stats;
     ASSERT_TRUE(registry.GetStats(handle, stats));
     EXPECT_EQ(stats.items, 1U);
-    EXPECT_GT(stats.totalMs, 0.0);
+    EXPECT_GT(stats.sumMs, 0.0);
 
     // A handle keeps its meaning across a reset, and the next measurement
     // re-captures the call site exactly as a fresh name would.
@@ -208,7 +209,7 @@ TEST(MetricsCollectorTest, InvalidHandleIsANoOp) {
     EXPECT_DOUBLE_EQ(registry.EndAverage(0U), 0.0);
     registry.AddItems(0U, 10.0);
 
-    TimerStats stats;
+    MetricSamples stats;
     EXPECT_FALSE(registry.GetStats(0U, stats));
     EXPECT_TRUE(registry.Snapshot().empty());
 }
