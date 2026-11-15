@@ -74,7 +74,20 @@ Worker::~Worker() {
 
 ErrorCode Worker::Start() {
     m_stopFlag.store(false);
+    if (!m_modulePtr) {
+        return ErrorCode::SUCCESS;
+    }
+    // Queued outputs are handed to the dispatcher only when Process() returns,
+    // so a run that ended mid-call left them in the module. They would be
+    // broadcast in the middle of the next run, to a pipeline that may already
+    // be somewhere else entirely.
+    m_modulePtr->DiscardPendingOutputs();
     return ErrorCode::SUCCESS;
+}
+
+bool Worker::IsRunning() const {
+    std::lock_guard<std::mutex> lock(m_loopMutex);
+    return !m_loopExited;
 }
 
 void Worker::LoadConfig() {
@@ -221,6 +234,13 @@ void Worker::WorkLoop() {
     }
 
     ::nexusflow::log::detail::ResetThreadSink();
+    // Release anyone waiting on WaitForStopRequest(); this has to happen before
+    // the thread says it is done, otherwise the join would race the flag.
+    {
+        std::lock_guard<std::mutex> lock(m_loopMutex);
+        m_loopExited = true;
+    }
+    m_loopCond.notify_all();
     LOG_DEBUG("Worker for module '{}' finished.", m_modulePtr->GetModuleName());
 }
 
@@ -293,9 +313,48 @@ void Worker::RunFusion() {
                 it = messageCache.erase(it); // remove the message from cache
             } else {
                 const auto arrivalIt = cacheArrivalMs.find(messageId);
-                const bool timedOut = arrivalIt != cacheArrivalMs.end() && currentTimeMs - arrivalIt->second >= timeoutMs;
+                const bool fusionTimedOut = arrivalIt != cacheArrivalMs.end() && currentTimeMs - arrivalIt->second >= timeoutMs;
+                // A drain only means "stop waiting for inputs that cannot arrive".
+                // As long as this stage reads from an open input it keeps converting
+                // them, so the decision to forward an incomplete fusion group belongs
+                // to the iteration that sees every input closed, not to every
+                // iteration while draining. Deciding earlier counts the missing side
+                // as dropped on each pass and leaves the producer's messages unread
+                // for the whole stop timeout.
+                bool nextIterationPlanned = false;
+                for (auto& queuePair : m_inputQueueMap) {
+                    if (!queuePair.second->isShutdown()) {
+                        nextIterationPlanned = true;
+                        break;
+                    }
+                }
+                const bool drainGaveUp = m_drainRequested.load() && !nextIterationPlanned;
+                const bool timedOut = fusionTimedOut || drainGaveUp;
                 if (timedOut) {
-                    LOG_WARN("Timeout for message with ID: {}, will be removed from cache", messageId);
+                    if (drainGaveUp && !fusionTimedOut) {
+                        LOG_DEBUG("Drain requested; forwarding incomplete message {} without waiting for the missing inputs",
+                                  messageId);
+                        fusedMessageVec.clear();
+                        fusedMessageVec.push_back(MakeMessage(std::move(messageMap)));
+                        const std::size_t missing =
+                            expectedInputCount > messageMap.size() ? expectedInputCount - messageMap.size() : 0;
+                        try {
+                            m_modulePtr->ProcessBatch(fusedMessageVec);
+                            m_processedCount.fetch_add(fusedMessageVec.size(), std::memory_order_relaxed);
+                        } catch (const std::exception& e) {
+                            LOG_ERROR("Module '{}' threw while processing a partially fused batch: {}",
+                                      m_modulePtr->GetModuleName(), e.what());
+                        } catch (...) {
+                            LOG_ERROR("Module '{}' threw an unknown exception while processing a partially fused batch.",
+                                      m_modulePtr->GetModuleName());
+                        }
+                        m_droppedCount.fetch_add(missing, std::memory_order_relaxed);
+                    } else {
+                        LOG_WARN("Timeout for message with ID: {}, will be removed from cache", messageId);
+                        // Every partial in the cache is one fused message that will
+                        // never reach the module, so it counts as dropped output.
+                        m_droppedCount.fetch_add(messageMap.size(), std::memory_order_relaxed);
+                    }
                     cacheArrivalMs.erase(arrivalIt);
                     it = messageCache.erase(it);
                 } else {

@@ -10,8 +10,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -73,13 +75,120 @@ public:
     // void RemoveQueue(const std::string& name) { m_inputQueueMap.erase(name); }
     // void ClearQueues() { m_inputQueueMap.clear(); }
 
+    /**
+     * @brief Waits until every input queue of this worker has been closed by its
+     * producer or runs empty.
+     * @details Pipeline::Stop() stops stages sinks-first, so an upstream stage has
+     * already been joined (and has shut down the edges it feeds) before this is
+     * asked. A closed queue will receive nothing more, so there is nothing left
+     * to wait for on it, while an open queue still has to empty out. A source
+     * worker has no inputs and returns true immediately.
+     * @param timeout Upper bound shared by all input queues.
+     * @return false when some queue was still open and non-empty at the deadline.
+     */
+    bool WaitForInputsDrained(std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        for (auto& item : m_inputQueueMap) {
+            const auto now = std::chrono::steady_clock::now();
+            std::chrono::milliseconds remaining{0};
+            if (now < deadline) {
+                remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+                if (remaining.count() < 1) {
+                    remaining = std::chrono::milliseconds(1);
+                }
+            }
+            if (!item.second->waitUntilEmpty(remaining)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     void WorkLoop();
+
+    /// Whether this worker is a source (has no input queue to pull from).
+    bool IsSource() const { return m_inputQueueMap.empty(); }
+    /// Whether this worker drives RunFusion() instead of the batch loop.
+    bool HasSyncInputs() const { return m_syncInputs; }
+
+    /**
+     * @brief Tells a fusion worker that the pipeline is closing.
+     * @details RunFusion() waits for one message id to show up on every input.
+     * When the upstream stages are already gone, that wait can only time out, so
+     * the drain asks the worker to flush what it has instead of waiting.
+     */
+    void RequestDrain() { m_drainRequested.store(true); }
+
+    /// Re-arms normal fusion behaviour when the pipeline is started again.
+    void ClearDrain() { m_drainRequested.store(false); }
+
+    /**
+     * @brief Waits until the worker loop has observed a stop request.
+     * @details Pipeline::Stop() uses this instead of joining a thread, so a module
+     * that cannot leave its call in time is detected rather than waited on
+     * forever. The wait re-checks the flag, so a RequestStop() that lands while
+     * the caller is already waiting is picked up on the next poll.
+     * @return true when the loop flagged itself as finished.
+     */
+    bool WaitForStopRequest(std::chrono::milliseconds timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        std::unique_lock<std::mutex> lock(m_loopMutex);
+        while (!m_loopExited) {
+            if (m_loopCond.wait_until(lock, deadline) == std::cv_status::timeout) {
+                return m_loopExited;
+            }
+        }
+        return true;
+    }
+
+    /// Upper bound a single batch pull can block on its input queues.
+    std::chrono::milliseconds BatchTimeout() const { return m_batchTimeout; }
+    /// Whether the worker loop of the current run has not returned yet.
+    bool IsRunning() const;
+    /// Upper bound RunFusion() waits for its inputs before timing out.
+    std::chrono::milliseconds FusionTimeout() const { return m_fusionTimeout; }
+    /// How long a source yields when an invocation produced nothing.
+    std::chrono::milliseconds SourceIdleTime() const { return std::chrono::milliseconds(m_sourceIdleMs); }
 
     /**
      * @brief Number of messages this worker has processed so far.
      * A source invocation that produced output counts one; batches count their size.
      */
     std::uint64_t ProcessedCount() const { return m_processedCount.load(std::memory_order_relaxed); }
+
+    /**
+     * @brief Messages this worker dropped: outputs a module could not hand to a
+     *        downstream queue, plus partial fused messages that hit the fusion
+     *        timeout. processed + dropped accounts for everything the module saw.
+     */
+    std::uint64_t DroppedCount() const { return m_droppedCount.load(std::memory_order_relaxed); }
+
+    /// Bumps the drop counter. Public so ModuleActor can report drops that the
+    /// module made on the consumer side of the pipeline (the dispatcher counter
+    /// covers the producer side).
+    void RecordDropped(std::uint64_t count = 1) { m_droppedCount.fetch_add(count, std::memory_order_relaxed); }
+
+    /** @brief Signals the loop to return without joining (used by the drain). */
+    /**
+     * @brief Tells the worker loop to return, and clears a previous request.
+     * @details A stop is about one run of the pipeline; the same worker is
+     * started again when the pipeline is started again. A run that had to be
+     * abandoned did leave its flag set, so resetting it here is what makes a
+     * restart possible at all.
+     */
+    void PrepareForStart() {
+        m_stopFlag.store(false);
+        {
+            std::lock_guard<std::mutex> lock(m_loopMutex);
+            m_loopExited = false;
+        }
+    }
+
+    void RequestStop() { m_stopFlag.store(true); }
+
+
+    /** @brief Whether a stop has already been requested for this worker. */
+    bool IsStopRequested() const { return m_stopFlag.load(); }
 
 private:
     /**
@@ -111,8 +220,12 @@ private:
      *
      * @param maxBatchSize The maximum number of messages to pull.
      * @param batchTimeout The maximum time to wait for messages to become available.
+     *
+     * Gives up early once every input queue has been closed by its producer: a
+     * stage with nothing left to receive returns immediately instead of idling
+     * out the whole timeout.
      */
-    std::vector<Message> PullBatchMessage(size_t maxBatchSize, std::chrono::milliseconds batchTimeout);
+    std::vector<Message> PullBatchMessage(std::size_t maxBatchSize, std::chrono::milliseconds batchTimeout);
 
 private:
     std::shared_ptr<Module> m_modulePtr = nullptr;
@@ -121,10 +234,23 @@ private:
     std::unordered_map<std::string, ViewPtr<MessageQueue>> m_inputQueueMap;
 
     std::atomic<bool> m_stopFlag{false};
+    /// Fusion only: set by the shutdown drain, see RequestDrain().
+    std::atomic<bool> m_drainRequested{false};
     std::atomic<std::uint64_t> m_processedCount{0};
+    std::atomic<std::uint64_t> m_droppedCount{0};
+
+    // Wakes a caller waiting for the loop to leave (see WaitForStopRequest()).
+    mutable std::mutex m_loopMutex;
+    std::condition_variable m_loopCond;
+    /// False only while a worker loop of the current run is executing: it starts
+    /// out false and ModuleActor sets it via PrepareForStart() before it spawns
+    /// the loop.
+    bool m_loopExited = true;
 
     // Per-module tuning, resolved once in LoadConfig().
     std::size_t m_maxBatchSize = 4;
+    /// Multi-input switch: when inputs are not fused, a batch is collected from
+    /// every input queue until it is full or this timeout elapses.
     std::chrono::milliseconds m_batchTimeout{100};
     std::chrono::milliseconds m_fusionTimeout{60000};
     int m_sourceIdleMs = 1;

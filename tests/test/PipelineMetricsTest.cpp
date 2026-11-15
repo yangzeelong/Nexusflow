@@ -140,4 +140,105 @@ TEST(PipelineMetricsTest, YamlConfigSetsQueueCapacity) {
     ASSERT_EQ(metrics.modules.size(), std::size_t(2));
 }
 
+// Emits forever without idling, so it is still producing when the pipeline is
+// stopped and its downstream queue is shut down underneath it.
+class MetricsStreamSourceModule : public Module {
+public:
+    explicit MetricsStreamSourceModule(const std::string& name) : Module(name) {}
+
+protected:
+    void Process(Message&) override {
+        ++m_emitted;
+        Broadcast(std::move(MakeMessage(1)));
+    }
+
+private:
+    int m_emitted = 0;
+};
+
+// Only used to give the stream source a downstream edge; it never has to keep up.
+class MetricsIdleSinkModule : public Module {
+public:
+    explicit MetricsIdleSinkModule(const std::string& name) : Module(name) {}
+
+protected:
+    void Process(Message&) override {}
+};
+
+NEXUSFLOW_REGISTER_MODULE(MetricsStreamSourceModule);
+NEXUSFLOW_REGISTER_MODULE(MetricsIdleSinkModule);
+
+TEST(PipelineMetricsTest, StopAccountsForMessagesTheDispatcherCouldNotPush) {
+    auto source = std::make_shared<MetricsStreamSourceModule>("stream-source");
+    auto sink = std::make_shared<MetricsIdleSinkModule>("idle-sink");
+
+    std::unique_ptr<Pipeline> pipeline =
+        PipelineBuilder().SetMessageQueueCapacity(1).AddModule(source).AddModule(sink).Connect("stream-source", "idle-sink").Build();
+    ASSERT_NE(pipeline, nullptr);
+    ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
+
+    // Init alone must not count anything as dropped.
+    ASSERT_EQ(pipeline->GetMetrics().modules.size(), std::size_t(2));
+    for (const ModuleMetrics& module : pipeline->GetMetrics().modules) {
+        EXPECT_EQ(module.dropped, std::uint64_t(0)) << module.name;
+    }
+
+    ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
+
+    // The source never idles, so it is mid-push when the queue is shut down.
+    // With a capacity-1 queue the push usually blocks, but a single stop can
+    // still land between two attempts, so give the window a few tries.
+    //
+    // A successful stop leaves the pipeline reusable, but its edge queues are
+    // closed for good, so every repeat is built from scratch and the drops are
+    // summed per run.
+    constexpr int kMaxStopAttempts = 3;
+    std::uint64_t totalDropped = 0;
+    for (int attempt = 0; attempt < kMaxStopAttempts && totalDropped == 0; ++attempt) {
+        ASSERT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
+        for (const ModuleMetrics& module : pipeline->GetMetrics().modules) {
+            totalDropped += module.dropped;
+        }
+        if (totalDropped != 0 || attempt + 1 >= kMaxStopAttempts) {
+            break;
+        }
+        pipeline = PipelineBuilder()
+                       .SetMessageQueueCapacity(1)
+                       .AddModule(source)
+                       .AddModule(sink)
+                       .Connect("stream-source", "idle-sink")
+                       .Build();
+        ASSERT_NE(pipeline, nullptr);
+        ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
+        ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
+        std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
+    }
+
+    const PipelineMetrics metrics = pipeline->GetMetrics();
+    std::uint64_t totalProcessed = 0;
+    for (const ModuleMetrics& module : metrics.modules) {
+        totalProcessed += module.processed;
+    }
+    EXPECT_GT(totalProcessed, std::uint64_t(0));
+    EXPECT_GT(totalDropped, std::uint64_t(0));
+
+    // Drops are charged to the module that tried to send; the idle sink never
+    // tried to send anything, so it must stay at zero.
+    ASSERT_EQ(metrics.modules.size(), std::size_t(2));
+    for (const ModuleMetrics& module : metrics.modules) {
+        if (module.name.find("idle-sink") != std::string::npos) {
+            EXPECT_EQ(module.dropped, std::uint64_t(0)) << module.name;
+        }
+    }
+
+    // Accounting is per message: a processed message was popped from the edge
+    // queue, a dropped one was refused by it, so both are visible and neither is
+    // double counted. pushed can only grow by the messages the source emitted,
+    // so it is at least the sink's processed count.
+    ASSERT_EQ(metrics.queues.size(), std::size_t(1));
+    EXPECT_GE(metrics.queues[0].pushed, metrics.modules[1].processed);
+    EXPECT_GE(metrics.queues[0].popped, metrics.modules[1].processed);
+}
+
 } // namespace

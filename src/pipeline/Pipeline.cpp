@@ -17,9 +17,33 @@
 #include <nexusflow/Pipeline.hpp>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace nexusflow {
+
+namespace {
+
+// Post-order DFS over the downstream adjacency: a stage is emitted only after
+// every stage it feeds, so the result is a valid "sinks first" order. Recursion
+// is bounded by the graph depth, not its width, and the visited set keeps a
+// malformed (cyclic) graph from recursing forever.
+void CollectDownstream(const std::string& name,
+                       const std::unordered_map<std::string, std::vector<std::string>>& downstream,
+                       std::unordered_set<std::string>& placed, std::vector<std::string>& order) {
+    const auto it = downstream.find(name);
+    if (it != downstream.end()) {
+        for (const auto& dst : it->second) {
+            if (dst != name && placed.find(dst) == placed.end()) {
+                CollectDownstream(dst, downstream, placed, order);
+            }
+        }
+    }
+    placed.insert(name);
+    order.push_back(name);
+}
+
+} // namespace
 
 Pipeline::Pipeline() : m_pImpl(std::make_unique<Pipeline::Impl>()) {}
 
@@ -160,6 +184,13 @@ ErrorCode Pipeline::Start() {
         return ErrorCode::FAILED_ALREADY_START;
     }
     LOG_DEBUG("Starting pipeline...");
+    m_pImpl->drainInProgress.store(false);
+    // A pipeline may be started again after Stop(): the edges were closed at
+    // teardown so that every worker was certain to exit, and they have to be
+    // reopened before the workers look at them again.
+    for (auto& queue : m_pImpl->queues) {
+        queue->restart();
+    }
 
     std::vector<std::shared_ptr<ActorNode>> startedActors;
     for (auto& actorNode : m_pImpl->actorOrderedNodes) {
@@ -180,6 +211,33 @@ ErrorCode Pipeline::Start() {
     return ErrorCode::SUCCESS;
 }
 
+void Pipeline::BuildStopOrder(std::vector<std::string>& order) const {
+    order.clear();
+    if (!m_pImpl || !m_pImpl->graph) {
+        return;
+    }
+    // Node names are unique and equal to the module names (see
+    // Pipeline::Impl::GetOrCreateActorNode), so the order can be computed on the
+    // graph directly and mapped back afterwards.
+    std::unordered_map<std::string, std::vector<std::string>> downstream;
+    for (const auto& edge : m_pImpl->graph->toEdgeListBFS()) {
+        const auto src = edge.srcNodePtr.lock();
+        const auto dst = edge.dstNodePtr.lock();
+        if (!src || !dst) {
+            continue;
+        }
+        downstream[src->name].push_back(dst->name);
+    }
+
+    std::unordered_set<std::string> placed;
+    for (const auto& actor : m_pImpl->actorOrderedNodes) {
+        const std::string name = actor->GetModuleName();
+        if (placed.find(name) == placed.end()) {
+            CollectDownstream(name, downstream, placed, order);
+        }
+    }
+}
+
 ErrorCode Pipeline::Stop() {
     if (!m_pImpl) {
         return ErrorCode::SUCCESS; // Nothing to stop.
@@ -190,20 +248,115 @@ ErrorCode Pipeline::Stop() {
     }
 
     LOG_DEBUG("Stopping pipeline...");
+    // From here on, pushes into an edge that the drain already closed count as
+    // expected shutdown loss rather than a warning per message.
+    m_pImpl->drainInProgress.store(true);
     // Let cooperative modules observe that the pipeline is going away before the
     // queues are torn down.
     if (m_pImpl->context) {
         m_pImpl->context->RequestStop();
     }
-    // Shut the queues down first: blocked producers/consumers wake up, and the
-    // worker loops can observe the stop flag before we join them.
+
+    // Drain instead of discarding. Shutting the queues down first (the previous
+    // behaviour) threw away whatever was still buffered on every edge, which is
+    // what produced the "the queue is shut down" warnings on every shutdown.
+    //
+    // The stages are joined sinks-first, which is a valid reverse topological
+    // order. Stopping a stage makes it hand over what it already had in hand and
+    // then leave its loop; once it is joined it can push no more, so the edges it
+    // feeds are closed immediately after it. That tells the stage below "nothing
+    // more will ever arrive", which is what lets its batch pull return instead of
+    // idling out its timeout.
+    //
+    // The drain budget is per stage and covers that stage's own blocking pull: a
+    // stage that is merely between two pulls (a queue reads empty for a moment
+    // and the worker is parked in waitAndPopFor) still drains normally on the
+    // next iteration. A single shared budget would spend the whole allowance on
+    // the first busy stage upstream and then give the downstream ones nothing.
+    std::vector<std::string> stopOrder;
+    BuildStopOrder(stopOrder);
+    // Every stage learns about the drain up front: a stage that is waiting for
+    // inputs that will never arrive (a fusion module missing one of its sources)
+    // has to stop waiting now, not when its turn in the order comes up.
+    for (const auto& name : stopOrder) {
+        auto actorIt = m_pImpl->actorModuleMap.find(name);
+        if (actorIt != m_pImpl->actorModuleMap.end() && actorIt->second) {
+            actorIt->second->RequestDrain();
+        }
+    }
+
+    // First pass: ask every stage to stop. A stage that is parked in a blocking
+    // read only sees the request once that read returns, so all of them are told
+    // at once and none of the requests waits on another stage's progress.
+    for (const auto& name : stopOrder) {
+        auto actorIt = m_pImpl->actorModuleMap.find(name);
+        if (actorIt != m_pImpl->actorModuleMap.end() && actorIt->second) {
+            actorIt->second->RequestStop();
+        }
+    }
+
+    // Producers have to be gone before anything downstream is drained. A source
+    // never idles on its own: it keeps filling its output until someone stops it,
+    // so a drain that starts while it is still running can never see its edge go
+    // empty. Join the producers first, then drain what they handed over.
+    //
+    // Closing the producer's output edges is what releases it. A producer can be
+    // parked inside a blocking push when the stop arrives; that push only ever
+    // returns once the queue is either non-full or shut down, and the stage that
+    // would consume it has already left. Shutting the edge down now makes the
+    // push fail immediately, so the producer leaves its loop inside its budget
+    // instead of burning the whole stop timeout and having its thread abandoned.
+    // Nothing is lost by closing early: shutdown() only rejects further pushes,
+    // it still hands out whatever is already buffered, which is exactly what the
+    // downstream drain below then consumes.
+    for (const auto& name : stopOrder) {
+        auto actorIt = m_pImpl->actorModuleMap.find(name);
+        if (actorIt == m_pImpl->actorModuleMap.end() || !actorIt->second) {
+            continue;
+        }
+        const std::shared_ptr<ModuleActor>& actor = actorIt->second;
+        if (!actor->IsStarted() || !actor->IsSource()) {
+            continue;
+        }
+        actor->ShutdownOutputs();
+        actor->StopAndJoinWithin(m_pImpl->stopTimeout);
+    }
+
+    // Second pass, sinks first: let each stage finish what it still has in its
+    // input queue, then join it. The edges are closed only after every stage has
+    // left its loop, so a producer that was asked to stop while inside a
+    // Process() call still finds its output queue open and its "one message in
+    // hand" is delivered instead of lost.
+    for (const auto& name : stopOrder) {
+        auto actorIt = m_pImpl->actorModuleMap.find(name);
+        if (actorIt == m_pImpl->actorModuleMap.end() || !actorIt->second) {
+            continue;
+        }
+        const std::shared_ptr<ModuleActor>& actor = actorIt->second;
+        if (!actor->IsStarted()) {
+            continue;
+        }
+        const auto drainBudget = m_pImpl->drainTimeout + actor->BlockingTime();
+        if (!actor->WaitForInputsDrained(drainBudget)) {
+            LOG_WARN("Module '{}' still had buffered input after {} ms of draining; "
+                     "stopping it anyway and dropping the rest.",
+                     actor->GetModuleName(), static_cast<long long>(drainBudget.count()));
+        }
+        actor->StopAndJoinWithin(m_pImpl->stopTimeout);
+        // The stage can push no more, so the edges it feeds are closed right away:
+        // that is what turns the downstream pull into a return instead of a wait
+        // for a message that will never come.
+        actor->ShutdownOutputs();
+    }
+
+    // Nothing can push any more, so every edge can be closed. A stopped pipeline
+    // is reusable: Start() with a closed edge used to fail in the middle of its
+    // worker rollback, leaving some workers running.
     for (auto& queue : m_pImpl->queues) {
         queue->shutdown();
     }
-    for (auto& actorNode : m_pImpl->actorOrderedNodes) {
-        actorNode->Stop();
-    }
     m_pImpl->started = false;
+    m_pImpl->drainInProgress.store(false);
     LOG_DEBUG("Pipeline stopped successfully.");
     return ErrorCode::SUCCESS;
 }
@@ -232,6 +385,7 @@ PipelineMetrics Pipeline::GetMetrics() const {
         ModuleMetrics module;
         module.name = actor->GetModuleName();
         module.processed = actor->ProcessedCount();
+        module.dropped = actor->DroppedCount();
         metrics.modules.push_back(std::move(module));
     }
     return metrics;

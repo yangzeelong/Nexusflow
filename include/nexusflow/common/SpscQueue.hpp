@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <thread>
 #include <type_traits>
 #include <utility>
 
@@ -124,6 +125,15 @@ public:
         if (m_shutdown.load(std::memory_order_relaxed)) {
             return false;
         }
+        // A producer waiting for space is parked on m_condNotFull, which only a
+        // consumer wakes. A pipeline that stops its workers while one of them is
+        // blocked on a full edge has no consumer left to do that, so the waiter
+        // must find the shutdown flag itself. Reading it there costs a second
+        // relaxed load only after the first one has already failed, not a locked
+        // read-modify-write on every message.
+        if (m_producerWaiting.load(std::memory_order_relaxed) && m_shutdown.load(std::memory_order_relaxed)) {
+            return false;
+        }
         if (PutIfSpace(item)) {
             WakeConsumer();
             return true;
@@ -156,7 +166,13 @@ public:
                 m_producerWaiting.store(false, std::memory_order_relaxed);
                 return false;
             }
-            m_condNotFull.wait(lock);
+            // Bounded, not a plain wait(): a producer parked on a full queue has
+            // to come back regularly. A consumer that stopped without notifying
+            // would otherwise strand it here forever, and the pipeline stop path
+            // could never join the worker. shutdown() also wakes this wait, but
+            // only once the stop path gets far enough to close the queue -- which
+            // it cannot do while this producer is still inside push().
+            m_condNotFull.wait_for(lock, std::chrono::milliseconds(kParkTimeoutMs));
         }
     }
 
@@ -178,6 +194,9 @@ public:
             return m_fallback->pushFor(std::move(item), timeout);
         }
         if (m_shutdown.load(std::memory_order_relaxed)) {
+            return false;
+        }
+        if (m_producerWaiting.load(std::memory_order_relaxed) && m_shutdown.load(std::memory_order_relaxed)) {
             return false;
         }
         if (PutIfSpace(item)) {
@@ -289,7 +308,12 @@ public:
                 m_consumerWaiting.store(false, std::memory_order_relaxed);
                 return false;
             }
-            m_condNotEmpty.wait(lock);
+            // Bounded, not a plain wait(): a consumer that parks here must still
+            // come back regularly. Otherwise a lost wake-up (or a producer that
+            // stopped without notifying) strands the consumer forever, and the
+            // pipeline stop path can never join it. The re-check above runs on
+            // every wake-up, so a spurious return only costs one extra poll.
+            m_condNotEmpty.wait_for(lock, std::chrono::milliseconds(kParkTimeoutMs));
         }
     }
 
@@ -377,6 +401,8 @@ public:
 
     /**
      * @brief Shuts the queue down and wakes all waiting threads.
+     * @details Both sides are woken: a producer that is parked on a full queue
+     * would otherwise wait for a consumer that has already left its loop.
      */
     void shutdown() {
         if (m_fallback) {
@@ -392,6 +418,39 @@ public:
         }
         m_condNotEmpty.notify_all();
         m_condNotFull.notify_all();
+    }
+
+    /**
+     * @brief Reopens a shut-down queue so the owning pipeline can start again.
+     * @details Only safe while no thread is using the queue (Pipeline calls this
+     * before it starts its workers). Whatever was still queued is discarded: a
+     * shut-down queue is closed at teardown, where anything left is accounted as
+     * dropped, and delivering it to a new run would report stale work.
+     */
+    void restart() {
+        if (m_fallback) {
+            m_fallback->restart();
+            return;
+        }
+        std::lock_guard<std::mutex> lock(m_waitMutex);
+        m_shutdown.store(false, std::memory_order_release);
+        m_head.store(0, std::memory_order_release);
+        m_tail.store(0, std::memory_order_release);
+        m_consumerWaiting.store(false, std::memory_order_release);
+        m_producerWaiting.store(false, std::memory_order_release);
+    }
+
+    /**
+     * @brief Checks whether the queue was shut down.
+     * @details A shut-down queue rejects pushes but still hands out what it
+     * already holds, so a consumer uses this to tell "nothing will ever arrive
+     * again" from "temporarily empty".
+     */
+    bool isShutdown() const {
+        if (m_fallback) {
+            return m_fallback->isShutdown();
+        }
+        return m_shutdown.load(std::memory_order_acquire);
     }
 
     /**
@@ -417,6 +476,53 @@ public:
             }
         }
         return 0;
+    }
+
+    /**
+     * @brief Waits until the consumer has taken everything that was pushed.
+     * @details Producers must already have stopped; this only looks at the
+     * consumer side. It reports success as soon as the queue is empty, so the
+     * usual use is "stop the producer, then wait for the consumer to catch up".
+     * A shut-down queue is never waited on, because no consumer is left to pop.
+     * @return true when the queue emptied within the timeout.
+     */
+    template <class Rep, class Per>
+    bool waitUntilEmpty(const std::chrono::duration<Rep, Per>& timeout) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        if (m_fallback) {
+            while (!m_fallback->isEmpty()) {
+                if (m_fallback->isShutdown()) {
+                    // The producer is gone, so nothing is left to wait for.
+                    return true;
+                }
+                if (std::chrono::steady_clock::now() >= deadline) {
+                    return false;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return true;
+        }
+        for (;;) {
+            if (getSize() == 0) {
+                return true;
+            }
+            static std::atomic<long long> s_drainSpins{0};
+            const long long spins = s_drainSpins.fetch_add(1);
+            if ((spins % 200) == 0) {
+            }
+            if (m_shutdown.load(std::memory_order_acquire)) {
+                // Once shut down, pushes fail, so the consumer will empty the
+                // queue on its own; there is nothing left for this side to wait on.
+                return true;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+            // The consumer holds the wake-up lock while it checks for work, so a
+            // short wait here either sees the next pop or simply re-checks.
+            std::unique_lock<std::mutex> lock(m_waitMutex);
+            m_condNotFull.wait_for(lock, std::chrono::milliseconds(1));
+        }
     }
 
     /**
@@ -473,6 +579,10 @@ private:
     /// The clock is only read every kSpinClockMask+1 pauses: a steady_clock
     /// read costs about as much as a dozen pauses.
     static constexpr int kSpinClockMask = 15;
+    /// Upper bound for a parked consumer in waitAndPop(): it re-checks the queue
+    /// and the shutdown flag at most this often, so a missed wake-up delays it by
+    /// one poll instead of parking it for the rest of the run.
+    static constexpr int kParkTimeoutMs = 5;
 
     /// One relaxed spin iteration for the calling core.
     static void SpinPause() {

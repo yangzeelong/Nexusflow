@@ -68,6 +68,15 @@ public:
      */
     virtual ErrorCode DeInit();
 
+    /**
+     * @brief Drops outputs that a previous run queued but never dispatched.
+     * @details The framework calls this before it starts a module again. Outputs
+     * queued during Process() are handed over only when it returns; a run that
+     * was interrupted leaves them behind, and delivering them in the middle of
+     * the next run would emit a message to a pipeline that never asked for it.
+     */
+    void DiscardPendingOutputs();
+
     // --- Processing ---
 
     /**

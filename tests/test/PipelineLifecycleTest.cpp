@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <iostream>
 #include <memory>
 #include <string>
 #include <thread>
@@ -109,6 +110,40 @@ TEST(PipelineLifecycleTest, DoubleStartAndDoubleStopAreReported) {
     EXPECT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
     EXPECT_EQ(pipeline->Stop(), ErrorCode::FAILED_ALREADY_STOP);
     EXPECT_EQ(pipeline->DeInit(), ErrorCode::SUCCESS);
+}
+
+TEST(PipelineLifecycleTest, StopThenStartAgainKeepsWorking) {
+    auto source = std::make_shared<LifecycleSourceModule>("source");
+    auto sink = std::make_shared<LifecycleSinkModule>("sink");
+    auto pipeline = BuildLifecyclePipeline(source, sink);
+    ASSERT_NE(pipeline, nullptr);
+    ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
+    ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
+    // Something has to have gone through before the stop is worth restarting.
+    ASSERT_GT(sink->received.load(std::memory_order_relaxed), 0);
+
+    const auto stopBegin = std::chrono::steady_clock::now();
+    ASSERT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
+    const auto stopMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - stopBegin).count();
+    // Step timing: a stop that has to wait out a stage's stop timeout (or a
+    // drain budget) is the failure this test exists to catch, so make the
+    // budget visible in the output instead of hiding it in a multi-second test.
+    std::cout << "[  TIME      ] Stop() took " << stopMs << " ms, sink received "
+              << sink->received.load(std::memory_order_relaxed) << "\n";
+    EXPECT_LT(stopMs, 1000) << "Stop() should not need to wait out a timeout";
+
+    // Stop() closes the edges so every worker is certain to exit; a restart has
+    // to reopen them, otherwise the second Start() fails halfway through and
+    // leaves workers of the first half running.
+    ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
+    const int receivedAfterFirstRun = sink->received.load(std::memory_order_relaxed);
+    std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
+    EXPECT_GT(sink->received.load(std::memory_order_relaxed), receivedAfterFirstRun);
+    ASSERT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
+    EXPECT_EQ(pipeline->Stop(), ErrorCode::FAILED_ALREADY_STOP);
+    ASSERT_EQ(pipeline->DeInit(), ErrorCode::SUCCESS);
 }
 
 TEST(PipelineLifecycleTest, DestroyAfterExplicitStopIsSafe) {

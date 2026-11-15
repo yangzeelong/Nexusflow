@@ -44,6 +44,9 @@ std::shared_ptr<ActorNode> Pipeline::Impl::GetOrCreateActorNode(const std::share
 
     // 2. 创建 ActiveNode 并存入 map
     auto actorNode = std::make_shared<ActorNode>(module, config, context);
+    // Expected losses during the graceful drain are routed through the pipeline
+    // flag instead of each producer warning once per message.
+    actorNode->SetShutdownFlag(&drainInProgress);
     actorModuleMap.emplace(nodeName, actorNode);
 
     return actorNode;

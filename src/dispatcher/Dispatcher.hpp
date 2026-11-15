@@ -7,7 +7,9 @@
 #include "nexusflow/Message.hpp"
 #include "nexusflow/Logging.hpp"
 
+#include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <unordered_map>
@@ -71,9 +73,86 @@ public:
         m_subscriberMap[name] = queue;
     }
 
+    /**
+     * @brief Messages this dispatcher could not hand to an output queue.
+     * @details A push only fails when the queue was shut down underneath the
+     * producer, so this counts the messages lost at teardown. It is reported as
+     * the owning module's dropped counter: a queued message that never arrived
+     * belongs to the module that tried to send it.
+     */
+    std::uint64_t DroppedCount() const { return m_droppedCount.load(std::memory_order_relaxed); }
+
+    /**
+     * @brief Returns the edges this dispatcher writes to.
+     */
+    std::vector<ViewPtr<MessageQueue>> GetOutputQueues() const {
+        std::vector<ViewPtr<MessageQueue>> queues;
+        queues.reserve(m_subscriberMap.size());
+        for (const auto& subscriber : m_subscriberMap) {
+            queues.push_back(subscriber.second);
+        }
+        return queues;
+    }
+
+    /**
+     * @brief Marks that the pipeline is shutting down, which stops the
+     *        per-message drop warning.
+     * @details Push failures during a drain are expected: the drain empties
+     * stages from the sink backwards, so a producer can still hold a message when
+     * its edge closes. The losses are still counted.
+     */
+    void SetShuttingDown(std::atomic<bool>* flag) { m_shuttingDown = flag; }
+
+    /**
+     * @brief Closes every edge this module writes to.
+     * @details Called once the producing stage has left its loop: no further
+     * message can be handed to these edges, and a closed queue makes the
+     * downstream stage's pull return instead of blocking out its batch timeout.
+     */
+    void ShutdownOutputs() {
+        for (const auto& subscriber : m_subscriberMap) {
+            subscriber.second->shutdown();
+        }
+    }
+
 private:
+    /**
+     * @brief Whether this dispatcher is inside a pipeline drain right now.
+     */
+    bool ShuttingDown() const {
+        return m_shuttingDown && m_shuttingDown->load(std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief Hands a message to one output queue.
+     * @details A push is normally blocking, which is what gives a slow stage
+     * backpressure. During a drain that backpressure is a deadlock in waiting: the
+     * stage that would consume the queue has already been stopped, so the producer
+     * would block on a full queue until its whole stop budget ran out and its
+     * worker thread had to be abandoned. While the pipeline shuts down the push
+     * therefore fails fast instead, and the message is counted as dropped.
+     */
+    bool PushTo(ViewPtr<MessageQueue> queue, const Message& msg) {
+        return ShuttingDown() ? queue->tryPush(msg) : queue->push(msg);
+    }
+
+    bool PushTo(ViewPtr<MessageQueue> queue, Message&& msg) {
+        return ShuttingDown() ? queue->tryPush(std::move(msg)) : queue->push(std::move(msg));
+    }
+
+    void RecordDroppedPush(const std::string& outputName) {
+        m_droppedCount.fetch_add(1, std::memory_order_relaxed);
+        if (m_shuttingDown && m_shuttingDown->load(std::memory_order_relaxed)) {
+            LOG_DEBUG("Broadcast to output queue {} failed during shutdown: the queue is already closed", outputName);
+            return;
+        }
+        LOG_WARN("Broadcast to output queue {} failed: the queue is shut down", outputName);
+    }
+
     ViewPtr<Config> m_configView;
     std::unordered_map<std::string, ViewPtr<MessageQueue>> m_subscriberMap;
+    std::atomic<std::uint64_t> m_droppedCount{0};
+    std::atomic<bool>* m_shuttingDown = nullptr;
 };
 
 }} // namespace nexusflow::dispatcher
