@@ -55,6 +55,11 @@ Worker::Worker(const std::shared_ptr<Module>& modulePtr, const ViewPtr<Config>& 
     m_configPtr = configPtr;
     m_context = context;
     m_stopFlag = false;
+    if (m_modulePtr) {
+        // Back channel for NoteBlockedWait(): the module cannot reach the worker
+        // through the public API, and the worker already reaches into the module.
+        m_modulePtr->m_worker = this;
+    }
     LoadConfig();
 }
 
@@ -88,6 +93,49 @@ ErrorCode Worker::Start() {
 bool Worker::IsRunning() const {
     std::lock_guard<std::mutex> lock(m_loopMutex);
     return !m_loopExited;
+}
+
+void Worker::IdleAfterEmptyOutput() {
+    if (m_outputQueues.empty()) {
+        // Nothing to watch: no edge of ours can be full, and the next invocation
+        // is the only thing that can tell us otherwise. Come back immediately;
+        // a source that keeps producing nothing and has no output is idle by
+        // definition, and Module::Process() is the place that decides its pace.
+        return;
+    }
+    const auto idleBudget = std::chrono::milliseconds(m_sourceIdleMs);
+    ViewPtr<MessageQueue> fullEdge;
+    for (const auto& queue : m_outputQueues) {
+        // capacity() <= 0 means unbounded, and an unbounded edge is never full.
+        const int capacity = queue->capacity();
+        if (capacity > 0 && queue->getSize() >= static_cast<std::size_t>(capacity)) {
+            fullEdge = queue;
+            break;
+        }
+    }
+    if (!fullEdge) {
+        // Every edge we write to has room. That is the normal shape of a source
+        // whose module is waiting on its own device: the empty turn already cost
+        // the module a real wait, so come back at once and let its wait set the
+        // pace. A module that returns instantly with nothing (no device to wait
+        // on) has to be paced by the configured budget instead, or the loop would
+        // spin at full speed.
+        if (idleBudget.count() > 0) {
+            std::this_thread::sleep_for(idleBudget);
+        }
+        return;
+    }
+    if (idleBudget.count() > 0) {
+        // A source's backpressure is its full output edge. Waiting on that edge
+        // wakes this thread the moment the consumer takes an item -- the same
+        // mechanism a producer inside push() uses -- so it does not add a fixed
+        // millisecond of latency to every refill.
+        fullEdge->waitForRoom(idleBudget);
+    } else {
+        // sourceIdleMs == 0 means "never sleep", which only makes sense for a
+        // module that paces itself; still yield the CPU so the consumer can run.
+        std::this_thread::yield();
+    }
 }
 
 void Worker::LoadConfig() {
@@ -195,8 +243,22 @@ void Worker::WorkLoop() {
                         LOG_ERROR("Module '{}' threw an unknown exception while processing.", moduleName);
                         ++m_failedCount;
                     }
-                    if (!produced && m_sourceIdleMs > 0) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(m_sourceIdleMs));
+                    if (!produced) {
+                        // An empty invocation either produced nothing to hand over
+                        // yet, or it waited for that something and the wait ended
+                        // because the run stopped. The first case may be handled
+                        // by a source that wants backpressure; the second is busy
+                        // waiting already, and backpressure there would be a third
+                        // wait for nothing.
+                        bool blocked = false;
+                        {
+                            std::lock_guard<std::mutex> lock(m_blockedMutex);
+                            blocked = m_sourceBlocked;
+                            m_sourceBlocked = false;
+                        }
+                        if (!blocked) {
+                            IdleAfterEmptyOutput();
+                        }
                     }
                 } else {
                     // Sink or Filter/Transformer Module Loop

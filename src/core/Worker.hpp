@@ -151,6 +151,53 @@ public:
     std::chrono::milliseconds SourceIdleTime() const { return std::chrono::milliseconds(m_sourceIdleMs); }
 
     /**
+     * @brief The queues a source writes to, resolved once at start.
+     * @details A source has no input to block on: nothing upstream can slow it
+     * down. Its backpressure has to come from the edges it fills, so the source
+     * parks on them instead of sleeping for a fixed time. See
+     * WaitForOutputRoom() for why that is the better mechanism.
+     */
+    void SetOutputQueues(const std::vector<ViewPtr<MessageQueue>>& queues) { m_outputQueues = queues; }
+
+    /// Edges this worker pushes into, as seen by the loop.
+    const std::vector<ViewPtr<MessageQueue>>& OutputQueues() const { return m_outputQueues; }
+
+    /**
+     * @brief Handles a source invocation that produced nothing.
+     * @details The old mechanism slept a fixed `sourceIdleMs` after every empty
+     * invocation, which throttles the producer by wall-clock time: a module whose
+     * output depends on arrivals paces itself correctly, but a module that never
+     * produces simply burns the configured wait, and a module that produces in
+     * bursts is held back even when its edges are wide open.
+     *
+     * The real signal a source is ahead of the pipeline is that one of its output
+     * edges is full. So:
+     *  - every output has room: return at once, this invocation was just empty
+     *    (a camera that has not decoded the next frame yet should be asked again
+     *    immediately, not a millisecond later);
+     *  - a full output whose queue is event-driven: wait on that queue for
+     *    `sourceIdleMs` (its own condvar, woken by the consumer's pop or by
+     *    shutdown), falling back to the same deadline, so the wake-up is immediate
+     *    rather than up to a millisecond late;
+     *  - a full output that is not event-driven (tryPush only ever sees an empty
+     *    queue): yield with a bounded wait, because nothing will signal us.
+     */
+    void IdleAfterEmptyOutput();
+
+    /**
+     * @brief Records that a module's blocking call came back without work.
+     * @details Only a source that owns a wait can say this: a decoder that
+     * blocked on a device until the run stopped produced nothing, but there is
+     * no reason to back it off — it just spent its whole turn waiting. The flag
+     * is cleared by the loop before the next invocation, so it only describes
+     * the call that has just returned.
+     */
+    void NoteBlockedWait() {
+        std::lock_guard<std::mutex> lock(m_blockedMutex);
+        m_sourceBlocked = true;
+    }
+
+    /**
      * @brief Number of messages this worker has processed so far.
      * A source invocation that produced output counts one; batches count their size.
      */
@@ -362,6 +409,13 @@ private:
     std::chrono::milliseconds m_batchTimeout{100};
     std::chrono::milliseconds m_fusionTimeout{60000};
     int m_sourceIdleMs = 1;
+    /// Set by a source module for the invocation that has just returned, see
+    /// NoteBlockedWait().
+    bool m_sourceBlocked = false;
+    mutable std::mutex m_blockedMutex;
+    /// Edges a source fills; used to decide what an empty invocation should wait
+    /// on (see IdleAfterEmptyOutput()).
+    std::vector<ViewPtr<MessageQueue>> m_outputQueues;
     bool m_syncInputs = false;
     // Profiling costs a name copy and a registry lock per measurement; the
     // work loop only pays it for modules that opt in.

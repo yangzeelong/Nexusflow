@@ -44,11 +44,17 @@ struct MetricSamples {
     /// average instead of mixing per-call and per-item numbers.
     double minMs = 0.0;
     double maxMs = 0.0;
-    /// 95th percentile over the most recent items, not over the whole run: the
-    /// report describes the workload the pipeline is running now. The registry
-    /// keeps a bounded window, so this costs no more than the cumulative
-    /// fields above.
+    /// 95th and 99th percentile over the most recent items, not over the whole
+    /// run: the report describes the workload the pipeline is running now. The
+    /// registry keeps a bounded window, so this costs no more than the
+    /// cumulative fields above.
     double p95Ms = 0.0;
+    double p99Ms = 0.0;
+    /// How many items those percentiles stand on, and how far back in wall time
+    /// that reaches. Without them a percentile cannot be read: p99 of 20 items
+    /// is the slowest of 20, p99 of 1024 is a real tail.
+    std::uint64_t windowItems = 0;
+    double windowSpanMs = 0.0;
 
     /// Call site of the first measurement: `__FILE__` and `__LINE__` of the
     /// macro.
@@ -150,30 +156,81 @@ private:
 
         std::vector<double> values;
         std::size_t cursor = 0;
+        /// Timeline of the last kCapacity items: the wall-clock moment each one
+        /// was *reported* (it may have started earlier), which is what the span
+        /// of the window is read from. Paired with `values` through the same
+        /// cursor, so a slot holds at most 2 x kCapacity doubles.
+        std::vector<std::chrono::steady_clock::time_point> moments;
 
-        void Push(double ms) {
+        void Push(double ms, std::chrono::steady_clock::time_point moment) {
+            // A ring, always. Appending until the slot is full would put the
+            // newest entry last while every later write goes by cursor, so the
+            // entry at `cursor` would be the oldest one only once the window has
+            // wrapped: until then the window would keep a stale sample and drop
+            // the newest. Writing through the cursor keeps "oldest" at cursor.
             if (values.size() < kCapacity) {
                 values.push_back(ms);
+                moments.push_back(moment);
+                if (values.size() == kCapacity) cursor = 0;
                 return;
             }
-            // Full: overwrite the oldest entry. Order does not matter here
-            // because only percentiles are read back.
             values[cursor] = ms;
+            moments[cursor] = moment;
             cursor = (cursor + 1) % kCapacity;
         }
 
-        /// Nearest-rank percentile over the window. It copies the window
-        /// because nth_element reorders in place; that is fine at report
-        /// frequency and keeps this const.
-        double Percentile(double percentile) const {
-            if (values.empty()) return 0.0;
-            std::vector<double> scratch(values);
-            const std::size_t rank = static_cast<std::size_t>(
-                percentile * static_cast<double>(scratch.size() - 1) + 0.5);
-            std::nth_element(scratch.begin(), scratch.begin() + rank,
-                             scratch.end());
-            return scratch[rank];
+        /// Wall time from the oldest item still in the window to the newest.
+        double SpanMs() const {
+            if (moments.size() < 2) return 0.0;
+            std::chrono::steady_clock::time_point oldest = moments[0];
+            std::chrono::steady_clock::time_point newest = moments[0];
+            for (const auto& moment : moments) {
+                if (moment < oldest) oldest = moment;
+                if (moment > newest) newest = moment;
+            }
+            return std::chrono::duration<double, std::milli>(newest - oldest).count();
         }
+
+        /// None, one, or two nearest-rank percentiles. They share one sort: a
+        /// report that prints p95 and p99 would otherwise reorder the window
+        /// twice for the same answer. Copies the window because sorting it in
+        /// place would destroy the ring order; that is fine at report frequency
+        /// and keeps this const.
+        void Percentiles(const double* requested, std::size_t count,
+                         double* out) const {
+            for (std::size_t i = 0; i < count; ++i) out[i] = 0.0;
+            if (values.empty()) return;
+            std::vector<double> scratch(values);
+            // One nth_element on the highest rank of the set partitions every
+            // lower rank into place too: nth_element leaves everything before
+            // the n-th element smaller than it, so a second request at a lower
+            // rank only has to look at the left part. That is why p95 and p99
+            // need one partition, not two.
+            std::size_t top = 0;
+            for (std::size_t i = 0; i < count; ++i) {
+                top = std::max(top, percentileIndex(requested[i], scratch.size()));
+            }
+            // The n-th element *is* the value at rank n: nth_element is a
+            // partition, not a sort, so it may leave a larger value just before
+            // the pivot, and the pivot itself is the element that lands at `top`
+            // only when the whole range is sorted. Taking the maximum of the
+            // left part inclusive of `top` is correct in both cases.
+            std::nth_element(scratch.begin(), scratch.begin() + top,
+                             scratch.end());
+            for (std::size_t i = 0; i < count; ++i) {
+                const std::size_t rank = percentileIndex(requested[i], scratch.size());
+                out[i] = *std::max_element(scratch.begin(), scratch.begin() + rank + 1);
+            }
+        }
+
+    private:
+        /// Nearest rank: the item at this zero-based index is the percentile.
+        static std::size_t percentileIndex(double percentile, std::size_t size) {
+            return static_cast<std::size_t>(
+                percentile * static_cast<double>(size - 1) + 0.5);
+        }
+
+    public:
     };
 
     struct Aggregate {
@@ -229,10 +286,15 @@ private:
     /// Fold one measurement into an aggregate. The caller holds m_mutex.
     static void Accumulate(Aggregate& aggregate, double elapsedMs,
                            uint64_t items, const char* file, int line);
-    /// Read one aggregate back out. p95Ms stays 0 because it walks the window,
-    /// so the callers that report it fill it in.
+    /// Read one aggregate back out. The percentiles stay 0 because they walk
+    /// the window, so the callers that report them call FillPercentiles().
     static MetricSamples MakeStats(const std::string& name,
                                 const Aggregate& aggregate);
+
+    /// Fill the window percentiles (p95 and p99). Called only when a report is
+    /// due: each percentile reorders a copy of the window, which a hot timer
+    /// must not pay on every measurement.
+    static void FillPercentiles(const Aggregate& aggregate, MetricSamples& stats);
 
     /// Resolve a handle to its slot. The caller holds m_mutex, and the result
     /// must not outlive the lock: interning can reallocate m_slots.

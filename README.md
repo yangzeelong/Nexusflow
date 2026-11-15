@@ -180,15 +180,16 @@ void runWithBuilder() {
 
 Every graph edge gets its own bounded message queue, and the queue capacity is the
 backpressure depth of the pipeline: how many messages may be in flight between two
-stages. The default is 5; raise it for throughput-heavy stages and lower it for
-latency-sensitive ones.
+stages. Depth is a property of the pipeline, not of the framework, so there is no
+default: raise it for throughput-heavy stages and lower it for latency-sensitive
+ones.
 
-In YAML:
+In YAML (required):
 
 ```yaml
 graph:
   name: "VideoAnalyticsPipeline"
-  messageQueueCapacity: 64   # optional, must be positive, default 5
+  messageQueueCapacity: 64   # required, must be positive
   modules:
     # ...
 ```
@@ -197,15 +198,16 @@ Programmatically:
 
 ```cpp
 auto pipeline = nexusflow::PipelineBuilder()
-    .SetMessageQueueCapacity(64)
     .AddModule(source)
     .AddModule(sink)
     .Connect("source", "sink")
-    .Build();
+    .Build(64);   // required: the builder will not guess an edge capacity
 ```
 
+`Pipeline::GetEdgeCapacity()` reports the depth the built pipeline used.
+
 `Pipeline::GetSnapshot()` returns a snapshot of the runtime counters without
-stopping the pipeline (the older `GetMetrics()` forwards to it):
+stopping the pipeline:
 
 ```cpp
 const nexusflow::PipelineSnapshot snapshot = pipeline->GetSnapshot();
@@ -285,13 +287,17 @@ auto& collector = GetContext()->Profiler();        // per pipeline, not global
 nexusflow::profiling::MetricSamples samples;
 if (collector.GetStats("detect.infer", samples)) {
     // samples.items, samples.sumMs, samples.AvgItemMs(), samples.p95Ms,
+    // samples.p99Ms, samples.windowItems, samples.windowSpanMs,
     // samples.minMs, samples.maxMs
 }
 ```
 
 Every duration in `MetricSamples` describes a single item, so the average and the
-tail stay comparable even when one call covers a batch. The p95 covers a recent
-window while min/max cover the whole run.
+tail stay comparable even when one call covers a batch. The p95/p99 cover a recent
+window (`windowItems` samples spanning `windowSpanMs` milliseconds) while min/max
+cover the whole run. Both percentiles come out of one partition over that window,
+so adding p99 costs no extra sort — and `windowItems` travels with the number
+because a p99 over 20 items is just the slowest of those 20, not a tail.
 
 There is deliberately no throughput field: a rate is `items` divided by wall-clock
 time, and these samples are cumulative, so they cannot tell how long the run has

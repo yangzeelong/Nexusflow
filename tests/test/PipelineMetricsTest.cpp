@@ -95,16 +95,13 @@ TEST(PipelineMetricsTest, BuilderSetsQueueCapacityAndCounters) {
     auto source = std::make_shared<MetricsSourceModule>("metrics-source");
     auto sink = std::make_shared<MetricsSinkModule>("metrics-sink");
 
-    std::unique_ptr<Pipeline> pipeline = PipelineBuilder()
-                                             .SetMessageQueueCapacity(7)
-                                             .AddModule(source)
-                                             .AddModule(sink)
-                                             .Connect("metrics-source", "metrics-sink")
-                                             .Build();
+    std::unique_ptr<Pipeline> pipeline =
+        PipelineBuilder().AddModule(source).AddModule(sink).Connect("metrics-source", "metrics-sink").Build(7);
     ASSERT_NE(pipeline, nullptr);
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
+    EXPECT_EQ(pipeline->GetEdgeCapacity(), 7);
 
-    PipelineMetrics metrics = pipeline->GetMetrics();
+    PipelineSnapshot metrics = pipeline->GetSnapshot();
     ASSERT_EQ(metrics.edges.size(), std::size_t(1));
     EXPECT_EQ(metrics.edges[0].capacity, std::size_t(7));
     EXPECT_EQ(metrics.edges[0].pushedTotal, std::uint64_t(0));
@@ -114,7 +111,7 @@ TEST(PipelineMetricsTest, BuilderSetsQueueCapacityAndCounters) {
     std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
     ASSERT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
 
-    metrics = pipeline->GetMetrics();
+    metrics = pipeline->GetSnapshot();
     ASSERT_EQ(metrics.edges.size(), std::size_t(1));
     EXPECT_EQ(metrics.edges[0].capacity, std::size_t(7));
     EXPECT_GT(metrics.edges[0].pushedTotal, std::uint64_t(0));
@@ -124,7 +121,7 @@ TEST(PipelineMetricsTest, BuilderSetsQueueCapacityAndCounters) {
     EXPECT_NE(metrics.edges[0].Name().find("metrics-source"), std::string::npos);
 
     ASSERT_EQ(metrics.modules.size(), std::size_t(2));
-    for (const ModuleMetrics& module : metrics.modules) {
+    for (const ModuleSnapshot& module : metrics.modules) {
         EXPECT_GT(module.processedTotal, std::uint64_t(0)) << module.name;
     }
 }
@@ -147,7 +144,7 @@ TEST(PipelineMetricsTest, YamlConfigSetsQueueCapacity) {
     ASSERT_NE(pipeline, nullptr);
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
 
-    const PipelineMetrics metrics = pipeline->GetMetrics();
+    const PipelineSnapshot metrics = pipeline->GetSnapshot();
     ASSERT_EQ(metrics.edges.size(), std::size_t(1));
     EXPECT_EQ(metrics.edges[0].capacity, std::size_t(3));
     ASSERT_EQ(metrics.modules.size(), std::size_t(2));
@@ -189,13 +186,13 @@ TEST(PipelineMetricsTest, StopAccountsForMessagesTheDispatcherCouldNotPush) {
     auto sink = std::make_shared<MetricsIdleSinkModule>("idle-sink");
 
     std::unique_ptr<Pipeline> pipeline =
-        PipelineBuilder().SetMessageQueueCapacity(1).AddModule(source).AddModule(sink).Connect("stream-source", "idle-sink").Build();
+        PipelineBuilder().AddModule(source).AddModule(sink).Connect("stream-source", "idle-sink").Build(1);
     ASSERT_NE(pipeline, nullptr);
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
 
     // Init alone must not count anything as dropped.
-    ASSERT_EQ(pipeline->GetMetrics().modules.size(), std::size_t(2));
-    for (const ModuleMetrics& module : pipeline->GetMetrics().modules) {
+    ASSERT_EQ(pipeline->GetSnapshot().modules.size(), std::size_t(2));
+    for (const ModuleSnapshot& module : pipeline->GetSnapshot().modules) {
         EXPECT_EQ(module.droppedTotal, std::uint64_t(0)) << module.name;
     }
 
@@ -213,27 +210,26 @@ TEST(PipelineMetricsTest, StopAccountsForMessagesTheDispatcherCouldNotPush) {
     std::uint64_t totalDropped = 0;
     for (int attempt = 0; attempt < kMaxStopAttempts && totalDropped == 0; ++attempt) {
         ASSERT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
-        for (const ModuleMetrics& module : pipeline->GetMetrics().modules) {
+        for (const ModuleSnapshot& module : pipeline->GetSnapshot().modules) {
             totalDropped += module.droppedTotal;
         }
         if (totalDropped != 0 || attempt + 1 >= kMaxStopAttempts) {
             break;
         }
         pipeline = PipelineBuilder()
-                       .SetMessageQueueCapacity(1)
                        .AddModule(source)
                        .AddModule(sink)
                        .Connect("stream-source", "idle-sink")
-                       .Build();
+                       .Build(1);
         ASSERT_NE(pipeline, nullptr);
         ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
         ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
         std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
     }
 
-    const PipelineMetrics metrics = pipeline->GetMetrics();
+    const PipelineSnapshot metrics = pipeline->GetSnapshot();
     std::uint64_t totalProcessed = 0;
-    for (const ModuleMetrics& module : metrics.modules) {
+    for (const ModuleSnapshot& module : metrics.modules) {
         totalProcessed += module.processedTotal;
     }
     EXPECT_GT(totalProcessed, std::uint64_t(0));
@@ -242,7 +238,7 @@ TEST(PipelineMetricsTest, StopAccountsForMessagesTheDispatcherCouldNotPush) {
     // Drops are charged to the module that tried to send; the idle sink never
     // tried to send anything, so it must stay at zero.
     ASSERT_EQ(metrics.modules.size(), std::size_t(2));
-    for (const ModuleMetrics& module : metrics.modules) {
+    for (const ModuleSnapshot& module : metrics.modules) {
         if (module.name.find("idle-sink") != std::string::npos) {
             EXPECT_EQ(module.droppedTotal, std::uint64_t(0)) << module.name;
         }
@@ -272,8 +268,7 @@ TEST(PipelineMetricsTest, EdgeCountersReconcileWithBothEnds) {
                         .AddModule(source)
                         .AddModule(sink)
                         .Connect("reconcile-source", "reconcile-sink")
-                        .SetMessageQueueCapacity(8)
-                        .Build();
+                        .Build(8);
     ASSERT_NE(pipeline, nullptr);
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
     ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
@@ -318,7 +313,7 @@ TEST(PipelineMetricsTest, ProcessedDroppedAndFailedAccountForEveryMessage) {
                         .AddModule(source)
                         .AddModule(sink)
                         .Connect("invariant-source", "invariant-sink")
-                        .Build();
+                        .Build(8);
     ASSERT_NE(pipeline, nullptr);
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
     ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
@@ -355,7 +350,7 @@ TEST(PipelineMetricsTest, ThrowingProcessIsCountedAsFailed) {
                         .AddModule(source)
                         .AddModule(sink)
                         .Connect("throw-source", "throw-sink")
-                        .Build();
+                        .Build(8);
     ASSERT_NE(pipeline, nullptr);
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
     ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
@@ -380,7 +375,7 @@ TEST(PipelineMetricsTest, SnapshotNamesEdgesAndRendersALine) {
                         .AddModule(source)
                         .AddModule(sink)
                         .Connect("named-source", "named-sink")
-                        .Build();
+                        .Build(8);
     ASSERT_NE(pipeline, nullptr);
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
 
@@ -407,8 +402,7 @@ TEST(PipelineMetricsTest, ResetMetricsClearsOnlyTheWaterMark) {
                         .AddModule(source)
                         .AddModule(sink)
                         .Connect("reset-source", "reset-sink")
-                        .SetMessageQueueCapacity(4)
-                        .Build();
+                        .Build(4);
     ASSERT_NE(pipeline, nullptr);
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
     ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);

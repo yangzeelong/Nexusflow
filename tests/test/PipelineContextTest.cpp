@@ -121,7 +121,7 @@ std::unique_ptr<Pipeline> BuildContextPipeline(const std::shared_ptr<ContextSour
         .AddModule(source)
         .AddModule(sink)
         .Connect(source->GetModuleName(), sink->GetModuleName())
-        .Build();
+        .Build(8);
 }
 
 bool HasMarker(const std::vector<log::LogRecord>& records, const std::string& marker) {

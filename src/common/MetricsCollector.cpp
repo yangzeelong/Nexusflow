@@ -129,7 +129,7 @@ void MetricsCollector::Accumulate(Aggregate& aggregate, double elapsedMs,
     ++aggregate.calls;
     aggregate.items += counted;
     aggregate.sumMs += elapsedMs;
-    aggregate.recent.Push(perItemMs);
+    aggregate.recent.Push(perItemMs, std::chrono::steady_clock::now());
     if (aggregate.calls == 1) {
         aggregate.minMs = perItemMs;
         aggregate.maxMs = perItemMs;
@@ -153,7 +153,22 @@ MetricSamples MetricsCollector::MakeStats(const std::string& name,
     stats.maxMs = aggregate.maxMs;
     stats.file = aggregate.file;
     stats.line = aggregate.line;
+    // The percentiles live in the window, so the sample carries the window's
+    // size and span: a p99 over ¾m20 items is the slowest of 20, not a tail.
+    stats.windowItems = static_cast<std::uint64_t>(aggregate.recent.values.size());
+    stats.windowSpanMs = aggregate.recent.SpanMs();
     return stats;
+}
+
+void MetricsCollector::FillPercentiles(const Aggregate& aggregate,
+                                       MetricSamples& stats) {
+    // Only computed for a report: the percentiles walk the window, which is not
+    // worth doing on every measurement of a hot timer. Both come from one sort.
+    const double requested[2] = {0.95, 0.99};
+    double out[2] = {0.0, 0.0};
+    aggregate.recent.Percentiles(requested, 2, out);
+    stats.p95Ms = out[0];
+    stats.p99Ms = out[1];
 }
 
 void MetricsCollector::StartAverage(const std::string& name,
@@ -284,9 +299,7 @@ MetricsCollector::CompletedSample MetricsCollector::AddItemsWithPolicy(
             aggregate.windowServiceMs = 0.0;
         } else {
             completed.stats = MakeStats(slot->name, aggregate);
-            // Only computed for a report: the percentile walks the window,
-            // which is not worth doing on every measurement of a hot timer.
-            completed.stats.p95Ms = aggregate.recent.Percentile(0.95);
+            FillPercentiles(aggregate, completed.stats);
         }
     }
     if (completed.printSample || completed.printAverage) {
@@ -305,7 +318,7 @@ bool MetricsCollector::GetStats(const std::string& name, MetricSamples& stats) c
     if (slot == nullptr || slot->aggregate.calls == 0) return false;
 
     stats = MakeStats(slot->name, slot->aggregate);
-    stats.p95Ms = slot->aggregate.recent.Percentile(0.95);
+    FillPercentiles(slot->aggregate, stats);
     return true;
 }
 
@@ -315,7 +328,7 @@ bool MetricsCollector::GetStats(TimerHandle handle, MetricSamples& stats) const 
     if (slot == nullptr || slot->aggregate.calls == 0) return false;
 
     stats = MakeStats(slot->name, slot->aggregate);
-    stats.p95Ms = slot->aggregate.recent.Percentile(0.95);
+    FillPercentiles(slot->aggregate, stats);
     return true;
 }
 
@@ -328,7 +341,7 @@ std::vector<MetricSamples> MetricsCollector::Snapshot() const {
         // rather than removed: a reset profile shows what was measured since.
         if (slot.aggregate.calls == 0) continue;
         MetricSamples stats = MakeStats(slot.name, slot.aggregate);
-        stats.p95Ms = slot.aggregate.recent.Percentile(0.95);
+        FillPercentiles(slot.aggregate, stats);
         snapshot.push_back(std::move(stats));
     }
     return snapshot;
@@ -348,13 +361,18 @@ void MetricsCollector::PrintStats(const MetricSamples& stats) const {
     // these numbers are cumulative over the whole run — the interval report
     // (PrintWindow) is the one that knows its own window and can print items/s.
     //
-    // p95 covers the recent window while min/max cover the whole run, so a
-    // pipeline whose tail is worsening shows p95 climbing towards max.
+    // p95 and p99 cover the recent window while min/max cover the whole run, so
+    // a pipeline whose tail is worsening shows the percentiles climbing
+    // towards max. The window size and span are printed with them: a p99 over
+    // 20 items is the slowest of 20, and without the span nothing says whether
+    // that is "just now" or "the first second of the run".
     LOG_INFO("Execute '{}' for {} items cost: {:.3f} ms, "
-             "avg: {:.3f} ms/item, p95: {:.3f} ms/item, "
+             "avg: {:.3f} ms/item, p95/p99: {:.3f}/{:.3f} ms/item "
+             "(window: {} items / {:.1f} ms), "
              "min/max: {:.3f}/{:.3f} ms/item",
              stats.name, stats.items, stats.sumMs,
-             stats.AvgItemMs(), stats.p95Ms, stats.minMs, stats.maxMs);
+             stats.AvgItemMs(), stats.p95Ms, stats.p99Ms,
+             stats.windowItems, stats.windowSpanMs, stats.minMs, stats.maxMs);
 }
 
 void MetricsCollector::PrintWindow(const CompletedSample& sample) const {

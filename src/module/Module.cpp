@@ -5,6 +5,7 @@
 #include "nexusflow/Message.hpp"
 #include "nexusflow/Logging.hpp"
 #include "nexusflow/PipelineContext.hpp"
+#include "core/Worker.hpp"
 
 #include <chrono>
 #include <utility>
@@ -162,5 +163,11 @@ void Module::AttachContext(std::shared_ptr<PipelineContext> context) { m_context
 std::shared_ptr<PipelineContext> Module::GetContext() const { return m_context; }
 
 void Module::SetDispatcher(const std::shared_ptr<dispatcher::Dispatcher>& dispatcher) { m_dispatcherPtr = dispatcher; }
+
+void Module::NoteBlockedWait() {
+    if (m_worker) {
+        m_worker->NoteBlockedWait();
+    }
+}
 
 } // namespace nexusflow

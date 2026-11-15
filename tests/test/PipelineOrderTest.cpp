@@ -50,7 +50,7 @@ TEST(PipelineOrderTest, InitFollowsGraphEdgesAndDeInitReversesThem) {
                         .AddModule(third)
                         .Connect("first", "second")
                         .Connect("second", "third")
-                        .Build();
+                        .Build(8);
     ASSERT_NE(pipeline, nullptr);
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
 

@@ -93,6 +93,54 @@ protected:
     void Process(Message&) override {}
 };
 
+// A source that waits for its own work (a decoder blocking on the next frame):
+// it holds each call for a while, then optionally reports that the wait is what
+// paced it. `reportWait == false` makes the same module keep quiet, which leaves
+// the worker's own sourceIdleMs as the only thing setting the pace.
+class BlockingSourceModule : public Module {
+public:
+    BlockingSourceModule(const std::string& name, bool reportWait) : Module(name), m_reportWait(reportWait) {}
+
+    std::atomic<int> processCalls{0};
+
+protected:
+    void Process(Message&) override {
+        processCalls.fetch_add(1, std::memory_order_relaxed);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        if (m_reportWait) {
+            NoteBlockedWait();
+        }
+    }
+
+private:
+    bool m_reportWait;
+};
+
+// Runs one source/sink pipeline until the source has been invoked `callLimit`
+// times and reports how many milliseconds that cost. Returns -1 on setup failure.
+long long RunBlockingSource(int callLimit, bool reportWait) {
+    auto source = std::make_shared<BlockingSourceModule>("blocking_source", reportWait);
+    auto sink = std::make_shared<CountingSinkModule>("blocking_sink");
+    auto pipeline = PipelineBuilder()
+                        .AddModule(source)
+                        .AddModule(sink)
+                        .Connect(source->GetModuleName(), sink->GetModuleName())
+                        .Build(8);
+    if (!pipeline || pipeline->Init() != ErrorCode::SUCCESS || pipeline->Start() != ErrorCode::SUCCESS) {
+        return -1;
+    }
+    const auto started = std::chrono::steady_clock::now();
+    const auto deadline = started + std::chrono::seconds(20);
+    while (source->processCalls.load(std::memory_order_relaxed) < callLimit &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const long long elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+    pipeline->Stop();
+    return elapsed;
+}
+
 } // namespace
 
 TEST(WorkerBehaviorTest, ProcessTimedReportsWhetherItProducedOutput) {
@@ -117,7 +165,7 @@ TEST(WorkerBehaviorTest, ThrowingModuleDoesNotKillTheWorker) {
                         .AddModule(source)
                         .AddModule(sink)
                         .Connect(source->GetModuleName(), sink->GetModuleName())
-                        .Build();
+                        .Build(8);
     ASSERT_NE(pipeline, nullptr);
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
     ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
@@ -132,11 +180,14 @@ TEST(WorkerBehaviorTest, ThrowingModuleDoesNotKillTheWorker) {
 TEST(WorkerBehaviorTest, IdleSourceBacksOffInsteadOfSpinning) {
     auto source = std::make_shared<IdleSourceModule>("idle_source");
     auto sink = std::make_shared<CountingSinkModule>("idle_sink");
+    nexusflow::Config idleConfig;
+    idleConfig.Add<int>("sourceIdleMs", 5);
     auto pipeline = PipelineBuilder()
                         .AddModule(source)
                         .AddModule(sink)
+                        .SetModuleConfig("idle_source", idleConfig)
                         .Connect(source->GetModuleName(), sink->GetModuleName())
-                        .Build();
+                        .Build(8);
     ASSERT_NE(pipeline, nullptr);
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
     ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
@@ -204,4 +255,15 @@ TEST(WorkerBehaviorTest, ConfiguredBatchSizeIsRespected) {
     for (std::size_t size : module->batchSizes) {
         EXPECT_LE(size, 2u);
     }
+}
+
+TEST(WorkerBehaviorTest, SourceThatBlocksDoesNotGetASecondWait) {
+    // Both runs make the same number of calls; the only difference is whether
+    // the module reports that it already waited for its own work. The run that
+    // reports it must not be slowed down again by the worker's backoff.
+    const long long blocked = RunBlockingSource(10, true);
+    ASSERT_GE(blocked, 0);
+    const long long silent = RunBlockingSource(10, false);
+    ASSERT_GE(silent, 0);
+    EXPECT_LT(blocked, silent);
 }

@@ -32,6 +32,10 @@ struct NodeWithModulePtr : Node {
     using Super = Node;
 
     std::shared_ptr<nexusflow::Module> modulePtr = nullptr; // The instance of the module.
+    // Per-module worker config. A module class built by the factory gets it on
+    // its node; an instance passed to PipelineBuilder::AddModule() has none of
+    // its own, so PipelineBuilder::SetModuleConfig() carries it here.
+    nexusflow::Config config;
     NodeWithModulePtr(std::string name, const std::shared_ptr<nexusflow::Module>& modulePtr)
         : Super(std::move(name)), modulePtr(modulePtr) {}
 };

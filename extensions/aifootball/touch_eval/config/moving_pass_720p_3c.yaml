@@ -18,6 +18,8 @@
 #   RENDER=0 ./extensions/aifootball/touch_eval/run_touch_eval.sh
 # 脚本第 3 步只读 observations.jsonl 的 persons/balls，多出的 cones 字段会被忽略。
 graph:
+  # Maximum in-flight messages per edge. Required: queue depth belongs to this pipeline.
+  messageQueueCapacity: 8
   name: AIFootball-TensorRT
 
   modules:

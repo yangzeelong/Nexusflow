@@ -31,8 +31,10 @@ public:
     std::shared_ptr<PipelineContext> context;
     std::vector<MessageQueueUPtr> queues;
 
-    // Edge queue configuration and names, used by Pipeline::GetMetrics().
-    int messageQueueCapacity = kDefaultMessageQueueCapacity;
+    // Edge queue configuration and names, used by Pipeline::GetSnapshot().
+    // Required: the builder (Build(capacity)) or the yaml config states it
+    // before Init() runs, so 0 here means a caller skipped InitWithGraph().
+    int messageQueueCapacity = 0;
     std::vector<std::string> queueNames;
 
     // Budget for the graceful drain in Pipeline::Stop(): how long an edge may

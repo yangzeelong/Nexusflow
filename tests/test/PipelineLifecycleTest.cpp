@@ -59,7 +59,7 @@ std::unique_ptr<Pipeline> BuildLifecyclePipeline(const std::shared_ptr<Lifecycle
         .AddModule(source)
         .AddModule(sink)
         .Connect(source->GetModuleName(), sink->GetModuleName())
-        .Build();
+        .Build(8);
 }
 
 } // namespace
@@ -99,14 +99,25 @@ TEST(PipelineLifecycleTest, StopBeforeStartReportsAlreadyStopped) {
     EXPECT_EQ(pipeline->DeInit(), ErrorCode::SUCCESS);
 }
 
-TEST(PipelineLifecycleTest, DoubleStartAndDoubleStopAreReported) {
+TEST(PipelineLifecycleTest, DoubleStartIsANoOp) {
     auto source = std::make_shared<LifecycleSourceModule>("source");
     auto sink = std::make_shared<LifecycleSinkModule>("sink");
     auto pipeline = BuildLifecyclePipeline(source, sink);
     ASSERT_NE(pipeline, nullptr);
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
     ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
-    EXPECT_EQ(pipeline->Start(), ErrorCode::FAILED_ALREADY_START);
+    std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
+    const int receivedBeforeSecondStart = sink->received.load(std::memory_order_relaxed);
+    ASSERT_GT(receivedBeforeSecondStart, 0);
+
+    // Idempotent: a second Start() must not fail and must not add a second worker
+    // per module (that would double every message on the edge).
+    EXPECT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
+    EXPECT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
+    // Still running exactly one producer: the run continues rather than doubling.
+    EXPECT_GT(sink->received.load(std::memory_order_relaxed), receivedBeforeSecondStart);
+
     EXPECT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
     EXPECT_EQ(pipeline->Stop(), ErrorCode::FAILED_ALREADY_STOP);
     EXPECT_EQ(pipeline->DeInit(), ErrorCode::SUCCESS);
