@@ -19,16 +19,15 @@ class Pipeline;
 using ActorName = std::string;
 using ActorNode = ModuleActor;
 
-// Default capacity of the message queue created for every graph edge. It bounds
-// the number of in-flight messages between two stages, i.e. the backpressure
-// depth of the pipeline.
-constexpr int kDefaultMessageQueueCapacity = 5;
-
 // --- Pipeline's Private Implementation (m_pImpl) ---
 class Pipeline::Impl {
 public:
     std::unique_ptr<Graph> graph;
     std::vector<MessageQueueUPtr> queues;
+
+    // Edge queue configuration and names, used by Pipeline::GetMetrics().
+    int messageQueueCapacity = kDefaultMessageQueueCapacity;
+    std::vector<std::string> queueNames;
 
     // Actors in graph order (producers before consumers). Pipeline::Init and
     // Pipeline::Start walk this forward, DeInit walks it backward.

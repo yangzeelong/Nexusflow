@@ -9,6 +9,7 @@
 #include <nexusflow/ModuleFactory.hpp>
 
 #include "impl/PipelineImpl.hpp"
+#include <yaml-cpp/yaml.h>
 #include <memory>
 #include <nexusflow/ErrorCode.hpp>
 #include <nexusflow/Module.hpp>
@@ -60,7 +61,26 @@ std::unique_ptr<Pipeline> Pipeline::CreateFromYaml(const std::string& configPath
         return nullptr;
     }
 
+    int queueCapacity = kDefaultMessageQueueCapacity;
+    try {
+        const YAML::Node root = YAML::LoadFile(configPath);
+        const YAML::Node graphNode = root["graph"];
+        if (graphNode && graphNode["messageQueueCapacity"]) {
+            const int configured = graphNode["messageQueueCapacity"].as<int>();
+            if (configured > 0) {
+                queueCapacity = configured;
+            } else {
+                LOG_WARN("graph.messageQueueCapacity must be positive (got {}); using the default of {}.", configured,
+                         kDefaultMessageQueueCapacity);
+            }
+        }
+    } catch (const std::exception& e) {
+        LOG_WARN("Could not read graph.messageQueueCapacity from '{}': {}; using the default of {}.", configPath,
+                 e.what(), kDefaultMessageQueueCapacity);
+    }
+
     auto pipeline = std::unique_ptr<Pipeline>(new Pipeline());
+    pipeline->m_pImpl->messageQueueCapacity = queueCapacity;
     if (pipeline->InitWithGraph(std::move(graph)) != ErrorCode::SUCCESS) {
         return nullptr;
     }
@@ -180,6 +200,35 @@ ErrorCode Pipeline::Stop() {
     m_pImpl->started = false;
     LOG_DEBUG("Pipeline stopped successfully.");
     return ErrorCode::SUCCESS;
+}
+
+PipelineMetrics Pipeline::GetMetrics() const {
+    PipelineMetrics metrics;
+    if (!m_pImpl) {
+        return metrics;
+    }
+
+    metrics.queues.reserve(m_pImpl->queues.size());
+    for (std::size_t i = 0; i < m_pImpl->queues.size(); ++i) {
+        const auto stats = m_pImpl->queues[i]->GetStats();
+        QueueMetrics queue;
+        queue.name = i < m_pImpl->queueNames.size() ? m_pImpl->queueNames[i] : std::string();
+        queue.capacity = stats.capacity;
+        queue.size = stats.size;
+        queue.highWaterMark = stats.highWaterMark;
+        queue.pushed = stats.pushed;
+        queue.popped = stats.popped;
+        metrics.queues.push_back(std::move(queue));
+    }
+
+    metrics.modules.reserve(m_pImpl->actorOrderedNodes.size());
+    for (const auto& actor : m_pImpl->actorOrderedNodes) {
+        ModuleMetrics module;
+        module.name = actor->GetModuleName();
+        module.processed = actor->ProcessedCount();
+        metrics.modules.push_back(std::move(module));
+    }
+    return metrics;
 }
 
 }; // namespace nexusflow

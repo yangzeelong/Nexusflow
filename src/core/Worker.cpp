@@ -135,6 +135,9 @@ void Worker::WorkLoop() {
                     OptionalScopeTimer processTimer(m_profileTimers, m_processTimerName, 5000,
                                                    __FILE__, __LINE__);
                     produced = m_modulePtr->ProcessTimed(emptyMessage);
+                    if (produced) {
+                        ++m_processedCount;
+                    }
                 } catch (const std::exception& e) {
                     LOG_ERROR("Module '{}' threw while processing: {}", moduleName, e.what());
                 } catch (...) {
@@ -162,6 +165,7 @@ void Worker::WorkLoop() {
                 }
                 try {
                     m_modulePtr->ProcessBatch(batchMessage);
+                    m_processedCount.fetch_add(batchMessage.size(), std::memory_order_relaxed);
                 } catch (const std::exception& e) {
                     LOG_ERROR("Module '{}' threw while processing a batch: {}", moduleName, e.what());
                 } catch (...) {
@@ -228,6 +232,7 @@ void Worker::RunFusion() {
                 std::vector<Message> fusedMessageVec{fusedMessage};
                 try {
                     m_modulePtr->ProcessBatch(fusedMessageVec); // process the fused message
+                    m_processedCount.fetch_add(fusedMessageVec.size(), std::memory_order_relaxed);
                 } catch (const std::exception& e) {
                     LOG_ERROR("Module '{}' threw while processing a fused batch: {}", m_modulePtr->GetModuleName(), e.what());
                 } catch (...) {

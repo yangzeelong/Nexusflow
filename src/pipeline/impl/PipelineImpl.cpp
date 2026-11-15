@@ -75,10 +75,11 @@ ErrorCode Pipeline::Impl::Init() {
             return ErrorCode::FAILURE;
         }
 
-        auto queue = std::make_unique<MessageQueue>(kDefaultMessageQueueCapacity);
+        auto queue = std::make_unique<MessageQueue>(messageQueueCapacity);
         auto queueView = makeViewPtr(queue.get());
 
         std::string queueName = srcNode->name + " -> " + dstNode->name;
+        queueNames.push_back(queueName);
 
         srcActorNode->AddOutputQueue(queueName, queueView);
         dstActorNode->AddInputQueue(queueName, queueView);

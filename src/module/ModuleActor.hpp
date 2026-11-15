@@ -5,6 +5,7 @@
 #include "dispatcher/Dispatcher.hpp"
 #include "nexusflow/ErrorCode.hpp"
 #include <nexusflow/Module.hpp>
+#include <cstdint>
 #include <thread>
 
 namespace nexusflow {
@@ -22,6 +23,8 @@ public:
     std::shared_ptr<Module>& GetModule() { return m_module; };
 
     std::string GetModuleName() const { return m_module->GetModuleName(); }
+
+    std::uint64_t ProcessedCount() const { return m_worker ? m_worker->ProcessedCount() : 0; }
 
     ErrorCode Init();
 

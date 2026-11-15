@@ -176,6 +176,52 @@ void runWithBuilder() {
 
 ---
 
+## Runtime Tuning and Metrics
+
+Every graph edge gets its own bounded message queue, and the queue capacity is the
+backpressure depth of the pipeline: how many messages may be in flight between two
+stages. The default is 5; raise it for throughput-heavy stages and lower it for
+latency-sensitive ones.
+
+In YAML:
+
+```yaml
+graph:
+  name: "VideoAnalyticsPipeline"
+  messageQueueCapacity: 64   # optional, must be positive, default 5
+  modules:
+    # ...
+```
+
+Programmatically:
+
+```cpp
+auto pipeline = nexusflow::PipelineBuilder()
+    .SetMessageQueueCapacity(64)
+    .AddModule(source)
+    .AddModule(sink)
+    .Connect("source", "sink")
+    .Build();
+```
+
+`Pipeline::GetMetrics()` returns a snapshot of the runtime counters without
+stopping the pipeline:
+
+```cpp
+const nexusflow::PipelineMetrics metrics = pipeline->GetMetrics();
+
+for (const auto& queue : metrics.queues) {
+    // queue.name, queue.capacity, queue.size, queue.highWaterMark,
+    // queue.pushed, queue.popped
+}
+for (const auto& module : metrics.modules) {
+    // module.name, module.processed
+}
+```
+
+A queue reports `capacity == 0` when it is unbounded, and `highWaterMark` is the
+deepest backlog observed so far.
+
 ## Core Component: The `nexusflow::Message`
 
 The `nexusflow::Message` is the universal, thread-safe data wrapper that flows through the pipeline. It is designed to be both highly performant and exceptionally safe.
