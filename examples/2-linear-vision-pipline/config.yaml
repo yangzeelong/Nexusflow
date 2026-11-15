@@ -1,4 +1,6 @@
 graph:
+  # Maximum in-flight messages per edge. Required: queue depth belongs to this pipeline.
+  messageQueueCapacity: 8
   name: VideoAnalyticsPipeline
 
   modules:

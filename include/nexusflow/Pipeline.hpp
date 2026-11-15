@@ -22,34 +22,19 @@ class PipelineContext;
 
 namespace nexusflow {
 
+// There is deliberately no framework-wide default edge capacity. Queue depth is
+// a property of the pipeline being built -- a 4K vision stage and a 959-wide
+// detector want very different backlogs -- so every pipeline states it:
+// PipelineBuilder::Build(int) for code, buildQueueCapacity for yaml. A graph that
+// arrives without one (CreateFromGraph) takes the capacity the graph carries.
+
 /**
- * @brief Default capacity of the message queue created for every graph edge.
+ * @brief Capacity of the shared queue inside a peer-to-peer (join) group.
  *
- * It bounds the number of in-flight messages between two stages, i.e. the
- * backpressure depth of the pipeline. Override it per pipeline through
- * PipelineBuilder::SetMessageQueueCapacity() or the optional
- * `graph.messageQueueCapacity` key in a YAML config.
+ * The join wait is meant to hold one sample from each member at most, so this
+ * is one member fewer than the join consumes. Must not be < 2.
  */
-constexpr int kDefaultMessageQueueCapacity = 5;
-
-/**
- * @brief Runtime counters for one edge queue.
- * @deprecated Use EdgeSnapshot. This alias exists so code that names the type
- *             keeps compiling while it migrates; it will go away.
- */
-using QueueMetrics = EdgeSnapshot;
-
-/**
- * @brief Runtime counters for one module.
- * @deprecated Use ModuleSnapshot.
- */
-using ModuleMetrics = ModuleSnapshot;
-
-/**
- * @brief Snapshot of the pipeline runtime state, taken without stopping it.
- * @deprecated Use PipelineSnapshot.
- */
-using PipelineMetrics = PipelineSnapshot;
+constexpr int kPeerGroupHeadroom = 1;
 
 /**
  * @brief Pipeline
@@ -61,6 +46,12 @@ public:
 
     ErrorCode Init();
 
+    /**
+     * @brief Starts every module's worker.
+     * @details Idempotent: calling it on a pipeline that is already running does
+     * nothing and returns SUCCESS. Fails only when the pipeline is not initialized
+     * or a worker cannot start.
+     */
     ErrorCode Start();
 
     ErrorCode Stop();
@@ -76,13 +67,6 @@ public:
     PipelineSnapshot GetSnapshot() const;
 
     /**
-     * @brief Same as GetSnapshot().
-     * @deprecated Use GetSnapshot(); the snapshot is not a set of metrics, it is
-     *             one moment of them.
-     */
-    PipelineSnapshot GetMetrics() const { return GetSnapshot(); }
-
-    /**
      * @brief Clears the per-edge water marks (EdgeSnapshot::maxSize).
      * @details The cumulative counters keep growing: they are what two snapshots
      * are subtracted for, so resetting them would break that. Only the water
@@ -90,6 +74,14 @@ public:
      * edge being filled right now may record a depth from the previous window.
      */
     void ResetMetrics();
+
+    /**
+     * @brief Capacity the built pipeline used for every edge queue.
+     * @details PipelineBuilder::Build(capacity) or a yaml config decides it; a
+     * queue depth is a property of the pipeline, not of the framework, so it is
+     * always stated by whoever builds it. 0 before Init().
+     */
+    int GetEdgeCapacity() const;
 
     /**
      * @brief Returns this pipeline's context: per-pipeline log sink, profiler,

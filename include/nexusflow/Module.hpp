@@ -152,6 +152,20 @@ protected:
      */
     bool SendTo(const std::string& outputName, const Message& msg);
 
+    /**
+     * @brief Marks this invocation as "I waited, and nothing came out".
+     * @details A source module that owns its own wait — a decoder blocking on the
+     * next frame, a reader blocking on a socket — calls this when that wait ended
+     * without work. The worker then skips its idle backoff once, because the wait
+     * the module just performed is the backoff. Without this the pipeline would
+     * wait twice per empty turn, and a source that blocks until the pipeline
+     * stops would spend the whole timeout in the backoff.
+     *
+     * Has no effect for a module that does not look at its input: every
+     * non-source module pulls through the worker, and that pull already says it.
+     */
+    void NoteBlockedWait();
+
 private:
     friend class ModuleActor;
     friend class core::Worker;
@@ -174,6 +188,9 @@ private:
 
     // The internal dispatcher handle.
     std::shared_ptr<dispatcher::Dispatcher> m_dispatcherPtr;
+
+    // Set by the worker for this module; see NoteBlockedWait().
+    core::Worker* m_worker = nullptr;
 
     bool m_processing = false;
     std::map<std::string, double> m_activeInputTimingMs;

@@ -55,7 +55,7 @@ TEST(PipelineTimingTest, OutputMessagesCarryUpstreamModuleTimings) {
                         .AddModule(source)
                         .AddModule(sink)
                         .Connect(source->GetModuleName(), sink->GetModuleName())
-                        .Build();
+                        .Build(8);
     ASSERT_NE(pipeline, nullptr);
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
     ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);

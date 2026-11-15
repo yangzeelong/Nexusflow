@@ -12,6 +12,8 @@
 #   - algorithm.roi is disabled: the ROI polygon there is in 1920x1080
 #     coordinates and would filter out nearly every detection at 720p
 graph:
+  # Maximum in-flight messages per edge. Required: queue depth belongs to this pipeline.
+  messageQueueCapacity: 8
   name: AIFootball-TensorRT
 
   modules:

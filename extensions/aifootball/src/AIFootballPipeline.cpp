@@ -400,7 +400,7 @@ nexusflow::ErrorCode AIFootballPipeline::Init() {
         }
         builder.AddModule(m_impl->resultSink).Connect(previous, kOutputModuleName);
 
-        m_impl->pipeline = builder.Build();
+        m_impl->pipeline = builder.Build(8);
         if (!m_impl->pipeline) {
             LOG_ERROR("AI-Football SDK: failed to build algorithm pipeline");
             return nexusflow::FAILURE;

@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -20,7 +21,10 @@ class PipelineBuilder::Impl {
 public:
     std::vector<std::shared_ptr<Module>> modules;
     std::vector<std::pair<std::string, std::string>> connections;
-    int queueCapacity = kDefaultMessageQueueCapacity;
+    /// Per-module config for instances added through AddModule(), which have no
+    /// config of their own. YAML nodes carry it on the node; this is the same
+    /// thing for the programmatic path.
+    std::unordered_map<std::string, Config> moduleConfigs;
 };
 
 // --- PipelineBuilder's Public Methods ---
@@ -48,16 +52,28 @@ PipelineBuilder& PipelineBuilder::Connect(const std::string& srcModuleName, cons
     return *this;
 }
 
-PipelineBuilder& PipelineBuilder::SetMessageQueueCapacity(int capacity) {
-    if (m_pImpl && capacity > 0) {
-        m_pImpl->queueCapacity = capacity;
+PipelineBuilder& PipelineBuilder::SetModuleConfig(const std::string& moduleName, const Config& config) {
+    if (m_pImpl && !moduleName.empty()) {
+        m_pImpl->moduleConfigs[moduleName] = config;
     }
     return *this;
 }
 
 std::unique_ptr<Pipeline> PipelineBuilder::Build() {
+    LOG_ERROR("PipelineBuilder::Build() needs the edge queue capacity: call Build(capacity).");
+    return nullptr;
+}
+
+std::unique_ptr<Pipeline> PipelineBuilder::Build(int edgeQueueCapacity) {
     if (!m_pImpl) {
         return nullptr; // Builder has been consumed
+    }
+
+    if (edgeQueueCapacity <= 0) {
+        LOG_ERROR("PipelineBuilder::Build({}) needs a positive edge queue capacity; refusing to build a pipeline "
+                  "without one.",
+                  edgeQueueCapacity);
+        return nullptr;
     }
 
     if (m_pImpl->modules.empty()) {
@@ -80,6 +96,12 @@ std::unique_ptr<Pipeline> PipelineBuilder::Build() {
 
         // Assign the pre-created module instance
         auto node = std::make_shared<NodeWithModulePtr>(moduleName, module_ptr);
+        // Carry any config the builder was given for this module, the same way a
+        // yaml node carries its own.
+        const auto configIt = m_pImpl->moduleConfigs.find(moduleName);
+        if (configIt != m_pImpl->moduleConfigs.end()) {
+            node->config = configIt->second;
+        }
 
         nodeLookupMap[moduleName] = node;
     }
@@ -114,7 +136,7 @@ std::unique_ptr<Pipeline> PipelineBuilder::Build() {
 
     // --- Step 5: Create the Pipeline from the fully constructed Graph ---
     auto pipeline = std::unique_ptr<Pipeline>(new Pipeline());
-    pipeline->m_pImpl->messageQueueCapacity = m_pImpl->queueCapacity;
+    pipeline->m_pImpl->messageQueueCapacity = edgeQueueCapacity;
     const ErrorCode code = pipeline->InitWithGraph(std::move(graph));
 
     m_pImpl.reset(); // Consume the builder

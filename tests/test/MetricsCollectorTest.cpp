@@ -3,6 +3,7 @@
 #include "gtest/gtest.h"
 
 #include <chrono>
+#include <cstdio>
 #include <thread>
 #include <vector>
 
@@ -213,4 +214,55 @@ TEST(MetricsCollectorTest, InvalidHandleIsANoOp) {
     EXPECT_FALSE(registry.GetStats(0U, stats));
     EXPECT_TRUE(registry.Snapshot().empty());
 }
+
+TEST(MetricsCollectorTest, PercentilesCarryTheirWindow) {
+    auto& registry = MetricsCollector::Instance();
+    registry.Reset();
+
+    // One hundred items with distinct durations, so every percentile has a
+    // different expected value and a mix-up between two ranks cannot pass.
+    // Item i costs i ms; nearest rank over 100 entries puts p95 at index 94
+    // (95th) and p99 at index 98 (99th).
+    const auto handle = registry.Intern("test.percentile.window");
+    for (int i = 0; i < 100; ++i) {
+        registry.AddItems(handle, static_cast<double>(i));
+    }
+
+    MetricSamples stats;
+    ASSERT_TRUE(registry.GetStats(handle, stats));
+    EXPECT_EQ(stats.items, 100U);
+    EXPECT_DOUBLE_EQ(stats.p95Ms, 94.0);
+    EXPECT_DOUBLE_EQ(stats.p99Ms, 98.0);
+    EXPECT_LT(stats.p95Ms, stats.p99Ms)
+        << "a tail percentile that never exceeds p95 would hide the spikes a "
+           "pipeline actually stalls on";
+
+    // The window is described, not guessed: its size is what the percentiles
+    // were computed over, and its span is wall time between the oldest and the
+    // newest item still in it.
+    EXPECT_EQ(stats.windowItems, 100U);
+    EXPECT_GT(stats.windowSpanMs, 0.0);
+}
+TEST(MetricsCollectorTest, WindowStopsGrowingAtItsCapacity) {
+    auto& registry = MetricsCollector::Instance();
+    registry.Reset();
+
+    // 2000 measurements against a 1024-entry window: the percentiles must stay
+    // bounded, so the first half of the run has already fallen out of it.
+    const auto handle = registry.Intern("test.percentile.capacity");
+    for (int i = 0; i < 1024; ++i) {
+        registry.AddItems(handle, 1.0);
+    }
+    for (int i = 0; i < 976; ++i) {
+        registry.AddItems(handle, 10.0);
+    }
+
+    MetricSamples stats;
+    ASSERT_TRUE(registry.GetStats(handle, stats));
+    EXPECT_EQ(stats.items, 2000U);
+    EXPECT_EQ(stats.windowItems, 1024U);
+    EXPECT_DOUBLE_EQ(stats.p95Ms, 10.0);
+    EXPECT_DOUBLE_EQ(stats.p99Ms, 10.0);
+}
+
 

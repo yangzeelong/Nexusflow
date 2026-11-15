@@ -103,7 +103,8 @@ std::unique_ptr<Pipeline> Pipeline::CreateFromYaml(const std::string& configPath
         return nullptr;
     }
 
-    int queueCapacity = kDefaultMessageQueueCapacity;
+    // A yaml pipeline states its own edge depth; the framework has no default.
+    int queueCapacity = 0;
     try {
         const YAML::Node root = YAML::LoadFile(configPath);
         const YAML::Node graphNode = root["graph"];
@@ -112,13 +113,23 @@ std::unique_ptr<Pipeline> Pipeline::CreateFromYaml(const std::string& configPath
             if (configured > 0) {
                 queueCapacity = configured;
             } else {
-                LOG_WARN("graph.messageQueueCapacity must be positive (got {}); using the default of {}.", configured,
-                         kDefaultMessageQueueCapacity);
+                LOG_ERROR("graph.messageQueueCapacity must be positive (got {}); refusing to build a pipeline "
+                          "without an edge capacity.",
+                          configured);
+                return nullptr;
             }
         }
     } catch (const std::exception& e) {
-        LOG_WARN("Could not read graph.messageQueueCapacity from '{}': {}; using the default of {}.", configPath,
-                 e.what(), kDefaultMessageQueueCapacity);
+        LOG_ERROR("Could not read graph.messageQueueCapacity from '{}': {}; refusing to build a pipeline without an "
+                  "edge capacity.",
+                  configPath, e.what());
+        return nullptr;
+    }
+
+    if (queueCapacity <= 0) {
+        LOG_ERROR("'{}' has no graph.messageQueueCapacity; every pipeline states its own edge queue depth.",
+                  configPath);
+        return nullptr;
     }
 
     auto pipeline = std::unique_ptr<Pipeline>(new Pipeline());
@@ -196,9 +207,13 @@ ErrorCode Pipeline::Start() {
         LOG_ERROR("Cannot start pipeline: it has not been initialized.");
         return ErrorCode::UNINITIALIZED_ERROR;
     }
+    // Start() is idempotent: a pipeline that is already running is a no-op. Asking
+    // twice used to fail, which forced every caller to track the run state it had
+    // just set itself; a restart loop or a guard that already started the pipeline
+    // can simply call Start() again.
     if (m_pImpl->started) {
-        LOG_WARN("Pipeline is already started.");
-        return ErrorCode::FAILED_ALREADY_START;
+        LOG_DEBUG("Pipeline is already started; Start() is a no-op.");
+        return ErrorCode::SUCCESS;
     }
     LOG_DEBUG("Starting pipeline...");
     m_pImpl->drainInProgress.store(false);
@@ -431,6 +446,8 @@ void Pipeline::ResetMetrics() {
         }
     }
 }
+
+int Pipeline::GetEdgeCapacity() const { return m_pImpl ? m_pImpl->messageQueueCapacity : 0; }
 
 std::shared_ptr<PipelineContext> Pipeline::GetContext() const {
     if (!m_pImpl) {

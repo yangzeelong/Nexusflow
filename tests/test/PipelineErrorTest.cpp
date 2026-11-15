@@ -123,8 +123,8 @@ TEST(PipelineErrorTest, BuilderRejectsEmptyConfigurations) {
     auto source = std::make_shared<NoOpSourceModule>("source");
     auto sink = std::make_shared<NoOpSinkModule>("sink");
 
-    EXPECT_EQ(PipelineBuilder().Build(), nullptr);
-    EXPECT_EQ(PipelineBuilder().AddModule(source).AddModule(sink).Build(), nullptr);
+    EXPECT_EQ(PipelineBuilder().Build(8), nullptr);
+    EXPECT_EQ(PipelineBuilder().AddModule(source).AddModule(sink).Build(8), nullptr);
 }
 
 TEST(PipelineErrorTest, BuilderRejectsUnknownConnection) {
@@ -132,7 +132,7 @@ TEST(PipelineErrorTest, BuilderRejectsUnknownConnection) {
     auto sink = std::make_shared<NoOpSinkModule>("sink");
 
     std::unique_ptr<Pipeline> pipeline =
-        PipelineBuilder().AddModule(source).AddModule(sink).Connect("source", "sink").Connect(sink->GetModuleName(), "ghost").Build();
+        PipelineBuilder().AddModule(source).AddModule(sink).Connect("source", "sink").Connect(sink->GetModuleName(), "ghost").Build(8);
     EXPECT_EQ(pipeline, nullptr);
 }
 
@@ -145,8 +145,30 @@ TEST(PipelineErrorTest, BuilderRejectsCycle) {
                                              .AddModule(sink)
                                              .Connect(source->GetModuleName(), sink->GetModuleName())
                                              .Connect(sink->GetModuleName(), source->GetModuleName())
-                                             .Build();
+                                             .Build(8);
     EXPECT_EQ(pipeline, nullptr);
+}
+
+// Queue depth belongs to the pipeline, not to the framework: a caller that
+// forgets to state it gets a refusal, not someone else's default.
+TEST(PipelineErrorTest, BuilderRefusesToGuessAnEdgeCapacity) {
+    auto source = std::make_shared<NoOpSourceModule>("source");
+    auto sink = std::make_shared<NoOpSinkModule>("sink");
+
+    EXPECT_EQ(PipelineBuilder().AddModule(source).AddModule(sink).Connect("source", "sink").Build(), nullptr);
+    EXPECT_EQ(PipelineBuilder().AddModule(source).AddModule(sink).Connect("source", "sink").Build(0), nullptr);
+    EXPECT_EQ(PipelineBuilder().AddModule(source).AddModule(sink).Connect("source", "sink").Build(-4), nullptr);
+}
+
+TEST(PipelineErrorTest, YamlPipelineWithoutACapacityIsRefused) {
+    TempYamlFile yaml(
+        "graph:\n"
+        "  name: NoCapacityGraph\n"
+        "  modules:\n"
+        "    - name: a\n"
+        "      class: NoOpSourceModule\n"
+        "  connections: []\n");
+    EXPECT_EQ(Pipeline::CreateFromYaml(yaml.Path()), nullptr);
 }
 
 TEST(PipelineErrorTest, BuilderStillBuildsAValidPipeline) {
@@ -157,7 +179,7 @@ TEST(PipelineErrorTest, BuilderStillBuildsAValidPipeline) {
                                              .AddModule(source)
                                              .AddModule(sink)
                                              .Connect(source->GetModuleName(), sink->GetModuleName())
-                                             .Build();
+                                             .Build(8);
     ASSERT_NE(pipeline, nullptr);
     EXPECT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
 }

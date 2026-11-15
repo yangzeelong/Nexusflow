@@ -25,6 +25,7 @@ std::shared_ptr<ActorNode> Pipeline::Impl::GetOrCreateActorNode(const std::share
     std::shared_ptr<Module> module;
     if (auto* nodeIns = dynamic_cast<NodeWithModulePtr*>(node.get())) {
         module = nodeIns->modulePtr;
+        config = nodeIns->config;
     } else if (auto* nodIns = dynamic_cast<NodeWithModuleClassName*>(node.get())) {
         auto& moduleFactory = ModuleFactory::GetInstance();
         module = moduleFactory.CreateModule(nodIns->moduleClassName, nodIns->name, nodIns->config);
@@ -84,7 +85,11 @@ ErrorCode Pipeline::Impl::Init() {
             return ErrorCode::FAILURE;
         }
 
-        auto queue = std::make_unique<MessageQueue>(messageQueueCapacity);
+        // Join edges carry one sample per member, so they get a little more
+        // headroom than a pipeline asked for.
+        const bool joinEdge = dstNode->name.rfind("PeerGroup", 0) == 0;
+        const int edgeCapacity = messageQueueCapacity + (joinEdge ? kPeerGroupHeadroom : 0);
+        auto queue = std::make_unique<MessageQueue>(edgeCapacity);
         auto queueView = makeViewPtr(queue.get());
 
         std::string queueName = srcNode->name + " -> " + dstNode->name;

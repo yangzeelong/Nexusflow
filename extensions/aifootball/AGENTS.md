@@ -164,7 +164,7 @@ python3 extensions/aifootball/tools/render_jsonl.py --observations <dir>/observa
 ```
 
 - 改完 SDK 算法/渲染**必须**跑；**不要为了让测试通过而改测试语义**。
-- 性能/延迟：`--profile_timers` 打印每模块统计（`Execute '<name>' for N items cost ... avg/p95/min/max`，滑窗 1024 的 p95；单轴口径=每次调用）。
+- 性能/延迟：`--profile_timers` 打印每模块统计（`Execute '<name>' for N items cost ... avg/p95/p99/min/max`，滑窗 1024 的 p95/p99；单轴口径=每次调用）。报表同时带窗口规模（`window: <items> items / <span> ms`），p99 只在窗口足够大时才有尾部分辨力。
 
 ---
 
@@ -265,7 +265,7 @@ git -C /home/hx1/yzl/Work/AI-Football show <rev>:code/tracking.py > /tmp/trackin
 - **渲染**：ROI 多边形、person/球标签、被过滤球按原因着色、计数面板、`fps=<处理速率>`、渲染耗时单列（`render: X ms/frame`，与端到端 `per frame` 区分）。
 - **数据对齐**：`persons[].bbox` 改为姿态裁剪框（与 Python 比例 1.0000，关键点零变化）；`detectionBbox` 只服务渲染。
 - **配置**：配置目录化 + `run_all_configs.sh` 扫目录跑；README/注释路径同步。
-- **MetricsCollector**：单轴化（只报 items=每次调用）、p95 滑窗（1024、nearest-rank、仅在报表时计算）。
+- **MetricsCollector**：单轴化（只报 items=每次调用）、p95/p99 滑窗（1024、nearest-rank、仅在报表时计算、报表带窗口规模）。
 - **触球判定与精度评估**：`extensions/aifootball/touch_eval/`（Python 业务逻辑 `py/` + `run_touch_eval.sh` + 720p 配置）。C++ 的判定核心、离线评估 CLI、单测与 app 的 `--detect_touches`（`touches.jsonl`/渲染打点）**已删除**，app 只跑基模写 `observations.jsonl`。方法、指标口径、标注格式、差分口径与迁移缺口见 `extensions/aifootball/touch_eval/README.md` §0。
   - 标注升级为 **v2 一触一行 CSV**（`data/移动传球.touches.csv`，`# point_window_sec:` 声明点标注窗口、`no_touch` 行是负样本区间），旧 `.label` 继续支持，`--dump_gt_csv` 可把旧格式转成 v2（`(2次)` 展开并标注 SPLIT ME）。
   - **主口径 = 计数感知**：一条标注 = 它代表的窗口（区间行 = 它写的跨度 `[start, end)`；点行 = `point_window_sec` + `--window_anchor`，默认 `end`）且发放 `count` 个名额；辅助口径保留一对一容差扫描，默认按**帧**给：±10/30/60/120 帧（60 fps 下即 0.17/0.5/1/2 s），报告里帧与秒并列打印（`--tolerance_frames` / `--primary_tolerance_frames`；`--tolerance` 仍可按秒指定并覆盖帧）。报告新增误检三分类（同一次触球的另一帧 / 贴窗口 / 无人支持）+ `no_touch` 命中。

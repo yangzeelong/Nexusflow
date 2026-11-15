@@ -8,6 +8,7 @@
 #include <chrono>
 #include <iostream>
 #include <memory>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -73,11 +74,46 @@ private:
 
 // --- 3. The Main Benchmark Function ---
 
-int main() {
+namespace {
+
+// Queue depth is the pipeline's own decision, so the benchmark states it on the
+// command line instead of inventing a default: `--capacity N` (or --capacity=N).
+// Sweeping this number is how the depth is chosen in the first place.
+int ParseCapacity(int argc, char* argv[]) {
+    int capacity = 64;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        std::string value;
+        if (arg == "--capacity" && i + 1 < argc) {
+            value = argv[++i];
+        } else if (arg.rfind("--capacity=", 0) == 0) {
+            value = arg.substr(std::string("--capacity=").size());
+        } else {
+            continue;
+        }
+        try {
+            const int parsed = std::stoi(value);
+            if (parsed > 0) {
+                capacity = parsed;
+            } else {
+                LOG_WARN("--capacity {} ignored: it must be positive; using {}.", parsed, capacity);
+            }
+        } catch (const std::exception&) {
+            LOG_WARN("--capacity {} is not a number; using {}.", value, capacity);
+        }
+    }
+    return capacity;
+}
+
+} // namespace
+
+int main(int argc, char* argv[]) {
     logger::InitializeGlobalLogger({logger::LogLevel::INFO});
     LOG_INFO("--- NexusFlow Performance Benchmark ---");
 
     const int BENCHMARK_DURATION_S = 10;
+    const int edgeCapacity = ParseCapacity(argc, argv);
+    LOG_INFO("Edge queue capacity: {}", edgeCapacity);
 
     try {
         // 1. Create module instances
@@ -97,7 +133,7 @@ int main() {
                             .Connect("Source", "Pass2")
                             .Connect("Pass1", "Sink")
                             .Connect("Pass2", "Sink")
-                            .Build();
+                            .Build(edgeCapacity);
 
         if (pipeline == nullptr) {
             LOG_CRITICAL("Failed to build pipeline.");
@@ -137,6 +173,7 @@ int main() {
             double avgLatencyUs = static_cast<double>(totalLatencyNs) / totalMessages / 1000.0;
 
             std::cout << "\n--- Benchmark Results ---\n";
+            std::cout << "Edge Capacity:    " << edgeCapacity << " msg/edge\n";
             std::cout << "Total Duration:   " << durationSeconds << " s\n";
             std::cout << "Messages Processed: " << totalMessages << "\n";
             std::cout << "-------------------------\n";

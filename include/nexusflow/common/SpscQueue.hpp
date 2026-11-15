@@ -506,10 +506,6 @@ public:
             if (getSize() == 0) {
                 return true;
             }
-            static std::atomic<long long> s_drainSpins{0};
-            const long long spins = s_drainSpins.fetch_add(1);
-            if ((spins % 200) == 0) {
-            }
             if (m_shutdown.load(std::memory_order_acquire)) {
                 // Once shut down, pushes fail, so the consumer will empty the
                 // queue on its own; there is nothing left for this side to wait on.
@@ -522,6 +518,68 @@ public:
             // short wait here either sees the next pop or simply re-checks.
             std::unique_lock<std::mutex> lock(m_waitMutex);
             m_condNotFull.wait_for(lock, std::chrono::milliseconds(1));
+        }
+    }
+
+    /**
+     * @brief Whether a consumer is currently blocked inside waitAndPop().
+     * @details Callers that would otherwise sleep and poll the queue (a source
+     * module that produced nothing waits for its edge to get room) use this to
+     * tell an edge whose consumer will wake them from one whose consumer only
+     * looks at the queue now and then -- in the latter case nothing will ever
+     * signal, so the caller has to fall back to a timed wait.
+     */
+    bool isEventDriven() const {
+        if (m_fallback) {
+            return false;
+        }
+        return m_consumerWaiting.load(std::memory_order_seq_cst);
+    }
+
+    /**
+     * @brief Waits until the queue has room for another item, or the timeout ends.
+     * @details The producer-side counterpart of waitUntilEmpty(): it is for a
+     * thread that is neither pushing nor popping but only wants to know when it
+     * may produce again. It spins while the consumer is making progress, parks on
+     * the consumer's wake-up path, and re-checks the shutdown flag on every poll,
+     * so a queued wait never outlives teardown.
+     * @return true when there is room (or the queue is empty); false on timeout.
+     */
+    template <class Rep, class Per>
+    bool waitForRoom(const std::chrono::duration<Rep, Per>& timeout) {
+        if (m_fallback) {
+            const auto fallbackDeadline = std::chrono::steady_clock::now() + timeout;
+            while (getSize() >= static_cast<std::size_t>(m_capacity)) {
+                if (m_fallback->isShutdown() || std::chrono::steady_clock::now() >= fallbackDeadline) {
+                    return false;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            return true;
+        }
+        if (!Full()) {
+            return true;
+        }
+        const int spun = SpinAttempt([this]() { return !Full(); },
+                                     [this]() { return m_head.load(std::memory_order_acquire); });
+        if (spun > 0) {
+            return true;
+        }
+        if (spun < 0) {
+            return false;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        std::unique_lock<std::mutex> lock(m_waitMutex);
+        for (;;) {
+            if (!Full()) {
+                return true;
+            }
+            if (m_shutdown.load(std::memory_order_acquire)) {
+                return false;
+            }
+            if (m_condNotFull.wait_until(lock, deadline) == std::cv_status::timeout) {
+                return !Full();
+            }
         }
     }
 
@@ -584,7 +642,7 @@ private:
     /// How long a blocking path re-checks the ring before it parks on the
     /// condition variable. Both ends of an edge are usually only a processing
     /// batch apart, while parking costs a round trip through the OS scheduler:
-    /// measured on a saturated 3-stage pipeline with `kDefaultMessageQueueCapacity`
+    /// measured on a saturated 3-stage pipeline with a small (single-digit) edge capacity
     /// the wake round trip dominates and caps throughput at ~480k msg/s with a
     /// 2 us budget, at ~1.06M with 8 us, ~1.63M with 20 us and ~1.71M with 24 us
     /// (average latency dropping from ~34 us to ~10 us on the way). 20 us is the
@@ -657,6 +715,17 @@ private:
     T* ElementAt(std::size_t index) const {
         return reinterpret_cast<T*>(
             const_cast<typename std::aligned_storage<sizeof(T), alignof(T)>::type*>(&m_slots[index].storage));
+    }
+
+    /// Producer-side "is there no room" check, used by waitForRoom().
+    bool Full() const {
+        if (m_fallback) {
+            // The fallback has no lock-free size: a negative capacity means
+            // unbounded there, so a full check only means anything when the
+            // fallback queue carries a capacity of its own.
+            return getSize() >= static_cast<std::size_t>(m_capacity);
+        }
+        return m_tail.load(std::memory_order_relaxed) - m_head.load(std::memory_order_acquire) >= m_slotCount;
     }
 
     /**

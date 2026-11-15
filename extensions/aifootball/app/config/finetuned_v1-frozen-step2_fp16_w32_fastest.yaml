@@ -30,6 +30,8 @@
 #     --video_path /home/hx1/yzl/Work/data/射门1-1080p60.mov --output_dir /tmp/fps --max_frames 2000
 # ============================================================================
 graph:
+  # Maximum in-flight messages per edge. Required: queue depth belongs to this pipeline.
+  messageQueueCapacity: 8
   name: AIFootball-TensorRT
 
   modules:

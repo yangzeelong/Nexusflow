@@ -34,6 +34,8 @@
 # classId 口径：**logits 列下标，不加 1**；列 0 = no-object。
 # ============================================================================
 graph:
+  # Maximum in-flight messages per edge. Required: queue depth belongs to this pipeline.
+  messageQueueCapacity: 8
   name: AIFootball-TensorRT
 
   modules:
