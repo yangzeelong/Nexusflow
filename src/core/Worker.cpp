@@ -3,7 +3,7 @@
 #include "nexusflow/Message.hpp"
 #include "nexusflow/Logging.hpp"
 #include "nexusflow/PipelineContext.hpp"
-#include "nexusflow/TimerRegistry.hpp"
+#include "nexusflow/MetricsCollector.hpp"
 #include <algorithm>
 #include <chrono>
 #include <memory>
@@ -21,8 +21,8 @@ namespace {
 // scope holds no timer at all and touches nothing.
 class OptionalScopeTimer {
 public:
-    OptionalScopeTimer(bool enabled, ::nexusflow::profiling::TimerRegistry& registry,
-                       ::nexusflow::profiling::TimerRegistry::TimerHandle handle,
+    OptionalScopeTimer(bool enabled, ::nexusflow::profiling::MetricsCollector& registry,
+                       ::nexusflow::profiling::MetricsCollector::TimerHandle handle,
                        uint64_t windowMs, const char* file, int line)
         : m_registry(enabled ? &registry : nullptr), m_handle(handle) {
         if (m_registry != nullptr && m_handle != 0) {
@@ -42,8 +42,8 @@ public:
     OptionalScopeTimer& operator=(const OptionalScopeTimer&) = delete;
 
 private:
-    ::nexusflow::profiling::TimerRegistry* m_registry = nullptr;
-    ::nexusflow::profiling::TimerRegistry::TimerHandle m_handle = 0;
+    ::nexusflow::profiling::MetricsCollector* m_registry = nullptr;
+    ::nexusflow::profiling::MetricsCollector::TimerHandle m_handle = 0;
 };
 
 }  // namespace
@@ -58,8 +58,8 @@ Worker::Worker(const std::shared_ptr<Module>& modulePtr, const ViewPtr<Config>& 
     LoadConfig();
 }
 
-profiling::TimerRegistry& Worker::Profiler() {
-    return m_context ? m_context->Profiler() : ::nexusflow::profiling::TimerRegistry::Instance();
+profiling::MetricsCollector& Worker::Profiler() {
+    return m_context ? m_context->Profiler() : ::nexusflow::profiling::MetricsCollector::Instance();
 }
 
 Worker::~Worker() {
@@ -188,8 +188,10 @@ void Worker::WorkLoop() {
                         }
                     } catch (const std::exception& e) {
                         LOG_ERROR("Module '{}' threw while processing: {}", moduleName, e.what());
+                        m_failedCount.fetch_add(1, std::memory_order_relaxed);
                     } catch (...) {
                         LOG_ERROR("Module '{}' threw an unknown exception while processing.", moduleName);
+                        m_failedCount.fetch_add(1, std::memory_order_relaxed);
                     }
                     if (!produced && m_sourceIdleMs > 0) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(m_sourceIdleMs));
@@ -218,8 +220,10 @@ void Worker::WorkLoop() {
                         m_processedCount.fetch_add(batchMessage.size(), std::memory_order_relaxed);
                     } catch (const std::exception& e) {
                         LOG_ERROR("Module '{}' threw while processing a batch: {}", moduleName, e.what());
+                        m_failedCount.fetch_add(1, std::memory_order_relaxed);
                     } catch (...) {
                         LOG_ERROR("Module '{}' threw an unknown exception while processing a batch.", moduleName);
+                        m_failedCount.fetch_add(1, std::memory_order_relaxed);
                     }
                     if (m_profileTimers) {
                         Profiler().EndAverage(m_processTimer);
@@ -245,7 +249,7 @@ void Worker::WorkLoop() {
 }
 
 void Worker::RunFusion() {
-    // TODO: 濡備綍浼樺寲鍛紝鐜板湪鍙湁鍗旴atch, 骞朵笖闇€瑕佹祴璇曚笅鍐呭瓨鍗犵敤.
+    // TODO: 如何优化呢，现在只有单Batch, 并且需要测试下内存占用.
 
     // Key: message id, value: map of source module name and message.
     // Keyed by the full 64-bit message id (this used to be int and truncated it).
@@ -344,16 +348,20 @@ void Worker::RunFusion() {
                         } catch (const std::exception& e) {
                             LOG_ERROR("Module '{}' threw while processing a partially fused batch: {}",
                                       m_modulePtr->GetModuleName(), e.what());
+                            m_failedCount.fetch_add(1, std::memory_order_relaxed);
                         } catch (...) {
                             LOG_ERROR("Module '{}' threw an unknown exception while processing a partially fused batch.",
                                       m_modulePtr->GetModuleName());
+                            m_failedCount.fetch_add(1, std::memory_order_relaxed);
                         }
                         m_droppedCount.fetch_add(missing, std::memory_order_relaxed);
+                        m_fusionExpiredCount.fetch_add(missing, std::memory_order_relaxed);
                     } else {
                         LOG_WARN("Timeout for message with ID: {}, will be removed from cache", messageId);
                         // Every partial in the cache is one fused message that will
                         // never reach the module, so it counts as dropped output.
                         m_droppedCount.fetch_add(messageMap.size(), std::memory_order_relaxed);
+                        m_fusionExpiredCount.fetch_add(messageMap.size(), std::memory_order_relaxed);
                     }
                     cacheArrivalMs.erase(arrivalIt);
                     it = messageCache.erase(it);

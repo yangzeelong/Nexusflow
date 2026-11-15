@@ -551,6 +551,21 @@ public:
     }
 
     /**
+     * @brief Forgets the deepest backlog seen so far.
+     * @details Only the water mark restarts; the pushed/popped counters keep
+     * growing so two snapshots can still be subtracted. Producers race with this
+     * by design: a push that lands during the reset may record a depth against
+     * the previous window, which a caller avoids by resetting a stopped queue.
+     */
+    void resetHighWaterMark() {
+        if (m_fallback) {
+            m_fallback->resetHighWaterMark();
+            return;
+        }
+        m_highWaterMark.store(getSize(), std::memory_order_relaxed);
+    }
+
+    /**
      * @brief Capacity passed to the constructor (non-positive means unbounded).
      */
     int capacity() const { return m_capacity; }

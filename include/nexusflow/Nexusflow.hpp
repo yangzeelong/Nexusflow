@@ -9,7 +9,8 @@
 #include <nexusflow/PipelineBuilder.hpp>
 #include <nexusflow/PipelineContext.hpp>
 #include <nexusflow/TypeTraits.hpp>
-#include <nexusflow/TimerRegistry.hpp>
+#include <nexusflow/MetricsCollector.hpp>
+#include <nexusflow/Stats.hpp>
 #include <nexusflow/common/Any.hpp>
 #include <nexusflow/common/ConcurrentQueue.hpp>
 #include <nexusflow/common/Optional.hpp>

@@ -13,6 +13,7 @@
 #include <fstream>
 #include <memory>
 #include <string>
+#include <stdexcept>
 #include <thread>
 
 namespace {
@@ -59,6 +60,18 @@ protected:
 NEXUSFLOW_REGISTER_MODULE(MetricsSourceModule);
 NEXUSFLOW_REGISTER_MODULE(MetricsSinkModule);
 
+// Throws on every invocation, to prove a failing Process is counted rather than
+// disappearing from the accounting.
+class ThrowingSinkModule : public Module {
+public:
+    explicit ThrowingSinkModule(const std::string& name) : Module(name) {}
+
+protected:
+    void Process(Message&) override { throw std::runtime_error("sink always throws"); }
+};
+
+NEXUSFLOW_REGISTER_MODULE(ThrowingSinkModule);
+
 // Writes a temporary YAML config next to gtest's working directory and removes
 // it again, so the metrics test does not need a fixtures directory.
 class TempYamlFile {
@@ -92,9 +105,9 @@ TEST(PipelineMetricsTest, BuilderSetsQueueCapacityAndCounters) {
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
 
     PipelineMetrics metrics = pipeline->GetMetrics();
-    ASSERT_EQ(metrics.queues.size(), std::size_t(1));
-    EXPECT_EQ(metrics.queues[0].capacity, std::size_t(7));
-    EXPECT_EQ(metrics.queues[0].pushed, std::uint64_t(0));
+    ASSERT_EQ(metrics.edges.size(), std::size_t(1));
+    EXPECT_EQ(metrics.edges[0].capacity, std::size_t(7));
+    EXPECT_EQ(metrics.edges[0].pushedTotal, std::uint64_t(0));
     ASSERT_EQ(metrics.modules.size(), std::size_t(2));
 
     ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
@@ -102,17 +115,17 @@ TEST(PipelineMetricsTest, BuilderSetsQueueCapacityAndCounters) {
     ASSERT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
 
     metrics = pipeline->GetMetrics();
-    ASSERT_EQ(metrics.queues.size(), std::size_t(1));
-    EXPECT_EQ(metrics.queues[0].capacity, std::size_t(7));
-    EXPECT_GT(metrics.queues[0].pushed, std::uint64_t(0));
-    EXPECT_GT(metrics.queues[0].popped, std::uint64_t(0));
-    EXPECT_GE(metrics.queues[0].highWaterMark, std::size_t(1));
-    EXPECT_LE(metrics.queues[0].highWaterMark, std::size_t(7));
-    EXPECT_NE(metrics.queues[0].name.find("metrics-source"), std::string::npos);
+    ASSERT_EQ(metrics.edges.size(), std::size_t(1));
+    EXPECT_EQ(metrics.edges[0].capacity, std::size_t(7));
+    EXPECT_GT(metrics.edges[0].pushedTotal, std::uint64_t(0));
+    EXPECT_GT(metrics.edges[0].poppedTotal, std::uint64_t(0));
+    EXPECT_GE(metrics.edges[0].maxSize, std::size_t(1));
+    EXPECT_LE(metrics.edges[0].maxSize, std::size_t(7));
+    EXPECT_NE(metrics.edges[0].Name().find("metrics-source"), std::string::npos);
 
     ASSERT_EQ(metrics.modules.size(), std::size_t(2));
     for (const ModuleMetrics& module : metrics.modules) {
-        EXPECT_GT(module.processed, std::uint64_t(0)) << module.name;
+        EXPECT_GT(module.processedTotal, std::uint64_t(0)) << module.name;
     }
 }
 
@@ -135,8 +148,8 @@ TEST(PipelineMetricsTest, YamlConfigSetsQueueCapacity) {
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
 
     const PipelineMetrics metrics = pipeline->GetMetrics();
-    ASSERT_EQ(metrics.queues.size(), std::size_t(1));
-    EXPECT_EQ(metrics.queues[0].capacity, std::size_t(3));
+    ASSERT_EQ(metrics.edges.size(), std::size_t(1));
+    EXPECT_EQ(metrics.edges[0].capacity, std::size_t(3));
     ASSERT_EQ(metrics.modules.size(), std::size_t(2));
 }
 
@@ -157,12 +170,15 @@ private:
 };
 
 // Only used to give the stream source a downstream edge; it never has to keep up.
+// It also sleeps on every message: with the source emitting non-stop into a
+// capacity-1 edge, a slow consumer is what keeps the queue full long enough for
+// a push to be refused rather than merely parked until the next pop.
 class MetricsIdleSinkModule : public Module {
 public:
     explicit MetricsIdleSinkModule(const std::string& name) : Module(name) {}
 
 protected:
-    void Process(Message&) override {}
+    void Process(Message&) override { std::this_thread::sleep_for(std::chrono::microseconds(50)); }
 };
 
 NEXUSFLOW_REGISTER_MODULE(MetricsStreamSourceModule);
@@ -180,7 +196,7 @@ TEST(PipelineMetricsTest, StopAccountsForMessagesTheDispatcherCouldNotPush) {
     // Init alone must not count anything as dropped.
     ASSERT_EQ(pipeline->GetMetrics().modules.size(), std::size_t(2));
     for (const ModuleMetrics& module : pipeline->GetMetrics().modules) {
-        EXPECT_EQ(module.dropped, std::uint64_t(0)) << module.name;
+        EXPECT_EQ(module.droppedTotal, std::uint64_t(0)) << module.name;
     }
 
     ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
@@ -198,7 +214,7 @@ TEST(PipelineMetricsTest, StopAccountsForMessagesTheDispatcherCouldNotPush) {
     for (int attempt = 0; attempt < kMaxStopAttempts && totalDropped == 0; ++attempt) {
         ASSERT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
         for (const ModuleMetrics& module : pipeline->GetMetrics().modules) {
-            totalDropped += module.dropped;
+            totalDropped += module.droppedTotal;
         }
         if (totalDropped != 0 || attempt + 1 >= kMaxStopAttempts) {
             break;
@@ -218,7 +234,7 @@ TEST(PipelineMetricsTest, StopAccountsForMessagesTheDispatcherCouldNotPush) {
     const PipelineMetrics metrics = pipeline->GetMetrics();
     std::uint64_t totalProcessed = 0;
     for (const ModuleMetrics& module : metrics.modules) {
-        totalProcessed += module.processed;
+        totalProcessed += module.processedTotal;
     }
     EXPECT_GT(totalProcessed, std::uint64_t(0));
     EXPECT_GT(totalDropped, std::uint64_t(0));
@@ -228,7 +244,7 @@ TEST(PipelineMetricsTest, StopAccountsForMessagesTheDispatcherCouldNotPush) {
     ASSERT_EQ(metrics.modules.size(), std::size_t(2));
     for (const ModuleMetrics& module : metrics.modules) {
         if (module.name.find("idle-sink") != std::string::npos) {
-            EXPECT_EQ(module.dropped, std::uint64_t(0)) << module.name;
+            EXPECT_EQ(module.droppedTotal, std::uint64_t(0)) << module.name;
         }
     }
 
@@ -236,9 +252,135 @@ TEST(PipelineMetricsTest, StopAccountsForMessagesTheDispatcherCouldNotPush) {
     // queue, a dropped one was refused by it, so both are visible and neither is
     // double counted. pushed can only grow by the messages the source emitted,
     // so it is at least the sink's processed count.
-    ASSERT_EQ(metrics.queues.size(), std::size_t(1));
-    EXPECT_GE(metrics.queues[0].pushed, metrics.modules[1].processed);
-    EXPECT_GE(metrics.queues[0].popped, metrics.modules[1].processed);
+    ASSERT_EQ(metrics.edges.size(), std::size_t(1));
+    EXPECT_GE(metrics.edges[0].pushedTotal, metrics.modules[1].processedTotal);
+    EXPECT_GE(metrics.edges[0].poppedTotal, metrics.modules[1].processedTotal);
+}
+
+// The accounting invariant: every message a module was handed ends up counted
+// exactly once, as processed, dropped or failed. Without failedTotal a throwing
+// invocation leaves a message counted nowhere, which is the hole this covers.
+TEST(PipelineMetricsTest, ProcessedDroppedAndFailedAccountForEveryMessage) {
+    auto source = std::make_shared<MetricsSourceModule>("invariant-source");
+    auto sink = std::make_shared<MetricsSinkModule>("invariant-sink");
+
+    auto pipeline = PipelineBuilder()
+                        .AddModule(source)
+                        .AddModule(sink)
+                        .Connect("invariant-source", "invariant-sink")
+                        .Build();
+    ASSERT_NE(pipeline, nullptr);
+    ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
+    ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
+    ASSERT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
+
+    const PipelineSnapshot snapshot = pipeline->GetSnapshot();
+    ASSERT_EQ(snapshot.modules.size(), std::size_t(2));
+
+    // The source is the producer: everything it emitted either reached the edge
+    // queue or was dropped by it, so its own total equals the edge's pushes.
+    ASSERT_EQ(snapshot.edges.size(), std::size_t(1));
+    const ModuleSnapshot& sourceSnapshot = snapshot.modules[0];
+    EXPECT_EQ(sourceSnapshot.failedTotal, std::uint64_t(0)) << sourceSnapshot.name;
+    EXPECT_LE(sourceSnapshot.fusionExpiredTotal, sourceSnapshot.droppedTotal) << sourceSnapshot.name;
+    EXPECT_EQ(sourceSnapshot.processedTotal + sourceSnapshot.droppedTotal, snapshot.edges[0].pushedTotal)
+        << sourceSnapshot.name;
+
+    // The sink is the consumer: everything it popped was processed or failed.
+    const ModuleSnapshot& sinkSnapshot = snapshot.modules[1];
+    EXPECT_EQ(sinkSnapshot.droppedTotal, std::uint64_t(0)) << sinkSnapshot.name;
+    EXPECT_LE(sinkSnapshot.processedTotal + sinkSnapshot.failedTotal, snapshot.edges[0].poppedTotal)
+        << sinkSnapshot.name;
+
+    ASSERT_EQ(pipeline->DeInit(), ErrorCode::SUCCESS);
+}
+
+// A throwing Process must be counted, not silently vanish from the accounting.
+TEST(PipelineMetricsTest, ThrowingProcessIsCountedAsFailed) {
+    auto source = std::make_shared<MetricsSourceModule>("throw-source");
+    auto sink = std::make_shared<ThrowingSinkModule>("throw-sink");
+
+    auto pipeline = PipelineBuilder()
+                        .AddModule(source)
+                        .AddModule(sink)
+                        .Connect("throw-source", "throw-sink")
+                        .Build();
+    ASSERT_NE(pipeline, nullptr);
+    ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
+    ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
+    ASSERT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
+
+    const PipelineSnapshot snapshot = pipeline->GetSnapshot();
+    ASSERT_EQ(snapshot.modules.size(), std::size_t(2));
+    EXPECT_GT(snapshot.modules[1].failedTotal, std::uint64_t(0)) << snapshot.modules[1].name;
+    EXPECT_EQ(snapshot.modules[1].processedTotal, std::uint64_t(0)) << snapshot.modules[1].name;
+
+    ASSERT_EQ(pipeline->DeInit(), ErrorCode::SUCCESS);
+}
+
+// The snapshot carries names a reader can correlate: an edge knows both of its
+// ends, and ToString() prints them without any further work by the caller.
+TEST(PipelineMetricsTest, SnapshotNamesEdgesAndRendersALine) {
+    auto source = std::make_shared<MetricsSourceModule>("named-source");
+    auto sink = std::make_shared<MetricsSinkModule>("named-sink");
+
+    auto pipeline = PipelineBuilder()
+                        .AddModule(source)
+                        .AddModule(sink)
+                        .Connect("named-source", "named-sink")
+                        .Build();
+    ASSERT_NE(pipeline, nullptr);
+    ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
+
+    const PipelineSnapshot snapshot = pipeline->GetSnapshot();
+    ASSERT_EQ(snapshot.edges.size(), std::size_t(1));
+    EXPECT_EQ(snapshot.edges[0].from, "named-source");
+    EXPECT_EQ(snapshot.edges[0].to, "named-sink");
+    EXPECT_EQ(snapshot.edges[0].Name(), "named-source -> named-sink");
+
+    const std::string line = snapshot.ToString();
+    EXPECT_NE(line.find("named-source->named-sink"), std::string::npos) << line;
+    EXPECT_NE(line.find("named-sink processed="), std::string::npos) << line;
+
+    ASSERT_EQ(pipeline->DeInit(), ErrorCode::SUCCESS);
+}
+
+// maxSize is a water mark, so it survives the queue draining but starts over
+// after ResetMetrics(), while the counters keep accumulating.
+TEST(PipelineMetricsTest, ResetMetricsClearsOnlyTheWaterMark) {
+    auto source = std::make_shared<MetricsSourceModule>("reset-source");
+    auto sink = std::make_shared<MetricsSinkModule>("reset-sink");
+
+    auto pipeline = PipelineBuilder()
+                        .AddModule(source)
+                        .AddModule(sink)
+                        .Connect("reset-source", "reset-sink")
+                        .SetMessageQueueCapacity(4)
+                        .Build();
+    ASSERT_NE(pipeline, nullptr);
+    ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
+    ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
+    ASSERT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
+
+    const PipelineSnapshot before = pipeline->GetSnapshot();
+    ASSERT_EQ(before.edges.size(), std::size_t(1));
+    ASSERT_GE(before.edges[0].maxSize, std::size_t(1));
+    const std::uint64_t pushedBefore = before.edges[0].pushedTotal;
+
+    pipeline->ResetMetrics();
+    const PipelineSnapshot after = pipeline->GetSnapshot();
+    // The water mark restarts from whatever is still queued: after a stop that
+    // is usually nothing, but a sink that left a backlog makes it that backlog.
+    // What must hold is that the previous peak is gone.
+    EXPECT_LE(after.edges[0].maxSize, after.edges[0].size) << "reset must drop the previous peak";
+    EXPECT_LE(after.edges[0].maxSize, before.edges[0].maxSize) << after.edges[0].maxSize << " vs "
+                                                              << before.edges[0].maxSize;
+    EXPECT_GE(after.edges[0].pushedTotal, pushedBefore) << "reset must not clear cumulative counters";
+
+    ASSERT_EQ(pipeline->DeInit(), ErrorCode::SUCCESS);
 }
 
 } // namespace

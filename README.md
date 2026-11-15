@@ -204,23 +204,26 @@ auto pipeline = nexusflow::PipelineBuilder()
     .Build();
 ```
 
-`Pipeline::GetMetrics()` returns a snapshot of the runtime counters without
-stopping the pipeline:
+`Pipeline::GetSnapshot()` returns a snapshot of the runtime counters without
+stopping the pipeline (the older `GetMetrics()` forwards to it):
 
 ```cpp
-const nexusflow::PipelineMetrics metrics = pipeline->GetMetrics();
+const nexusflow::PipelineSnapshot snapshot = pipeline->GetSnapshot();
 
-for (const auto& queue : metrics.queues) {
-    // queue.name, queue.capacity, queue.size, queue.highWaterMark,
-    // queue.pushed, queue.popped
+for (const auto& edge : snapshot.edges) {
+    // edge.from, edge.to, edge.capacity, edge.size, edge.maxSize,
+    // edge.pushedTotal, edge.poppedTotal
 }
-for (const auto& module : metrics.modules) {
-    // module.name, module.processed
+for (const auto& module : snapshot.modules) {
+    // module.name, module.processedTotal, module.droppedTotal,
+    // module.fusionExpiredTotal, module.failedTotal
 }
+std::cout << snapshot.ToString() << std::endl;   // one line, greppable
 ```
 
-A queue reports `capacity == 0` when it is unbounded, and `highWaterMark` is the
-deepest backlog observed so far.
+An edge reports `capacity == 0` when it is unbounded, and `maxSize` is the deepest
+backlog observed so far. `ResetMetrics()` clears the water marks and the counters
+without touching the queues.
 
 ## Pipeline Context
 
@@ -234,7 +237,8 @@ pipeline->Init();
 
 auto context = pipeline->GetContext();
 context->SetSink(customSink);          // logs from this pipeline's module threads
-context->Report("frames", 1.0);        // module-defined metric samples
+auto frames = context->Intern("detect.frames");  // resolve the name once
+context->Record(frames, 1.0);          // module-defined metric samples
 const auto metrics = context->GetReportedMetrics();
 const bool stopping = context->StopRequested();
 ```
@@ -242,16 +246,61 @@ const bool stopping = context->StopRequested();
 - `SetSink` routes records produced on this pipeline's module threads to the given
   sink. Without one, the process-wide facade sink is used, so existing programs do
   not change.
-- `Report` accumulates `samples`, `total` and `last` per metric name; read them back
-  with `GetReportedMetrics()`. `Pipeline::GetMetrics()` keeps reporting the
-  framework queues and module counters.
+- `Intern` resolves a metric name to a handle and `Record` adds a sample to it,
+  accumulating `samples`, `total` and `last`. Holding the handle keeps the hot path
+  to one map lookup instead of hashing a string per sample;
+  `Record(name, value)` is the convenient form. Read the samples back with
+  `GetReportedMetrics()`, and `Pipeline::GetSnapshot()` reports the framework edges
+  and module counters.
+- Metric names are prefixed with the module name (`"detect.frames"`), because the
+  context is shared by the whole pipeline and a bare `"latency"` from two modules
+  would be indistinguishable.
 - `RequestStop` is called by `Pipeline::Stop()` before the queues are shut down, so
   long-running modules can leave their loop cooperatively.
-- `Profiler()` returns a per-pipeline `nexusflow::profiling::TimerRegistry`, so two
+- `Profiler()` returns a per-pipeline `nexusflow::profiling::MetricsCollector`, so two
   pipelines that use identical module names no longer merge their timing samples.
 
 The context is created by `Pipeline::Impl` during `Init()`; modules that never call
 `GetContext()` behave exactly as before.
+
+## Profiling a Module
+
+`nexusflow::profiling::MetricsCollector` collects timing samples. Inside a module,
+the `TIMER_START_*` macros time a scope and report on the policy they name:
+
+```cpp
+#include "nexusflow/MetricsCollector.hpp"
+
+{
+    TIMER_START_AVERAGE_MS("detect.infer", 1000);   // report every second
+    RunInference(frame);
+    TIMER_STOP_AVERAGE("detect.infer");
+}
+
+auto& collector = GetContext()->Profiler();        // per pipeline, not global
+nexusflow::profiling::MetricSamples samples;
+if (collector.GetStats("detect.infer", samples)) {
+    // samples.items, samples.sumMs, samples.AvgItemMs(), samples.p95Ms,
+    // samples.minMs, samples.maxMs
+}
+```
+
+Every duration in `MetricSamples` describes a single item, so the average and the
+tail stay comparable even when one call covers a batch. The p95 covers a recent
+window while min/max cover the whole run.
+
+There is deliberately no throughput field: a rate is `items` divided by wall-clock
+time, and these samples are cumulative, so they cannot tell how long the run has
+been going. Take two snapshots and divide the deltas:
+
+```cpp
+const auto start = std::chrono::steady_clock::now();
+snapshotNow();                                     // read items here
+// ... run for a while ...
+const double wallS = std::chrono::duration<double>(
+    std::chrono::steady_clock::now() - start).count();
+const double itemsPerSecond = (itemsNow - itemsThen) / wallS;
+```
 
 ## Core Component: The `nexusflow::Message`
 

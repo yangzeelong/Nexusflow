@@ -3,7 +3,7 @@
 #include "inference/TensorRTEngine.hpp"
 
 #include <nexusflow/Logging.hpp>
-#include <nexusflow/TimerRegistry.hpp>
+#include <nexusflow/MetricsCollector.hpp>
 
 #ifdef WITH_CUDA_KERNELS
 #include <cuda_runtime_api.h>

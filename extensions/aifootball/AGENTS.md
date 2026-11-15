@@ -14,7 +14,7 @@
 
 | 路径 | 作用 |
 | --- | --- |
-| `include/nexusflow/`、`src/` | 框架本体（模块、消息、流水线、计时器 `include/nexusflow/TimerRegistry.hpp`，命名空间 `nexusflow::profiling`） |
+| `include/nexusflow/`、`src/` | 框架本体（模块、消息、流水线、计时器 `include/nexusflow/MetricsCollector.hpp`，命名空间 `nexusflow::profiling`） |
 | `extensions/aifootball/` | 算法 SDK：检测/跟踪/姿态/平滑模块 + 公开 API `include/aifootball/AIFootball.hpp` |
 | `extensions/aifootball/app/` | demo app（`main.cpp`、`VideoRenderer.*`、`JsonlWriter.*`、`VideoReader.*`、`AppConfig.*`）、`config/` 配置目录；**只跑基模**：写 `observations.jsonl` + 可选渲染，触球判定与 `touches.jsonl` 已移到 Python |
 | `extensions/aifootball/touch_eval/` | 触球业务逻辑（**Python**：`py/` uv 工程，包 `touch_eval`，含判定/评估/报告与差分测试）+ 720p 配置 + `run_touch_eval.sh`（app 只跑基模写 `observations.jsonl`，C++ 侧判定实现已删除）；`tools/plot_touch_sweep.py` 逐点重跑评估画 PR 曲线（`sweep_*.csv` / `pr_*.png`）、`tools/touch_view_report.py` 打印事件级/过程级（`--coverage` 才加覆盖式诊断）、`tools/render_touch_review.py` 烧录复核视频、`tools/render_pr_errors.py` 把每个 FP/FN 渲染成带中文原因的对照图 + `pr_review/index.md`；`--playback` 另出整段 1× 实时的 `pr_review/touch_playback.mp4`（顶部中文原因、底部 pred/gt 双时间轴，TP 绿/FP 红/FN 黄）。需要中文字体，缺失会提示 `apt-get install -y fonts-wqy-microhei`，见其 `README.md` |
@@ -254,7 +254,7 @@ git -C /home/hx1/yzl/Work/AI-Football show <rev>:code/tracking.py > /tmp/trackin
 | demo：渲染/JSONL/解码/配置解析 | `extensions/aifootball/app/{VideoRenderer,JsonlWriter,VideoReader,AppConfig}.{hpp,cpp}`、`extensions/aifootball/app/main.cpp` |
 | 配置与批量脚本 | `extensions/aifootball/app/config/`、`extensions/aifootball/tools/run_all_configs.sh` |
 | 扩展构建 | `extensions/aifootball/CMakeLists.txt`、`extensions/aifootball/app/CMakeLists.txt`、`extensions/aifootball/benchmarks/CMakeLists.txt` |
-| 计时器（框架，`nexusflow::profiling`） | `include/nexusflow/TimerRegistry.hpp`、`src/common/TimerRegistry.cpp` |
+| 计时器（框架，`nexusflow::profiling`） | `include/nexusflow/MetricsCollector.hpp`、`src/common/MetricsCollector.cpp` |
 
 ---
 
@@ -265,7 +265,7 @@ git -C /home/hx1/yzl/Work/AI-Football show <rev>:code/tracking.py > /tmp/trackin
 - **渲染**：ROI 多边形、person/球标签、被过滤球按原因着色、计数面板、`fps=<处理速率>`、渲染耗时单列（`render: X ms/frame`，与端到端 `per frame` 区分）。
 - **数据对齐**：`persons[].bbox` 改为姿态裁剪框（与 Python 比例 1.0000，关键点零变化）；`detectionBbox` 只服务渲染。
 - **配置**：配置目录化 + `run_all_configs.sh` 扫目录跑；README/注释路径同步。
-- **TimerRegistry**：单轴化（只报 items=每次调用）、p95 滑窗（1024、nearest-rank、仅在报表时计算）。
+- **MetricsCollector**：单轴化（只报 items=每次调用）、p95 滑窗（1024、nearest-rank、仅在报表时计算）。
 - **触球判定与精度评估**：`extensions/aifootball/touch_eval/`（Python 业务逻辑 `py/` + `run_touch_eval.sh` + 720p 配置）。C++ 的判定核心、离线评估 CLI、单测与 app 的 `--detect_touches`（`touches.jsonl`/渲染打点）**已删除**，app 只跑基模写 `observations.jsonl`。方法、指标口径、标注格式、差分口径与迁移缺口见 `extensions/aifootball/touch_eval/README.md` §0。
   - 标注升级为 **v2 一触一行 CSV**（`data/移动传球.touches.csv`，`# point_window_sec:` 声明点标注窗口、`no_touch` 行是负样本区间），旧 `.label` 继续支持，`--dump_gt_csv` 可把旧格式转成 v2（`(2次)` 展开并标注 SPLIT ME）。
   - **主口径 = 计数感知**：一条标注 = 它代表的窗口（区间行 = 它写的跨度 `[start, end)`；点行 = `point_window_sec` + `--window_anchor`，默认 `end`）且发放 `count` 个名额；辅助口径保留一对一容差扫描，默认按**帧**给：±10/30/60/120 帧（60 fps 下即 0.17/0.5/1/2 s），报告里帧与秒并列打印（`--tolerance_frames` / `--primary_tolerance_frames`；`--tolerance` 仍可按秒指定并覆盖帧）。报告新增误检三分类（同一次触球的另一帧 / 贴窗口 / 无人支持）+ `no_touch` 命中。

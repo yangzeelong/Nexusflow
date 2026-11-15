@@ -2,7 +2,7 @@
 #include <nexusflow/ErrorCode.hpp>
 #include <nexusflow/Message.hpp>
 #include <nexusflow/Module.hpp>
-#include <nexusflow/TimerRegistry.hpp>
+#include <nexusflow/MetricsCollector.hpp>
 #include <nexusflow/common/ViewPtr.hpp>
 
 #include "../../src/base/Define.hpp"
@@ -69,8 +69,8 @@ TEST(WorkerProfilingTest, ProfileTimersRecordTheSourceProcessTimer) {
 
     ASSERT_GT(module->produced.load(std::memory_order_relaxed), 0);
 
-    auto& registry = profiling::TimerRegistry::Instance();
-    profiling::TimerStats stats;
+    auto& registry = profiling::MetricsCollector::Instance();
+    profiling::MetricSamples stats;
     ASSERT_TRUE(registry.GetStats("Worker.Process.profiled_source", stats));
     EXPECT_GT(stats.items, 0U);
     // A source never pulls from an input queue, so it has no wait timer.
@@ -98,8 +98,8 @@ TEST(WorkerProfilingTest, ProfileTimersRecordWaitAndBatchProcessTimers) {
 
     EXPECT_GT(module->received.load(std::memory_order_relaxed), 0);
 
-    auto& registry = profiling::TimerRegistry::Instance();
-    profiling::TimerStats stats;
+    auto& registry = profiling::MetricsCollector::Instance();
+    profiling::MetricSamples stats;
     ASSERT_TRUE(registry.GetStats("Worker.Wait.profiled_sink", stats));
     EXPECT_GT(stats.items, 0U);
     ASSERT_TRUE(registry.GetStats("Worker.Process.profiled_sink", stats));

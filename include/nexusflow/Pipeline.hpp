@@ -3,6 +3,7 @@
 
 #include <nexusflow/ErrorCode.hpp>
 #include <nexusflow/Module.hpp>
+#include <nexusflow/Stats.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -33,35 +34,22 @@ constexpr int kDefaultMessageQueueCapacity = 5;
 
 /**
  * @brief Runtime counters for one edge queue.
+ * @deprecated Use EdgeSnapshot. This alias exists so code that names the type
+ *             keeps compiling while it migrates; it will go away.
  */
-struct QueueMetrics {
-    std::string name;
-    std::size_t capacity = 0; // 0 means unbounded
-    std::size_t size = 0;
-    std::size_t highWaterMark = 0;
-    std::uint64_t pushed = 0;
-    std::uint64_t popped = 0;
-};
+using QueueMetrics = EdgeSnapshot;
 
 /**
  * @brief Runtime counters for one module.
+ * @deprecated Use ModuleSnapshot.
  */
-struct ModuleMetrics {
-    std::string name;
-    std::uint64_t processed = 0;
-    /// Messages this module's invocations failed to hand to a downstream queue,
-    /// plus partial fused messages dropped after the fusion timeout. Together
-    /// with the processed count this accounts for everything a module saw.
-    std::uint64_t dropped = 0;
-};
+using ModuleMetrics = ModuleSnapshot;
 
 /**
  * @brief Snapshot of the pipeline runtime state, taken without stopping it.
+ * @deprecated Use PipelineSnapshot.
  */
-struct PipelineMetrics {
-    std::vector<QueueMetrics> queues;
-    std::vector<ModuleMetrics> modules;
-};
+using PipelineMetrics = PipelineSnapshot;
 
 /**
  * @brief Pipeline
@@ -80,9 +68,25 @@ public:
     ErrorCode DeInit();
 
     /**
-     * @brief Returns queue/module counters. Safe to call while the pipeline runs.
+     * @brief Returns queue and module counters. Safe to call while the pipeline runs.
      */
-    PipelineMetrics GetMetrics() const;
+    PipelineSnapshot GetSnapshot() const;
+
+    /**
+     * @brief Same as GetSnapshot().
+     * @deprecated Use GetSnapshot(); the snapshot is not a set of metrics, it is
+     *             one moment of them.
+     */
+    PipelineSnapshot GetMetrics() const { return GetSnapshot(); }
+
+    /**
+     * @brief Clears the per-edge water marks (EdgeSnapshot::maxSize).
+     * @details The cumulative counters keep growing: they are what two snapshots
+     * are subtracted for, so resetting them would break that. Only the water
+     * marks restart. Call this while the pipeline is stopped, or accept that an
+     * edge being filled right now may record a depth from the previous window.
+     */
+    void ResetMetrics();
 
     /**
      * @brief Returns this pipeline's context: per-pipeline log sink, profiler,
