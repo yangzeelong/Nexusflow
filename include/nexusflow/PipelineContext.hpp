@@ -5,6 +5,7 @@
 #include <nexusflow/MetricsCollector.hpp>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -89,7 +90,28 @@ public:
     /// for setup code and tests; a hot loop should hold the handle instead.
     void Record(const std::string& name, double value);
 
+    /// Copies every metric reported so far. Convenient when a caller keeps the
+    /// list; a poller that only renders or counts should take ForEachMetric(),
+    /// which spends one lock and no allocation.
     std::vector<Metric> GetReportedMetrics() const;
+
+    /// Number of metrics interned so far. Handles are 1..Count(), so this is also
+    /// the highest valid handle.
+    std::size_t GetReportedMetricCount() const;
+
+    /// One metric by handle, or nullptr when the handle was never interned in
+    /// this context. The pointer is only valid until the next Intern().
+    const Metric* FindMetric(MetricHandle handle) const;
+
+    /// Visits every metric under one lock, in intern order. `fn` receives
+    /// `const Metric&` and must not call back into this context.
+    template <typename Fn>
+    void ForEachMetric(Fn&& fn) const {
+        std::lock_guard<std::mutex> lock(m_metricsMutex);
+        for (std::size_t i = 0; i < m_metrics.size(); ++i) {
+            fn(m_metrics[i]);
+        }
+    }
 
     /// Set by Pipeline::Stop() before the queues and workers are torn down, so a
     /// module in a long call can notice the pipeline is going away.

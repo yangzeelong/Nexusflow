@@ -78,7 +78,7 @@ public:
     /**
      * @brief Snapshot of the queue size and its lifetime counters.
      */
-    struct Stats {
+    struct QueueCounters {
         std::size_t size          = 0;
         std::size_t capacity      = 0;    // 0 means unbounded
         std::size_t highWaterMark = 0;
@@ -528,26 +528,26 @@ public:
     /**
      * @brief Returns a snapshot of the queue counters.
      */
-    Stats GetStats() const {
-        Stats stats;
+    QueueCounters GetStats() const {
+        QueueCounters counters;
         if (m_fallback) {
-            const typename ConcurrentQueue<T>::Stats fallbackStats = m_fallback->GetStats();
-            stats.size                                             = fallbackStats.size;
-            stats.capacity                                         = fallbackStats.capacity;
-            stats.highWaterMark                                    = fallbackStats.highWaterMark;
-            stats.pushed                                           = fallbackStats.pushed;
-            stats.popped                                           = fallbackStats.popped;
-            return stats;
+            const typename ConcurrentQueue<T>::QueueCounters fallbackCounters = m_fallback->GetStats();
+            counters.size          = fallbackCounters.size;
+            counters.capacity      = fallbackCounters.capacity;
+            counters.highWaterMark = fallbackCounters.highWaterMark;
+            counters.pushed        = fallbackCounters.pushed;
+            counters.popped        = fallbackCounters.popped;
+            return counters;
         }
-        stats.size          = getSize();
-        stats.capacity      = static_cast<std::size_t>(m_capacity);
-        stats.highWaterMark = m_highWaterMark.load(std::memory_order_relaxed);
+        counters.size          = getSize();
+        counters.capacity      = static_cast<std::size_t>(m_capacity);
+        counters.highWaterMark = m_highWaterMark.load(std::memory_order_relaxed);
         // The ring keeps no separate counters: every successful push/pop moves
         // the respective index by exactly one, and the hot path must not touch a
         // third cache line for statistics.
-        stats.pushed = m_tail.load(std::memory_order_relaxed);
-        stats.popped = m_head.load(std::memory_order_relaxed);
-        return stats;
+        counters.pushed = m_tail.load(std::memory_order_relaxed);
+        counters.popped = m_head.load(std::memory_order_relaxed);
+        return counters;
     }
 
     /**

@@ -16,6 +16,11 @@ namespace nexusflow {
  * everything else is a plain name describing the value right now. `size` is the
  * current backlog, `maxSize` the deepest backlog since the last
  * Pipeline::ResetMetrics().
+ *
+ * A reader may see a trough that never happened (pushedTotal from after a push
+ * next to poppedTotal from before the matching pop). ModuleSnapshot lists the
+ * modules before their edges for the same reason: read one module and then the
+ * edge it writes into, never the other way round.
  */
 struct EdgeSnapshot {
     /// Upstream module name.
@@ -62,10 +67,15 @@ struct ModuleSnapshot {
 /**
  * @brief One pipeline at one instant.
  *
- * The snapshot is a plain value: taking it reads a few atomics per edge and
+ * The snapshot is a plain value: taking it reads a few counters per edge and
  * module and copies strings, so it is cheap enough to take once a second while
  * the pipeline runs. It deliberately holds no percentiles and no derived value
  * (throughput, fill ratio): those are computed from two snapshots.
+ *
+ * ResetMetrics() clears only the water marks (`maxSize`). The `*Total` fields
+ * are cumulative for the life of the pipeline and never go back; that is what
+ * makes differencing two snapshots a rate. A restart does not reset them either,
+ * so a second Start() continues the same totals.
  */
 struct PipelineSnapshot {
     /// Graph name of the pipeline.

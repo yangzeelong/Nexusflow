@@ -257,6 +257,56 @@ TEST(PipelineMetricsTest, StopAccountsForMessagesTheDispatcherCouldNotPush) {
     EXPECT_GE(metrics.edges[0].poppedTotal, metrics.modules[1].processedTotal);
 }
 
+// Cross-layer reconciliation: each layer's counters must agree with the edge
+// between them, after a stop that drained everything. This is the whole-chain
+// form of the accounting invariant: the source's own totals add up to what the
+// edge accepted, the edge accepted exactly what it handed out, and the sink
+// processed exactly what it took. The per-module test below cannot see this,
+// because a message can be lost between two modules without any single module's
+// counters looking wrong.
+TEST(PipelineMetricsTest, EdgeCountersReconcileWithBothEnds) {
+    auto source = std::make_shared<MetricsSourceModule>("reconcile-source");
+    auto sink = std::make_shared<MetricsSinkModule>("reconcile-sink");
+
+    auto pipeline = PipelineBuilder()
+                        .AddModule(source)
+                        .AddModule(sink)
+                        .Connect("reconcile-source", "reconcile-sink")
+                        .SetMessageQueueCapacity(8)
+                        .Build();
+    ASSERT_NE(pipeline, nullptr);
+    ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
+    ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
+    ASSERT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
+
+    const PipelineSnapshot snapshot = pipeline->GetSnapshot();
+    ASSERT_EQ(snapshot.edges.size(), std::size_t(1));
+    ASSERT_EQ(snapshot.modules.size(), std::size_t(2));
+    const EdgeSnapshot& edge = snapshot.edges[0];
+    const ModuleSnapshot& sourceSnapshot = snapshot.modules[0];
+    const ModuleSnapshot& sinkSnapshot = snapshot.modules[1];
+
+    // Producer side: an accepted push or a drop, nothing else.
+    EXPECT_EQ(sourceSnapshot.processedTotal + sourceSnapshot.droppedTotal, edge.pushedTotal)
+        << sourceSnapshot.name;
+    // Both directions of the edge agree, including what is still queued.
+    EXPECT_EQ(edge.pushedTotal, edge.poppedTotal + edge.size) << edge.Name();
+    // Consumer side, where the ordering matters. The sink takes a batch off the
+    // edge and only then counts each message it processed, so a snapshot taken
+    // while it works can see poppedTotal ahead of the sink's counters but never
+    // behind them. Stopping the pipeline does not wait for a sink that is
+    // already inside a batch, so the run can legitimately end with messages in
+    // that gap -- the snapshot is not a quiesced one. Read the module first and
+    // the edge second is what keeps this direction sound.
+    ASSERT_GE(edge.poppedTotal, sinkSnapshot.processedTotal + sinkSnapshot.failedTotal) << sinkSnapshot.name;
+    // A clean run drops nothing on either side.
+    EXPECT_EQ(sourceSnapshot.droppedTotal, std::uint64_t(0)) << sourceSnapshot.name;
+    EXPECT_EQ(sinkSnapshot.droppedTotal, std::uint64_t(0)) << sinkSnapshot.name;
+
+    ASSERT_EQ(pipeline->DeInit(), ErrorCode::SUCCESS);
+}
+
 // The accounting invariant: every message a module was handed ends up counted
 // exactly once, as processed, dropped or failed. Without failedTotal a throwing
 // invocation leaves a message counted nowhere, which is the hole this covers.

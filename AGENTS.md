@@ -23,7 +23,7 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | `include/nexusflow/` | 公开头文件（Message/Module/Pipeline/PipelineBuilder/ModuleFactory/MetricsCollector/Logging…） |
 | `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（MetricsCollector、Logging 实现与测试） |
 | `include/nexusflow/common/` | 公开的 header-only 容器/工具：`Any`、`ConcurrentQueue`、`Optional`、`ViewPtr`（`Nexusflow::nexusflow_common` INTERFACE target） |
-| `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 127 个，见 §3） |
+| `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 129 个，见 §3） |
 | `examples/` | 3 个纯框架示例：`1-how-to-use`、`2-linear-vision-pipline`、`3-joined-vision-pipline` |
 | `benchmarks/` | Google Benchmark 基准（`nexusflow_benchmarks`） |
 | `cmake/` | `include.cmake`（第三方依赖 include）、`Summary.cmake`、`3rdparty/*.cmake`（FetchContent 定义） |
@@ -43,6 +43,7 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | 模块注册 | `include/nexusflow/ModuleFactory.hpp` |
 | 计时器 / profile（`nexusflow::profiling`，p95、单轴） | `include/nexusflow/MetricsCollector.hpp`、`src/common/MetricsCollector.cpp` |
 | 运行期快照（边/模块计数、`ToString()`） | `include/nexusflow/Stats.hpp`、`src/common/Stats.cpp` |
+| 计数器/快照的命名与并发规则 | 本文件 §5、`docs/telemetry.md`（不入库） |
 | 容器/工具（Any、队列、Optional、ViewPtr） | `include/nexusflow/common/*.hpp` |
 | 日志 | `include/nexusflow/Logging.hpp`（公开门面：Level/LoggerParam/LogRecord/LogSink/SetSink，不 include spdlog）+ `src/common/Logging.cpp`（spdlog 后端） |
 | 每 pipeline 上下文（日志 sink / profiler / 自定义指标 / 停止令牌） | `include/nexusflow/PipelineContext.hpp`、`src/pipeline/PipelineContext.cpp` |
@@ -108,8 +109,8 @@ cmake --build build --config Release --parallel 16
 ./build/tests/Release/nexusflow_tests.exe
 ```
 
-实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **127 tests
-from 23 suites，PASSED 127**（MSVC 19.40）。
+实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **129 tests
+from 23 suites，PASSED 129**（MSVC 19.40）。
 
 ---
 
@@ -119,7 +120,8 @@ from 23 suites，PASSED 127**（MSVC 19.40）。
 ./build/bin/nexusflow_tests      # Unix；Windows 见上（build/tests/Release/）
 ```
 
-- 当前 127 个用例（23 个 suite）：消息 7、计时器 8、图 7、Optional 23（TestOptional 18 + OptionalTest 2 + OptionalThrowingTest 3）、Any 5、ConcurrentQueue 7、Dispatcher 4、日志 7、Config 3、MessageMeta 3、SpscQueue 11、SpscMessageStress 1、Pipeline 生命周期 6、Pipeline 错误路径 10、Pipeline 图序 2、Pipeline 计时 1、Pipeline 指标 7、Pipeline 上下文 7、Worker 行为 4、Worker 启动 2、Worker 计时 2。
+- 当前 129 个用例（23 个 suite）：消息 7、计时器 8、图 7、Optional 23（TestOptional 18 + OptionalTest 2 + OptionalThrowingTest 3）、Any 5、ConcurrentQueue 7、Dispatcher 4、日志 7、Config 3、MessageMeta 3、SpscQueue 11、SpscMessageStress 1、Pipeline 生命周期 6、Pipeline 错误路径 10、Pipeline 图序 2、Pipeline 计时 1、Pipeline 指标 8、Pipeline 上下文 8、Worker 行为 4、Worker 启动 2、Worker 计时 2。
+- 用例数随手改：`./build/tests/Release/nexusflow_tests.exe --gtest_list_tests` 数一遍，别照抄本节。
 - 改框架（Message/Module/Pipeline/Dispatcher/Graph/Timer）**必须**跑；不要为了
   让测试通过而改测试语义。
 
@@ -136,7 +138,40 @@ from 23 suites，PASSED 127**（MSVC 19.40）。
 
 ---
 
-## 5. 硬规则（务必遵守）
+## 5. 计数器与快照的命名/并发规则
+
+写新的运行期指标时按这一节走，`docs/telemetry.md`（不入库）有完整对照表。
+
+**命名**
+
+| 后缀/形式 | 含义 | 例子 |
+| --- | --- | --- |
+| `*Total` | 累计计数，只增不减；两次快照相减才有意义 | `pushedTotal`、`processedTotal`、`droppedTotal`、`fusionExpiredTotal`、`failedTotal` |
+| 无后缀名词 | 此刻的瞬时值（gauge） | `size`、`capacity` |
+| `max*` | 自上次 `ResetMetrics()` 以来的极值（water mark） | `maxSize` |
+| `*Ms` | 单条样本的服务时间（毫秒），不是累计 | `sumMs`、`p95Ms` |
+
+- 不要再造 `Stats` / `Metrics` 这种泛称做结构体名：快照用 `*Snapshot`
+  （`EdgeSnapshot`/`ModuleSnapshot`/`PipelineSnapshot`），队列计数用
+  `QueueCounters`，采样统计用 `MetricSamples`。
+- 模块自报指标名必须带模块名前缀（`"detect.frames"`），因为 context 是整条流水线共享的。
+
+**并发**
+
+- 每个计数器只有一个写者（该模块的 worker 线程 / 该模块的 dispatcher），所以用**普通
+  `uint64_t` + `++`**，热路径不付 `lock xadd`（实测 0.3 ns vs 3.4 ns/次）。
+- 写者每个循环迭代结束调一次 `PublishCounters()`（release fence）发布；读者先调
+  `ObserveCounters()`（acquire fence）再直接读普通变量。读者可能读到"从未同时出现"的组合
+  （例如 pushed 已经 `+1` 而 popped 还没跟上），所以 `GetSnapshot()` **先填 modules 再填
+  edges**：先读模块、后读它写出去的那条边，就不会看到凭空出现的消息。
+- 对外可写的计数器入口（如 `Worker::RecordDropped`）一旦被第二个线程调用，就自动切到
+  `m_writerMutex` + 原子加的慢路径，写者数量不再是"约定"而是"检测"。
+- `Pipeline::ResetMetrics()` **只清 water mark**（`maxSize`）；`*Total` 在流水线生命周期内
+  永不回退，重新 `Start()` 也不清零。写新字段时别打破这条。
+
+---
+
+## 6. 硬规则（务必遵守）
 
 1. **不要自动 `git commit`**。只有用户明确说"提交/commit"时才提交；否则改动一律
    留在工作区，并在汇报里说明未提交。

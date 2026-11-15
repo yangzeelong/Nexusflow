@@ -45,6 +45,23 @@ void CollectDownstream(const std::string& name,
 
 } // namespace
 
+namespace {
+
+// Reads one module's counters into a snapshot. The counters are plain numbers
+// written by the module's own worker thread, so the reader is handed a
+// consistent set rather than four separate loads.
+ModuleSnapshot TakeModuleSnapshot(const ModuleActor& actor) {
+    ModuleSnapshot module;
+    module.name = actor.GetModuleName();
+    module.processedTotal = actor.ProcessedCount();
+    module.droppedTotal = actor.DroppedCount();
+    module.fusionExpiredTotal = actor.FusionExpiredCount();
+    module.failedTotal = actor.FailedCount();
+    return module;
+}
+
+} // namespace
+
 Pipeline::Pipeline() : m_pImpl(std::make_unique<Pipeline::Impl>()) {}
 
 Pipeline::~Pipeline() {
@@ -394,15 +411,12 @@ PipelineSnapshot Pipeline::GetSnapshot() const {
         metrics.edges.push_back(std::move(edge));
     }
 
+    // Modules before their edges: a reader can then take a module and the edge it
+    // writes into in that order and never see a message that left the module but
+    // has not reached the edge yet.
     metrics.modules.reserve(m_pImpl->actorOrderedNodes.size());
     for (const auto& actor : m_pImpl->actorOrderedNodes) {
-        ModuleSnapshot module;
-        module.name = actor->GetModuleName();
-        module.processedTotal = actor->ProcessedCount();
-        module.droppedTotal = actor->DroppedCount();
-        module.fusionExpiredTotal = actor->FusionExpiredCount();
-        module.failedTotal = actor->FailedCount();
-        metrics.modules.push_back(std::move(module));
+        metrics.modules.push_back(TakeModuleSnapshot(*actor));
     }
     return metrics;
 }

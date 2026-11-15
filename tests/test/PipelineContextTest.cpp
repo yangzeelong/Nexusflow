@@ -242,6 +242,40 @@ TEST(PipelineContextTest, UnknownMetricHandleIsIgnored) {
     EXPECT_TRUE(context.GetReportedMetrics().empty());
 }
 
+// The read side has three shapes: copy everything, ask how many, or visit each
+// one under a single lock. All three must agree, including after a metric was
+// added while a handle was already handed out.
+TEST(PipelineContextTest, MetricReadersAgreeWithEachOther) {
+    PipelineContext context("reader-test");
+    const PipelineContext::MetricHandle first = context.Intern("mod.first");
+    context.Record(first, 1.0);
+    context.Record(first, 3.0);
+    const PipelineContext::MetricHandle second = context.Intern("mod.second");
+    context.Record(second, 5.0);
+
+    EXPECT_EQ(context.GetReportedMetricCount(), std::size_t(2));
+
+    const std::vector<PipelineContext::Metric> copied = context.GetReportedMetrics();
+    ASSERT_EQ(copied.size(), std::size_t(2));
+
+    std::size_t visited = 0;
+    context.ForEachMetric([&](const PipelineContext::Metric& metric) {
+        ASSERT_LT(visited, copied.size());
+        EXPECT_EQ(metric.name, copied[visited].name);
+        EXPECT_EQ(metric.samples, copied[visited].samples);
+        EXPECT_DOUBLE_EQ(metric.total, copied[visited].total);
+        ++visited;
+    });
+    EXPECT_EQ(visited, copied.size());
+
+    const PipelineContext::Metric* byHandle = context.FindMetric(first);
+    ASSERT_NE(byHandle, nullptr);
+    EXPECT_EQ(byHandle->name, "mod.first");
+    EXPECT_DOUBLE_EQ(byHandle->Average(), 2.0);
+    EXPECT_EQ(context.FindMetric(PipelineContext::MetricHandle(0)), nullptr);
+    EXPECT_EQ(context.FindMetric(PipelineContext::MetricHandle(99)), nullptr);
+}
+
 TEST(PipelineContextTest, StopRequestsTheStopToken) {
     ScopedGlobalSink quiet(std::make_shared<NullSink>());
     auto source = std::make_shared<ContextSourceModule>("context-source");    auto sink = std::make_shared<ContextSinkModule>("context-sink");

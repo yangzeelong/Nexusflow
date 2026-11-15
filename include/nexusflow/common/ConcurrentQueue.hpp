@@ -33,7 +33,7 @@ public:
     /**
      * @brief Snapshot of the queue size and its lifetime counters.
      */
-    struct Stats {
+    struct QueueCounters {
         std::size_t size = 0;
         std::size_t capacity = 0; // 0 means unbounded
         std::size_t highWaterMark = 0;
@@ -44,15 +44,15 @@ public:
     /**
      * @brief Returns a consistent snapshot, sampled under the queue lock.
      */
-    Stats GetStats() const {
+    QueueCounters GetStats() const {
         std::lock_guard<std::mutex> lock(m_mutex);
-        Stats stats;
-        stats.size = m_queue.size();
-        stats.capacity = m_capacity < 0 ? 0 : static_cast<std::size_t>(m_capacity);
-        stats.highWaterMark = m_highWaterMark;
-        stats.pushed = m_pushed;
-        stats.popped = m_popped;
-        return stats;
+        QueueCounters counters;
+        counters.size = m_queue.size();
+        counters.capacity = m_capacity < 0 ? 0 : static_cast<std::size_t>(m_capacity);
+        counters.highWaterMark = m_highWaterMark;
+        counters.pushed = m_pushed;
+        counters.popped = m_popped;
+        return counters;
     }
 
     /**

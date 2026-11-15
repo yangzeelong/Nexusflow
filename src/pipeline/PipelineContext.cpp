@@ -62,6 +62,22 @@ std::vector<PipelineContext::Metric> PipelineContext::GetReportedMetrics() const
     return m_metrics;
 }
 
+std::size_t PipelineContext::GetReportedMetricCount() const {
+    std::lock_guard<std::mutex> lock(m_metricsMutex);
+    return m_metrics.size();
+}
+
+const PipelineContext::Metric* PipelineContext::FindMetric(MetricHandle handle) const {
+    if (handle == 0) {
+        return nullptr;
+    }
+    std::lock_guard<std::mutex> lock(m_metricsMutex);
+    if (handle > m_metrics.size()) {
+        return nullptr;
+    }
+    return &m_metrics[static_cast<std::size_t>(handle - 1)];
+}
+
 void PipelineContext::RequestStop() { m_stopRequested.store(true, std::memory_order_relaxed); }
 
 bool PipelineContext::StopRequested() const { return m_stopRequested.load(std::memory_order_relaxed); }
