@@ -49,6 +49,10 @@ struct QueueMetrics {
 struct ModuleMetrics {
     std::string name;
     std::uint64_t processed = 0;
+    /// Messages this module's invocations failed to hand to a downstream queue,
+    /// plus partial fused messages dropped after the fusion timeout. Together
+    /// with the processed count this accounts for everything a module saw.
+    std::uint64_t dropped = 0;
 };
 
 /**
@@ -94,6 +98,9 @@ private:
     Pipeline();
 
     ErrorCode InitWithGraph(std::unique_ptr<Graph> graph);
+
+    // Fills `order` with one valid "sinks first, sources last" stage order.
+    void BuildStopOrder(std::vector<std::string>& order) const;
 
     class Impl;
     std::unique_ptr<Impl> m_pImpl;

@@ -210,11 +210,30 @@ public:
     }
 
     /**
+     * @brief Reopens a shut-down queue, discarding anything still buffered.
+     * Only safe while no thread is using the queue.
+     */
+    void restart() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_shutdown = false;
+        std::queue<T> empty;
+        m_queue.swap(empty);
+    }
+
+    /**
      * @brief Checks if the queue is currently empty.
      */
     bool isEmpty() const {
         std::lock_guard<std::mutex> lock(m_mutex);
         return m_queue.empty();
+    }
+
+    /**
+     * @brief True once shutdown() was called; no further pushes are accepted.
+     */
+    bool isShutdown() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_shutdown;
     }
 
     /**

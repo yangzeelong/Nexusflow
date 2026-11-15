@@ -16,8 +16,8 @@ void Dispatcher::Broadcast(const Message& message) {
         // Apply backpressure instead of silently dropping frames when a
         // downstream inference module is slower than the source. A false return
         // value means the queue was shut down while we were broadcasting.
-        if (!subscriber->push(message)) {
-            LOG_WARN("Broadcast to output queue {} failed: the queue is shut down", pair.first);
+        if (!PushTo(subscriber, message)) {
+            RecordDroppedPush(pair.first);
         }
     }
 }
@@ -29,13 +29,13 @@ void Dispatcher::Broadcast(Message&& message) {
     auto it = m_subscriberMap.begin();
     const auto last = std::prev(m_subscriberMap.end());
     for (; it != last; ++it) {
-        if (!it->second->push(message)) {
-            LOG_WARN("Broadcast to output queue {} failed: the queue is shut down", it->first);
+        if (!PushTo(it->second, message)) {
+            RecordDroppedPush(it->first);
         }
     }
     // The last subscriber takes ownership of the message instead of copying it.
-    if (!last->second->push(std::move(message))) {
-        LOG_WARN("Broadcast to output queue {} failed: the queue is shut down", last->first);
+    if (!PushTo(last->second, std::move(message))) {
+        RecordDroppedPush(last->first);
     }
 }
 
@@ -45,8 +45,8 @@ bool Dispatcher::SendTo(const std::string& outputName, const Message& msg) {
         LOG_WARN("SendTo failed: output queue {} does not exist", outputName);
         return false;
     }
-    if (!it->second->push(msg)) {
-        LOG_WARN("SendTo output queue {} failed: the queue is shut down", outputName);
+    if (!PushTo(it->second, msg)) {
+        RecordDroppedPush(outputName);
         return false;
     }
     return true;

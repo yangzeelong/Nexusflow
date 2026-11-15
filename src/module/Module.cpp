@@ -40,6 +40,19 @@ ErrorCode Module::DeInit() {
     return ErrorCode::SUCCESS;
 }
 
+void Module::DiscardPendingOutputs() {
+    if (m_pendingOutputs.empty() && !m_processing) {
+        return;
+    }
+    if (!m_pendingOutputs.empty()) {
+        LOG_WARN("Module '{}' discards {} output(s) that a stopped run never dispatched.", m_moduleName,
+                 m_pendingOutputs.size());
+    }
+    m_pendingOutputs.clear();
+    m_activeInputTimingMs.clear();
+    m_processing = false;
+}
+
 void Module::ProcessBatch(std::vector<Message>& inputBatchMessages) {
     // Process the batch of input messages.
     LOG_DEBUG("Module '{}' processing batch of {} messages.", m_moduleName, inputBatchMessages.size());
