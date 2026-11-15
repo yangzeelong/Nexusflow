@@ -222,8 +222,11 @@ std::cout << snapshot.ToString() << std::endl;   // one line, greppable
 ```
 
 An edge reports `capacity == 0` when it is unbounded, and `maxSize` is the deepest
-backlog observed so far. `ResetMetrics()` clears the water marks and the counters
-without touching the queues.
+backlog observed so far. `ResetMetrics()` clears only those water marks: the
+`*Total` counters are cumulative for the life of the pipeline and never go back, so
+differencing two snapshots stays a rate. The modules are read before the edges, so a
+reader can take a module and then the edge it writes into without seeing a message
+that left the module but has not reached the edge yet.
 
 ## Pipeline Context
 
@@ -248,10 +251,11 @@ const bool stopping = context->StopRequested();
   not change.
 - `Intern` resolves a metric name to a handle and `Record` adds a sample to it,
   accumulating `samples`, `total` and `last`. Holding the handle keeps the hot path
-  to one map lookup instead of hashing a string per sample;
-  `Record(name, value)` is the convenient form. Read the samples back with
-  `GetReportedMetrics()`, and `Pipeline::GetSnapshot()` reports the framework edges
-  and module counters.
+  to one vector index instead of hashing a string per sample; `Record(name, value)`
+  is the convenient form. Read the samples back with `GetReportedMetrics()`, which
+  copies the list; `GetReportedMetricCount()`, `FindMetric(handle)` and
+  `ForEachMetric(fn)` let a poller walk them without that copy.
+  `Pipeline::GetSnapshot()` reports the framework edges and module counters.
 - Metric names are prefixed with the module name (`"detect.frames"`), because the
   context is shared by the whole pipeline and a bare `"latency"` from two modules
   would be indistinguishable.

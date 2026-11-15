@@ -113,7 +113,7 @@ TEST(SpscQueueTest, StatsTrackCountersAndCapacity) {
     int value = 0;
     ASSERT_TRUE(queue.tryPop(value));
 
-    const SpscQueue<int>::Stats stats = queue.GetStats();
+    const SpscQueue<int>::QueueCounters stats = queue.GetStats();
     EXPECT_EQ(stats.size, 2u);
     EXPECT_EQ(stats.capacity, 3u);
     EXPECT_EQ(stats.highWaterMark, 3u);
@@ -132,7 +132,7 @@ TEST(SpscQueueTest, UnboundedCapacityFallsBackToTheLockedQueue) {
         ASSERT_TRUE(queue.tryPop(value));
         EXPECT_EQ(value, i);
     }
-    const SpscQueue<int>::Stats stats = queue.GetStats();
+    const SpscQueue<int>::QueueCounters stats = queue.GetStats();
     EXPECT_EQ(stats.capacity, 0u);
     EXPECT_EQ(stats.size, 0u);
 }
