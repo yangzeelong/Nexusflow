@@ -48,6 +48,13 @@ public:
     PipelineBuilder& Connect(const std::string& srcModuleName, const std::string& dstModuleName);
 
     /**
+     * @brief Sets the capacity of the per-edge queues created for this pipeline.
+     * @param capacity Maximum in-flight messages per edge; non-positive values are ignored.
+     * @return A reference to this builder for chaining.
+     */
+    PipelineBuilder& SetMessageQueueCapacity(int capacity);
+
+    /**
      * @brief Builds the Pipeline instance from the defined configuration.
      * This method consumes the builder. After calling build(), the builder
      * will be in an invalid state.

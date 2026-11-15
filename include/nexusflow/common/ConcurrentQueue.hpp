@@ -5,6 +5,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -29,6 +30,31 @@ public:
      */
     explicit ConcurrentQueue(int capacity = -1) : m_capacity(capacity), m_shutdown(false) {}
 
+    /**
+     * @brief Snapshot of the queue size and its lifetime counters.
+     */
+    struct Stats {
+        std::size_t size = 0;
+        std::size_t capacity = 0; // 0 means unbounded
+        std::size_t highWaterMark = 0;
+        std::uint64_t pushed = 0;
+        std::uint64_t popped = 0;
+    };
+
+    /**
+     * @brief Returns a consistent snapshot, sampled under the queue lock.
+     */
+    Stats GetStats() const {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        Stats stats;
+        stats.size = m_queue.size();
+        stats.capacity = m_capacity < 0 ? 0 : static_cast<std::size_t>(m_capacity);
+        stats.highWaterMark = m_highWaterMark;
+        stats.pushed = m_pushed;
+        stats.popped = m_popped;
+        return stats;
+    }
+
     // Disable copy and move semantics to ensure a single owner.
     ConcurrentQueue(const ConcurrentQueue&) = delete;
     ConcurrentQueue& operator=(const ConcurrentQueue&) = delete;
@@ -48,8 +74,7 @@ public:
             return false;
         }
 
-        m_queue.push(std::move(item));
-        m_condNotEmpty.notify_one();
+        PushLocked(std::move(item));
         return true;
     }
 
@@ -75,8 +100,7 @@ public:
             return false;
         }
         if (m_shutdown) return false;
-        m_queue.push(std::move(item));
-        m_condNotEmpty.notify_one();
+        PushLocked(std::move(item));
         return true;
     }
 
@@ -98,8 +122,7 @@ public:
             return false;
         }
 
-        m_queue.push(std::move(item));
-        m_condNotEmpty.notify_one();
+        PushLocked(std::move(item));
         return true;
     }
 
@@ -125,9 +148,7 @@ public:
             return false;
         }
         if (m_shutdown && m_queue.empty()) return false;
-        itemRef = std::move(m_queue.front());
-        m_queue.pop();
-        m_condNotFull.notify_one();
+        itemRef = PopLocked();
         return true;
     }
 
@@ -146,9 +167,7 @@ public:
             return false;
         }
 
-        itemRef = std::move(m_queue.front());
-        m_queue.pop();
-        m_condNotFull.notify_one();
+        itemRef = PopLocked();
         return true;
     }
 
@@ -162,10 +181,7 @@ public:
         if (m_queue.empty()) {
             return nullOpt;
         }
-        T item = std::move(m_queue.front());
-        m_queue.pop();
-        m_condNotFull.notify_one();
-        return item;
+        return PopLocked();
     }
 
     /**
@@ -178,9 +194,7 @@ public:
         if (m_queue.empty()) {
             return false;
         }
-        itemRef = std::move(m_queue.front());
-        m_queue.pop();
-        m_condNotFull.notify_one();
+        itemRef = PopLocked();
         return true;
     }
 
@@ -222,11 +236,37 @@ private:
         return m_queue.size() >= static_cast<size_t>(m_capacity);
     }
 
+    /**
+     * @brief Pushes an item and updates the counters. Caller must hold m_mutex.
+     */
+    void PushLocked(T&& item) {
+        m_queue.push(std::move(item));
+        ++m_pushed;
+        if (m_queue.size() > m_highWaterMark) {
+            m_highWaterMark = m_queue.size();
+        }
+        m_condNotEmpty.notify_one();
+    }
+
+    /**
+     * @brief Pops an item and updates the counters. Caller must hold m_mutex.
+     */
+    T PopLocked() {
+        T item = std::move(m_queue.front());
+        m_queue.pop();
+        ++m_popped;
+        m_condNotFull.notify_one();
+        return item;
+    }
+
 private:
     mutable std::mutex m_mutex;
     std::condition_variable m_condNotEmpty;
     std::condition_variable m_condNotFull;
     std::queue<T> m_queue;
+    std::uint64_t m_pushed = 0;
+    std::uint64_t m_popped = 0;
+    std::size_t m_highWaterMark = 0;
     const int m_capacity;
     bool m_shutdown;
 };

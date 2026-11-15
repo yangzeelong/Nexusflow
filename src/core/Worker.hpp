@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -67,6 +68,12 @@ public:
 
     void WorkLoop();
 
+    /**
+     * @brief Number of messages this worker has processed so far.
+     * A source invocation that produced output counts one; batches count their size.
+     */
+    std::uint64_t ProcessedCount() const { return m_processedCount.load(std::memory_order_relaxed); }
+
 private:
     /**
      * @brief Reads the per-module tuning knobs (batch size/timeout, fusion timeout,
@@ -102,6 +109,7 @@ private:
     std::unordered_map<std::string, ViewPtr<MessageQueue>> m_inputQueueMap;
 
     std::atomic<bool> m_stopFlag{false};
+    std::atomic<std::uint64_t> m_processedCount{0};
 
     // Per-module tuning, resolved once in LoadConfig().
     std::size_t m_maxBatchSize = 4;

@@ -4,6 +4,8 @@
 #include <nexusflow/Pipeline.hpp>
 #include <nexusflow/PipelineBuilder.hpp>
 
+#include "pipeline/impl/PipelineImpl.hpp"
+
 #include <memory>
 #include <string>
 #include <utility>
@@ -18,6 +20,7 @@ class PipelineBuilder::Impl {
 public:
     std::vector<std::shared_ptr<Module>> modules;
     std::vector<std::pair<std::string, std::string>> connections;
+    int queueCapacity = kDefaultMessageQueueCapacity;
 };
 
 // --- PipelineBuilder's Public Methods ---
@@ -41,6 +44,13 @@ PipelineBuilder& PipelineBuilder::AddModule(const std::shared_ptr<Module>& modul
 PipelineBuilder& PipelineBuilder::Connect(const std::string& srcModuleName, const std::string& dstModuleName) {
     if (m_pImpl && !srcModuleName.empty() && !dstModuleName.empty()) {
         m_pImpl->connections.emplace_back(srcModuleName, dstModuleName);
+    }
+    return *this;
+}
+
+PipelineBuilder& PipelineBuilder::SetMessageQueueCapacity(int capacity) {
+    if (m_pImpl && capacity > 0) {
+        m_pImpl->queueCapacity = capacity;
     }
     return *this;
 }
@@ -104,6 +114,7 @@ std::unique_ptr<Pipeline> PipelineBuilder::Build() {
 
     // --- Step 5: Create the Pipeline from the fully constructed Graph ---
     auto pipeline = std::unique_ptr<Pipeline>(new Pipeline());
+    pipeline->m_pImpl->messageQueueCapacity = m_pImpl->queueCapacity;
     const ErrorCode code = pipeline->InitWithGraph(std::move(graph));
 
     m_pImpl.reset(); // Consume the builder
