@@ -111,4 +111,39 @@ TEST(ConcurrentQueueTest, PushForTimesOutWhenQueueStaysFull) {
     EXPECT_EQ(queue.getSize(), 1u);
 }
 
+// The locked fallback has to behave the same as SpscQueue: clear() destroys what
+// is buffered, charges it to discardedTotal, and keeps the shut-down state.
+TEST(ConcurrentQueueTest, ClearDiscardsAndKeepsTheIdentity) {
+    ConcurrentQueue<int> queue(4);
+    ASSERT_TRUE(queue.push(1));
+    ASSERT_TRUE(queue.push(2));
+    ASSERT_TRUE(queue.push(3));
+
+    auto taken = queue.tryPop();
+    ASSERT_TRUE(taken.hasValue());
+
+    queue.clear();
+    const auto counters = queue.GetStats();
+    EXPECT_EQ(counters.size, std::size_t(0));
+    EXPECT_EQ(counters.pushed, static_cast<std::uint64_t>(3));
+    EXPECT_EQ(counters.popped, static_cast<std::uint64_t>(1));
+    EXPECT_EQ(counters.discardedTotal, static_cast<std::uint64_t>(2));
+    EXPECT_EQ(counters.pushed, counters.popped + counters.size + counters.discardedTotal);
+}
+
+TEST(ConcurrentQueueTest, ClearKeepsTheQueueClosed) {
+    ConcurrentQueue<int> queue(4);
+    ASSERT_TRUE(queue.push(1));
+    queue.shutdown();
+
+    queue.clear();
+    EXPECT_EQ(queue.getSize(), 0u);
+    EXPECT_TRUE(queue.isShutdown()) << "clear() reopened the queue; restart() is the call that does that";
+    EXPECT_FALSE(queue.push(2));
+
+    queue.restart();
+    EXPECT_FALSE(queue.isShutdown());
+    EXPECT_TRUE(queue.push(3));
+}
+
 } // namespace

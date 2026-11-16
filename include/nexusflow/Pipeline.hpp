@@ -54,7 +54,37 @@ public:
      */
     ErrorCode Start();
 
+    /**
+     * @brief Stops the pipeline and delivers whatever is still queued.
+     *
+     * @details The stages are torn down producers-first: a stage is joined once
+     * every stage that feeds it is joined and its output edges are closed, so it
+     * gets to process the whole backlog it was handed before its own stop
+     * request arrives. Every edge is empty when this returns, and
+     * EdgeSnapshot::discardedTotal does not move.
+     *
+     * Blocking, with no budget: it returns when every worker thread has exited.
+     * A module whose Process() does not return therefore hangs it -- a module
+     * owns its own call, and a framework that guessed a deadline for it would be
+     * reporting a timeout it cannot act on.
+     *
+     * The pipeline stays usable: Start() runs it again.
+     */
     ErrorCode Stop();
+
+    /**
+     * @brief Stops the pipeline now, discarding whatever is still queued.
+     *
+     * @details The counterpart of Stop(). Every stage is told to stop at once and
+     * every edge is closed, so a worker parked in a blocking push or pull returns
+     * immediately instead of waiting for the backlog to drain. What was still
+     * buffered is destroyed and counted in EdgeSnapshot::discardedTotal; no
+     * module counter is charged for it.
+     *
+     * Blocking on the same terms as Stop(): it returns when every worker thread
+     * has exited. The pipeline stays usable: Start() runs it again.
+     */
+    ErrorCode Cancel();
 
     ErrorCode DeInit();
 

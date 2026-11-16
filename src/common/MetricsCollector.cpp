@@ -154,7 +154,7 @@ MetricSamples MetricsCollector::MakeStats(const std::string& name,
     stats.file = aggregate.file;
     stats.line = aggregate.line;
     // The percentiles live in the window, so the sample carries the window's
-    // size and span: a p99 over ¾m20 items is the slowest of 20, not a tail.
+    // size and span: a p99 over 20 items is the slowest of 20, not a tail.
     stats.windowItems = static_cast<std::uint64_t>(aggregate.recent.values.size());
     stats.windowSpanMs = aggregate.recent.SpanMs();
     return stats;

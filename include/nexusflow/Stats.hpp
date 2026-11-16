@@ -37,6 +37,15 @@ struct EdgeSnapshot {
     std::uint64_t pushedTotal = 0;
     /// Messages popped out of this edge.
     std::uint64_t poppedTotal = 0;
+    /// Messages destroyed by Pipeline::Cancel() before a consumer took them.
+    ///
+    /// Charged to the edge and never to a module's droppedTotal: the producer
+    /// counted the message as processed and pushed, and no consumer ever popped
+    /// it, so either module would be counting somebody else's loss.
+    ///
+    /// pushedTotal == poppedTotal + size + discardedTotal always holds; a Stop()
+    /// drains everything and leaves discardedTotal where it was.
+    std::uint64_t discardedTotal = 0;
 
     /// "from -> to", the name a profile and a log line use.
     std::string Name() const { return from + " -> " + to; }

@@ -13,7 +13,6 @@ ModuleActor::ModuleActor(const std::shared_ptr<Module>& module, const Config& co
     m_module = module;
     m_module->AttachContext(context);
     m_worker = std::make_shared<core::Worker>(m_module, configView, context);
-    m_syncInputs = m_worker->HasSyncInputs();
 
     ViewPtr<Module> moduleView{m_module.get()};
     m_dispatcher = std::make_shared<dispatcher::Dispatcher>(configView);
@@ -26,21 +25,12 @@ ModuleActor::~ModuleActor() {
     // without Stop() would call std::terminate from ~std::thread, which is
     // exactly what happens when a Pipeline is dropped while running.
     //
-    // A thread that already overran its stop budget is deliberately *not* detached
-    // here. Detaching would hide a module that never finished what it was handed,
-    // so the destructor waits for it instead -- and says so before it starts, so a
-    // hang is attributable to the module that caused it rather than looking like a
-    // framework deadlock.
+    // The destructor waits rather than detaching: a detached worker would keep
+    // touching this module (and its queues) after the owner is gone, and a hang
+    // here is attributable to the module that caused it rather than looking like
+    // a framework deadlock.
     if (m_workThread.joinable()) {
-        if (m_stopOverdue) {
-            LOG_ERROR("ModuleActor '{}' is being destroyed while a worker thread that already overran its stop budget "
-                      "is still running; waiting for it to return. A module whose Process() never returns cannot be "
-                      "torn down.",
-                      GetModuleName());
-        } else {
-            LOG_WARN("ModuleActor '{}' destroyed while its worker thread was still running; stopping it.",
-                     GetModuleName());
-        }
+        LOG_WARN("ModuleActor '{}' destroyed while its worker thread was still running; stopping it.", GetModuleName());
         Stop();
     }
 }
@@ -54,9 +44,9 @@ ErrorCode ModuleActor::Start() {
         LOG_WARN("ModuleActor '{}' is already started.", GetModuleName());
         return ErrorCode::FAILED_ALREADY_START;
     }
-    // A run that StopAndJoinWithin() had to abandon leaves its worker loop
-    // running for good: starting a second loop over the same worker state would
-    // interleave two runs in one thread-local pipeline.
+    // A run whose worker loop has not returned yet must not be started again:
+    // two loops over the same worker state would interleave in one thread-local
+    // pipeline.
     if (m_worker && m_worker->IsRunning()) {
         LOG_ERROR("Module '{}' cannot start again while its previous worker loop is still running.", GetModuleName());
         return ErrorCode::FAILED_ALREADY_START;
@@ -87,31 +77,6 @@ ErrorCode ModuleActor::Stop() {
     }
     m_workThread.join();
     return ErrorCode::SUCCESS;
-}
-
-bool ModuleActor::StopAndJoinWithin(std::chrono::milliseconds timeout) {
-    m_worker->Stop();
-    if (!m_workThread.joinable()) {
-        LOG_TRACE("ModuleActor '{}' is already stopped.", GetModuleName());
-        return true;
-    }
-
-    // Give the loop a deadline instead of blocking the caller. A thread that is
-    // stuck in a long call cannot be stopped from outside, and waiting on it
-    // unconditionally would turn one wedged module into a wedged pipeline.
-    const bool exited = m_worker->WaitForStopRequest(timeout);
-    if (!exited) {
-        // Deliberately not joined: leaving a joinable std::thread behind and
-        // letting it unwind at process exit keeps whatever the module is still
-        // touching alive. It is reported as a drain timeout instead.
-        m_stopOverdue = true;
-        LOG_ERROR("Module '{}' did not leave its worker loop within {} ms of the stop request; "
-                  "abandoning its thread.",
-                  GetModuleName(), static_cast<long long>(timeout.count()));
-        return false;
-    }
-    m_workThread.join();
-    return true;
 }
 
 } // namespace nexusflow

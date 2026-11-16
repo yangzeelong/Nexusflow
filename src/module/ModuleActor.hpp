@@ -66,19 +66,6 @@ public:
     ErrorCode Stop();
 
     /**
-     * @brief Requests the stop and gives the worker a bounded time to leave its
-     *        loop, then joins it.
-     * @details Pipeline::Stop() uses this during the graceful drain. Joining
-     * unconditionally wedges the whole pipeline when a module parks in a call it
-     * cannot leave quickly (a blocking read, a fusion wait), because that one
-     * stage then stalls every stage around it along with the caller.
-     * @param timeout Upper bound to wait for the loop to return.
-     * @return true when the loop left on its own, false when the join had to wait
-     *         out the timeout and it had to be abandoned.
-     */
-    bool StopAndJoinWithin(std::chrono::milliseconds timeout);
-
-    /**
      * @brief Tells the worker loop to return, without joining it yet.
      */
     void RequestStop() {
@@ -110,17 +97,10 @@ public:
      */
     bool IsStarted() const { return m_workThread.joinable(); }
 
-    /// True when the last stop abandoned this module's thread because it did not
-    /// leave its loop within the stop budget. The thread stays joinable, so
-    /// Pipeline::Start() refuses to reopen its edges, and ~ModuleActor waits for it
-    /// rather than detaching. Exposed so a caller can report which module it was.
-    bool IsStopOverdue() const { return m_stopOverdue; }
-
     /**
      * @brief Whether the worker of a previous run is still executing.
-     * @details A joined worker reports false. This stays true after
-     * StopAndJoinWithin() gave up on a module, which is exactly the state in
-     * which the module must not be started a second time.
+     * @details A joined worker reports false, which is the state
+     * Pipeline::Start() requires before it reopens the edges.
      */
     bool IsWorkerRunning() const { return m_worker && m_worker->IsRunning(); }
 
@@ -156,14 +136,15 @@ public:
      * producers upstream have stopped, an empty input queue means this module
      * has taken everything it was going to take. Returns immediately for a
      * module without inputs (a source has nothing to drain).
-     * @param timeout Upper bound for the whole wait, shared across the queues.
-     * @return true when every input queue emptied in time.
+     *
+     * There is no deadline on purpose: the producers are already joined, so the
+     * only thing between this call and an empty queue is this module's own
+     * consumer loop, which Stop() has not stopped yet.
      */
-    bool WaitForInputsDrained(std::chrono::milliseconds timeout) {
-        if (!m_worker) {
-            return true;
+    void WaitForInputsDrained() {
+        if (m_worker) {
+            m_worker->WaitForInputsDrained();
         }
-        return m_worker->WaitForInputsDrained(timeout);
     }
 
     /**
@@ -178,32 +159,9 @@ public:
         return m_dispatcher->GetOutputQueues();
     }
 
-    /**
-     * @brief How long this module's worker can sit in a single blocking pull.
-     * @details The drain in Pipeline::Stop() has to outlast this, otherwise a
-     * stage that is merely between two pulls looks like it is still holding
-     * work that will never be processed.
-     */
-    std::chrono::milliseconds BlockingTime() const {
-        if (!m_worker) {
-            return std::chrono::milliseconds(0);
-        }
-        if (m_syncInputs) {
-            return m_worker->FusionTimeout();
-        }
-        if (m_worker->IsSource()) {
-            return m_worker->SourceIdleTime();
-        }
-        return m_worker->BatchTimeout();
-    }
-
 private:
     std::shared_ptr<core::Worker>& GetWorker() { return m_worker; }
     std::shared_ptr<dispatcher::Dispatcher>& GetDispatcher() { return m_dispatcher; }
-
-    bool m_syncInputs = false;
-    /// Set when the drain gave up on this worker; it still runs, untouched.
-    bool m_stopOverdue = false;
 
     std::shared_ptr<Module> m_module;
     std::shared_ptr<core::Worker> m_worker;
