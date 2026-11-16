@@ -231,6 +231,135 @@ cmake --build build\perf-probe\build --config Release --target pipeline_benchmar
 
 ---
 
+## 待实现：两种停止语义（`StopMode`）
+
+目标是把「怎么关流水线」变成两个明确的选择，而不是一个永远排空的 `Stop()`。
+
+| 语义 | 行为 |
+| --- | --- |
+| **Graceful**（正常关闭，现有行为） | 不再接收新数据；按拓扑顺序把积压处理完再退出；可给每个阶段一个超时上限 |
+| **Immediate**（强制关闭） | 不再接收新数据；积压**直接丢弃**、不处理；边被清空，丢弃数记在边上 |
+
+现状：Graceful 已由 PR #22 实现（生产者优先、逐阶段排空），但**超时值硬编码**在
+`PipelineImpl.hpp`（`drainTimeout{5000}`、`stopTimeout{2000}`），调用方改不了；
+Immediate **完全没有**——`Stop()` 永远排空，队列也没有「丢弃但保持关闭」的方法。
+
+### 公开 API（只加这几个）
+
+```cpp
+// include/nexusflow/Pipeline.hpp
+enum class StopMode { Graceful, Immediate };
+ErrorCode Stop(StopMode mode = StopMode::Graceful);   // 默认值保持现有调用不变
+
+// include/nexusflow/PipelineBuilder.hpp —— 只有一个参数，名字就叫 timeout
+PipelineBuilder& WithStopTimeout(std::chrono::milliseconds timeout);
+```
+
+`timeout` 是**每个阶段的总预算**：先拿它去排空，剩下的时间用来让线程退出；排空吃光预算时
+留一个固定小宽限（200 ms）再 join，避免一到点就放弃线程。
+
+`timeout` 的取值约定：
+
+- 正数：每阶段最多等这么久；
+- `0`：不等，直接走强制路径；
+- 负数：**拒绝**（`Stop()` 返回失败），不要悄悄当成「无限」——无限等待与
+  `StopAndJoinWithin` 注释里那条设计原则直接冲突（一个卡住的模块会把整条流水线拖住）。
+
+YAML 侧对应可选键（与 `graph.messageQueueCapacity` 同级）：`graph.stopTimeoutMs`。
+
+### 容器：三件套，各管一件事
+
+| 方法 | 丢弃残留？ | 改变关闭状态？ |
+| --- | --- | --- |
+| `shutdown()` | 否 | 置为已关闭 |
+| `clear()` | **是** | 否（关着还是关着，开着还是开着） |
+| `restart()` | 是 | 置为已打开（`Start` 用） |
+
+`clear()` 要同时加到 `SpscQueue` 与 `ConcurrentQueue`，否则走 fallback 分支时行为不一致。
+实现上直接复用 PR #21 修好的残留析构逻辑（先逐个 `~T()` 再归零索引）。
+
+**不要叫 `discardAll()`**：丢弃是 pipeline 停机时的决定，不是容器的职责；容器只说
+"clear"。
+
+### 计数与不变式
+
+`EdgeSnapshot` 增加一个累计字段：
+
+```cpp
+std::uint64_t discardedTotal = 0;   // 被强制停止丢弃的消息数；只在 Immediate 下增长
+```
+
+放边上而不是模块上：丢的是边里的数据，不属于任何模块。
+
+**不变式**（必须写成用例）：
+
+```
+pushedTotal == poppedTotal + size + discardedTotal
+```
+
+实现建议：让队列自己记——`QueueCounters` 加 `discardedTotal`，`clear()` 把丢弃条数累加进去，
+`GetStats()` 一并返回，`EdgeSnapshot` 直接透传。这样丢弃数与 `pushed`/`popped` 同源，
+不变式天然成立，不需要上层另行推算。
+
+**不要**把 discarded 记进任何模块的 `droppedTotal`：生产者已经把它算进 `processedTotal` +
+`pushedTotal`，消费者从未 pop 过它，记给谁都是重复计账（这一点在 PR #21 已经踩过一次，
+见 `ProcessedDroppedAndFailedAccountForEveryMessage` 与
+`StopAccountsForMessagesTheDispatcherCouldNotPush`）。
+
+### 内部改动清单
+
+| 文件 | 改什么 |
+| --- | --- |
+| `include/nexusflow/Pipeline.hpp` | 加 `StopMode` 枚举；`Stop(StopMode = Graceful)` |
+| `include/nexusflow/PipelineBuilder.hpp` / `src/builder/PipelineBuilder.cpp` | 加 `WithStopTimeout(timeout)` |
+| `include/nexusflow/Stats.hpp` | `EdgeSnapshot::discardedTotal` + 注释 |
+| `include/nexusflow/common/SpscQueue.hpp` | `clear()`；`QueueCounters` 加 `discardedTotal`；`GetStats()` 透传 |
+| `include/nexusflow/common/ConcurrentQueue.hpp` | 同上（fallback 路径） |
+| `src/pipeline/impl/PipelineImpl.hpp` | 删除 `drainTimeout`，只留一个 `stopTimeout`（由 builder 设置，默认 5000 ms） |
+| `src/pipeline/Pipeline.cpp` | `Stop(mode)` 分两支：Graceful = 现有 PR #22 逻辑（预算改用 `stopTimeout`）；Immediate = 全阶段 `RequestStop` → 所有边 `shutdown()` → 有预算 join → 每条边 `clear()` |
+| `src/base/GraphUtils.cpp` | yaml 可选键 `graph.stopTimeoutMs` |
+| `AGENTS.md` §3 / §5 | 用例数与不变式同步 |
+
+### 测试清单
+
+1. **Immediate 丢弃**：源发 N 条到慢 sink，`Stop(Immediate)` 后：sink 收到 < N；
+   每条边 `size == 0`；`pushedTotal == poppedTotal + size + discardedTotal`；
+   且没有任何模块的 `processed`/`dropped`/`failed` 因这批消息而变化。
+2. **Graceful 全量送达**：已由 `PipelineDrainTest` 覆盖，无需重复。
+3. **超时上限生效**：sink 极慢 + 很小的 `timeout`，断言 `Stop(Graceful)` 在
+   `timeout` + 宽限附近返回，残留仍可见（`size > 0` 或 `discardedTotal` 为 0 但 size 非 0）。
+4. **`timeout == 0`**：等价于不排空，直接走强制路径。
+5. **负数 `timeout`**：被拒绝，返回失败。
+6. **`clear()` 单测**：清空后 `size == 0`、`isShutdown()` 仍为真、再 push 失败；
+   随后 `restart()` 能正常 push。
+7. **Discard 后再 Start**：`Stop(Immediate)` → `Start()` → 新消息照常流动（边被 `clear()`
+   过但仍可 `restart()`）。
+
+### 验证命令
+
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ...   -> exit 0
+cmake --build build --config Release --parallel 16   -> exit 0
+build\tests\Release\nexusflow_tests.exe              -> 全绿
+git diff --stat 与 --git diff --stat --ignore-cr-at-eol -> 一致
+```
+
+### 别重犯的坑
+
+- **不要让 worker 自行退出**（"输入全关且取空就 break"）：与一次已通过 shutdown 检查的
+  在途 push 竞态，那条消息落地时消费者已退出。实测把 55 ms 的用例拖成 5140 ms。
+- **源必须「先关输出边、再 join」**：下游若是从不消费的 sink，源会永久卡在 push 里。
+- **恢复备份文件后要 touch**：`Copy-Item` 保留旧时间戳会让 MSBuild 认为头文件比 obj 还旧，
+  从而不重新编译，跑的还是旧二进制。
+- **不要为了让测试通过而改测试语义**（`AGENTS.md` §6.4）。
+
+### 不在本次范围
+
+- `Result` / Containers 家族化（见上一节）。
+- 线程池、join 热路径优化（见 §P1）。
+
+---
+
 ## 已知小问题（不影响 1.0.0）
 
 - `src/common/MetricsCollector.cpp:157` 注释里有一个损坏字符（`p99 over ...m20 items`），
