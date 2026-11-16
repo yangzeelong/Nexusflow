@@ -267,3 +267,69 @@ TEST(WorkerBehaviorTest, SourceThatBlocksDoesNotGetASecondWait) {
     ASSERT_GE(silent, 0);
     EXPECT_LT(blocked, silent);
 }
+
+namespace {
+
+// The loop thread owns these counters, but RecordDropped()/RecordFailed() exist so
+// a second thread can report too. That has to be both accurate and detectable: the
+// counters used to be plain integers incremented behind a fence pair, so a second
+// writer raced the loop and lost updates, and the "a second writer appeared" flag
+// could not flip at all.
+TEST(WorkerBehaviorTest, ConcurrentDropReportsAreCountedAndTheSecondWriterIsDetected) {
+    Config config;
+    auto module = std::make_shared<IdleSourceModule>("counter-module");
+    core::Worker worker(module, ViewPtr<Config>(&config));
+
+    ASSERT_TRUE(worker.CountersAreSingleWriter()) << "the flag must start out claiming a single writer";
+    ASSERT_EQ(worker.DroppedCount(), std::uint64_t(0));
+
+    constexpr int kThreads = 4;
+    constexpr int kPerThread = 2000;
+    std::vector<std::thread> writers;
+    writers.reserve(kThreads);
+    for (int i = 0; i < kThreads; ++i) {
+        writers.emplace_back([&]() {
+            for (int j = 0; j < kPerThread; ++j) {
+                worker.RecordDropped(1);
+            }
+        });
+    }
+    for (auto& writer : writers) {
+        writer.join();
+    }
+
+    EXPECT_EQ(worker.DroppedCount(), std::uint64_t(kThreads * kPerThread))
+        << "a short total means the adds were not atomic";
+    EXPECT_FALSE(worker.CountersAreSingleWriter())
+        << "a second writer must be reported, not silently tolerated";
+}
+
+TEST(WorkerBehaviorTest, ConcurrentFailureReportsAreCountedAndTheSecondWriterIsDetected) {
+    Config config;
+    auto module = std::make_shared<IdleSourceModule>("failure-module");
+    core::Worker worker(module, ViewPtr<Config>(&config));
+
+    ASSERT_TRUE(worker.CountersAreSingleWriter());
+    ASSERT_EQ(worker.FailedCount(), std::uint64_t(0));
+
+    constexpr int kThreads = 4;
+    constexpr int kPerThread = 1000;
+    std::vector<std::thread> writers;
+    writers.reserve(kThreads);
+    for (int i = 0; i < kThreads; ++i) {
+        writers.emplace_back([&]() {
+            for (int j = 0; j < kPerThread; ++j) {
+                worker.RecordFailed();
+            }
+        });
+    }
+    for (auto& writer : writers) {
+        writer.join();
+    }
+
+    EXPECT_EQ(worker.FailedCount(), std::uint64_t(kThreads * kPerThread));
+    EXPECT_FALSE(worker.CountersAreSingleWriter());
+}
+
+}    // namespace
+
