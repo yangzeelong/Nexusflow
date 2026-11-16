@@ -45,6 +45,12 @@ void executePipeline(Pipeline& pipeline) {
 
 void runWithBuildModule() {
     LOG_INFO("--- Running in Programmatic Mode (PipelineBuilder) ---");
+
+    // Edge depth: how many messages may sit between two stages before the producer
+    // waits. The graph below fans out and back in, so a handful of slots per edge
+    // is plenty for an example.
+    constexpr int kEdgeCapacity = 8;
+
     auto inputModule = std::make_shared<MockInputModule>("InputNode");
     auto process1Module = std::make_shared<MockProcessModule>("ProcessNode1");
     auto process2Module = std::make_shared<MockProcessModule>("ProcessNode2");
@@ -59,7 +65,7 @@ void runWithBuildModule() {
                         .Connect("InputNode", "ProcessNode2")
                         .Connect("ProcessNode1", "OutputNode")
                         .Connect("ProcessNode2", "OutputNode")
-                        .Build();
+                        .Build(kEdgeCapacity);
 
     if (pipeline == nullptr) {
         throw std::runtime_error("Failed to build pipeline.");

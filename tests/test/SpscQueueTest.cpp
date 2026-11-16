@@ -235,4 +235,70 @@ TEST(SpscQueueTest, WaitForRoomWakesWhenConsumerFreesSpace) {
     EXPECT_LT(waited.count(), 4000) << "waitForRoom() was not woken by the consumer freeing space";
 }
 
+// clear() is the queue-side half of Pipeline::Cancel(): the buffered messages stop
+// existing without a module having counted them, so they are charged to
+// discardedTotal and to neither index. That is what keeps the cumulative identity
+// pushed == popped + size + discarded true.
+TEST(SpscQueueTest, ClearDiscardsBufferedMessagesAndKeepsTheIdentity) {
+    LifetimeTracked::live.store(0);
+    {
+        SpscQueue<LifetimeTracked> queue(4);
+        ASSERT_TRUE(queue.push(LifetimeTracked(1)));
+        ASSERT_TRUE(queue.push(LifetimeTracked(2)));
+        ASSERT_TRUE(queue.push(LifetimeTracked(3)));
+
+        LifetimeTracked taken(0);
+        ASSERT_TRUE(queue.tryPop(taken));
+        ASSERT_EQ(LifetimeTracked::live.load(), 3) << "two buffered messages plus the popped one";
+
+        queue.clear();
+        EXPECT_EQ(LifetimeTracked::live.load(), 1) << "clear() leaked the messages it discarded";
+
+        const auto counters = queue.GetStats();
+        EXPECT_EQ(counters.size, std::size_t(0));
+        EXPECT_EQ(counters.discardedTotal, static_cast<std::uint64_t>(2));
+        // A *Total never moves backwards: the two discarded pushes stay counted.
+        EXPECT_EQ(counters.pushed, static_cast<std::uint64_t>(3));
+        EXPECT_EQ(counters.popped, static_cast<std::uint64_t>(1));
+        EXPECT_EQ(counters.pushed, counters.popped + counters.size + counters.discardedTotal);
+    }
+    EXPECT_EQ(LifetimeTracked::live.load(), 0);
+}
+
+// clear() must not reopen the queue: Cancel() closes every edge first and only then
+// destroys what is left, and reopening is restart()'s job.
+TEST(SpscQueueTest, ClearKeepsTheQueueClosed) {
+    SpscQueue<int> queue(4);
+    ASSERT_TRUE(queue.push(1));
+    queue.shutdown();
+
+    queue.clear();
+    EXPECT_EQ(queue.getSize(), std::size_t(0));
+    EXPECT_TRUE(queue.isShutdown()) << "clear() reopened the queue; restart() is the call that does that";
+    EXPECT_FALSE(queue.push(2)) << "a cleared but still closed queue must keep rejecting pushes";
+
+    queue.restart();
+    EXPECT_FALSE(queue.isShutdown());
+    EXPECT_TRUE(queue.push(3));
+}
+
+// Cancel() may run many times over one pipeline's life, and the identity has to
+// survive every one of them.
+TEST(SpscQueueTest, RepeatedClearsAccumulateInsteadOfRewindingTotals) {
+    SpscQueue<int> queue(4);
+    ASSERT_TRUE(queue.push(1));
+    ASSERT_TRUE(queue.push(2));
+    queue.clear();
+
+    ASSERT_TRUE(queue.push(3));
+    queue.clear();
+
+    const auto counters = queue.GetStats();
+    EXPECT_EQ(counters.size, std::size_t(0));
+    EXPECT_EQ(counters.pushed, static_cast<std::uint64_t>(3));
+    EXPECT_EQ(counters.popped, static_cast<std::uint64_t>(0));
+    EXPECT_EQ(counters.discardedTotal, static_cast<std::uint64_t>(3));
+    EXPECT_EQ(counters.pushed, counters.popped + counters.size + counters.discardedTotal);
+}
+
 }    // namespace

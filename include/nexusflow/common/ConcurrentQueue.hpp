@@ -39,6 +39,7 @@ public:
         std::size_t highWaterMark = 0;
         std::uint64_t pushed = 0;
         std::uint64_t popped = 0;
+        std::uint64_t discardedTotal = 0;
     };
 
     /**
@@ -52,7 +53,23 @@ public:
         counters.highWaterMark = m_highWaterMark;
         counters.pushed = m_pushed;
         counters.popped = m_popped;
+        counters.discardedTotal = m_discardedTotal;
         return counters;
+    }
+
+    /**
+     * @brief Destroys whatever is still buffered, counting it as discarded.
+     * @details Only safe while no thread is using the queue: Pipeline::Cancel()
+     * calls it once every worker has been joined. The shut-down state is left
+     * alone, so this throws the backlog away without reopening the queue.
+     *
+     * The destroyed items are charged to discardedTotal and to neither m_pushed
+     * nor m_popped, which is what keeps
+     * pushed == popped + size + discarded true across any number of clears.
+     */
+    void clear() {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        DiscardBufferedLocked();
     }
 
     /**
@@ -225,9 +242,8 @@ public:
      */
     void restart() {
         std::lock_guard<std::mutex> lock(m_mutex);
+        DiscardBufferedLocked();
         m_shutdown = false;
-        std::queue<T> empty;
-        m_queue.swap(empty);
     }
 
     /**
@@ -288,13 +304,25 @@ private:
         return item;
     }
 
-private:
+    /**
+     * @brief Drops the buffered items and counts them as discarded.
+     * Caller must hold m_mutex. Shared by clear() and restart().
+     */
+    void DiscardBufferedLocked() {
+        m_discardedTotal += static_cast<std::uint64_t>(m_queue.size());
+        std::queue<T> empty;
+        m_queue.swap(empty);
+    }
+
     mutable std::mutex m_mutex;
     std::condition_variable m_condNotEmpty;
     std::condition_variable m_condNotFull;
     std::queue<T> m_queue;
     std::uint64_t m_pushed = 0;
     std::uint64_t m_popped = 0;
+    // Items clear()/restart() destroyed. Counted apart from m_pushed/m_popped so
+    // pushed == popped + size + discarded stays exact.
+    std::uint64_t m_discardedTotal = 0;
     std::size_t m_highWaterMark = 0;
     const int m_capacity;
     bool m_shutdown;

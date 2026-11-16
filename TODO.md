@@ -2,8 +2,9 @@
 
 本文档记录 NexusFlow 框架当前状态与下一步计划，供跨设备/跨 agent 协作时同步。
 
-**同步基线**：`master` @ `1eae366`（PR #20 已合并）。本轮定版修复的工作区改动**未提交**。
-**测试基线**：`138 tests from 23 test suites，PASSED 138`（MSVC 19.40）。
+**同步基线**：分支 `fix/pipeline-drain-on-stop`（基于 `master` @ `0b3ce51`，PR #21 已合并）。
+本轮 `Stop()`/`Cancel()` 的改动在**工作区**，尚未提交。
+**测试基线**：`158 tests from 26 test suites，PASSED 158`（MSVC 19.40）。
 **构建**：`cmake --build build --config Release --parallel 16` → 退出码 0。注意会刷出
 大量 `C4819`（源文件含 UTF-8 中文注释，MSVC 按 936 代码页读取）。想要干净构建，
 给目标加 `/utf-8`；在加上之前不要在本文件里声称"无 warning"。
@@ -17,7 +18,8 @@
 
 ### ~~优雅停机 (Graceful Shutdown / Draining)~~ ✅ PR #15
 
-- 拓扑逆序停机、`drainTimeout`/`stopTimeout`、`RequestDrain`/`RequestStop` 分离。
+- 拓扑逆序停机、`RequestDrain`/`RequestStop` 分离（当时的 `drainTimeout`/`stopTimeout`
+  两个预算后来在「停止语义」一节里整个删掉了：它们从来没能让 `Stop()` 更早返回）。
 - **关键坑（已记入代码注释）**：源模块可能正卡在 `push` 里等一个已经没人消费的满队列，
   所以 `Stop()` 必须**先 `ShutdownOutputs()` 再 join 源模块**，否则整个 stop 窗口都耗在等这把锁上
   （实测 `Stop()` 2003 ms → 31 ms）。
@@ -203,29 +205,159 @@ cmake --build build\perf-probe\build --config Release --target pipeline_benchmar
 
 ---
 
-## 停机排水（真排水）：待设计
+## 停机排水（已实现）
 
-现状：`Worker` 的循环条件是 `while (!m_stopFlag.load())`，收到停止就退出，**不消费积压**。
-`Pipeline::Stop()` 的"排水"因此对源模块的直接下游是空操作（`waitUntilEmpty` 在队列
-shutdown 时短路返回 true，不看 `size`），残留消息留在边里 —— 既没被处理，也不计进任何
-`*Total`，只能通过 `EdgeSnapshot::size`（等价于 `pushedTotal - poppedTotal`）看到。
+`Stop()` 现在是**生产者优先**的单趟拓扑顺序：停一个阶段时，先 `RequestStop`、关掉它的输出边、
+再 join，然后才轮到他下游的阶段。关掉输出边是释放"卡在 push 里等空位"的生产者所必需的——
+下游完全可能根本不消费。下游阶段此时的输入边已经关闭，于是它自己把积压消费完，
+`WaitForInputsDrained` 这时才真的等到队列清空。
 
-**不要**把残留记进某个模块的 `droppedTotal`：生产者已经把它算进 `processedTotal` 和
-`pushedTotal`，再记一次就是重复计账；消费者又没 pop 过它，记给消费者会破坏"丢弃记在
-尝试发送的模块"这条约定（见 `PipelineMetricsTest` 的
-`ProcessedDroppedAndFailedAccountForEveryMessage` 与
-`StopAccountsForMessagesTheDispatcherCouldNotPush` 两条用例）。
+`SpscQueue::waitUntilEmpty()` 不再在 shutdown 时短路返回 true：shutdown 只是拒绝新 push，
+消费者仍在 pop，提前返回正是"排水跳过积压"的原因。
 
-正确方向：停机时让消费者**继续消费**，直到它的输入边全部 shutdown 且为空再停该阶段。
-现有的 sinks-first 顺序配合"输入边一空闲就 `RequestStop`"能自底向上收敛，但要重整
-`Stop()` 的请求时序，改动面不小，单独排期。
+**踩过的两只坑**，每个都让实现回退过一次，别再犯：
+
+1. 曾让 worker 在"输入全关且取空"时自行退出循环。看起来更简洁，但有竞态：一次已经通过
+   shutdown 检查的 push 可能在该边关闭之后才落地，而消费者已按"空 + 已关"退出，于是这条
+   消息没人取，排水只能白等整个预算。现在消费者只在被 `RequestStop` 时退出。
+2. 曾把源的 `ShutdownOutputs()` 挪到 join 之后。当下游是"从不消费的 sink"时，源会永久卡在
+   push 里，只能等停机超时后把线程丢掉（那个超时机制本身也在「停止语义」一节里删掉了）。
+   所以源必须**先关边、再 join**。
+
+回归用例：`PipelineDrainTest.StopDeliversWhateverTheSinkHasNotTakenYet` 与
+`PipelineDrainTest.StopDrainsThroughAnIntermediateStage`。前者在旧实现上会看到边里剩一半
+消息（pushed 8 / popped 4）。
+
+仍然成立：停机后残留的消息在 `Stop()` 下不存在（边被排空）；`Cancel()` 下则只体现在
+`EdgeSnapshot::discardedTotal`，**不要**把它记进任何模块的 `droppedTotal`——生产者已经算过
+processed+pushed，消费者从未 pop 过它，记给谁都是重复计账。
+
+---
+
+## 停止语义：`Stop()` / `Cancel()`（已实现）
+
+两个函数，都没有参数，也没有超时：
+
+| API | 语义 |
+| --- | --- |
+| `ErrorCode Stop()` | **排空**：生产者优先，逐阶段"关输出边 → 等输入空 → join"，返回时每条边 `size == 0`，积压全部送达。 |
+| `ErrorCode Cancel()` | **立刻停**：所有阶段同时 `RequestStop`，所有边先 `shutdown()`（卡在 push / pull 的线程立刻返回），join 之后把边里剩下的消息 `clear()` 掉。 |
+
+两者都是**同步**的：返回时所有 worker 线程都已退出，因此之后可以直接 `Start()` 再跑一遍。
+已经停过再调，返回 `FAILED_ALREADY_STOP`（`Cancel()` 之后再 `Stop()` 同理）。
+
+### 为什么没有超时参数
+
+原先的 `drainTimeout{5000}` / `stopTimeout{2000}` 是 PR #15 里凭感觉加的，没有任何实测依据，
+却引出了一连串问题：两个预算怎么合并、"留 200 ms 宽限"到底等多久、`0` 和负数分别算什么、
+按阶段还是全局……这些全是自找的复杂度。
+
+更关键的是：`stopTimeout` **从来没有让 `Stop()` 更早返回**。老实现超时后只是记一条 `ERROR`
+然后不 join，而 `~ModuleActor()` 照样会 join——它改变的只是"你什么时候知道出问题"。
+
+去掉超时之后的正确性来自 PR #22 的停机顺序：
+
+1. 生产者先关输出边、再 join。源卡在 `push` 里等空位时，边一关 `push` 立刻返回（不会丢数据：
+   `shutdown()` 只是拒绝新 push，仍照常交出缓冲区里已有的消息）；
+2. 于是 `Stop()` 不会因为框架原因卡住：源会自己退出循环，消费者把输入取空后也退出；
+3. 唯一还可能卡住的是用户 `Process()` 里自己写的死循环/死等——那是用户代码的责任，
+   用超时把它盖住只会让问题更晚暴露。
+
+### 容器：三件套，各管一件事
+
+| 方法 | 丢弃残留？ | 改变关闭状态？ |
+| --- | --- | --- |
+| `shutdown()` | 否 | 置为已关闭 |
+| `clear()` | **是** | 否（关着还是关着，开着还是开着） |
+| `restart()` | 是 | 置为已打开（`Start()` 用） |
+
+`clear()` 同时加在 `SpscQueue` 与 `ConcurrentQueue`（fallback 路径），否则不定长队列的行为
+会和定长队列不一致。实现是先逐槽 `~T()` 再归零索引，并把丢弃条数累加进 `discardedTotal`。
+
+### 计数与不变式
+
+`EdgeSnapshot::discardedTotal`（累计）记的是"被 `Cancel()` 销毁、消费者从未 pop 过"的条数。
+**不变式**（已有用例）：
+
+```
+pushedTotal == poppedTotal + size + discardedTotal
+```
+
+丢弃数由队列自己记（`QueueCounters::discardedTotal`），`EdgeSnapshot` 直接透传，所以不变式
+天然成立，不需要上层另算。`clear()` 会先把索引折进 baseline（`m_pushedBase` / `m_poppedBase`）
+再归零，因此 `*Total` 在任意次 `clear()` 之后都不会回退。
+
+**不要把 discarded 记进模块的 `droppedTotal`**：生产者已经把它算进 `processedTotal` +
+`pushedTotal`，消费者从未 pop 过它，记给谁都是重复计账。
+
+### 停机计时（可观测性）
+
+`Stop()` / `Cancel()` 自己计时，结果落在快照里，不需要在外部用 `steady_clock` 把调用包一层：
+
+| 字段 | 含义 |
+| --- | --- |
+| `PipelineSnapshot::stopPipelineMs` | 最近一次 `Stop()`/`Cancel()` 的墙钟时间 |
+| `ModuleSnapshot::drainInputsMs` | 这次停机里该阶段等输入边变空用了多久；源的天然是 0，`Cancel()` 之后全是 0 |
+| `ModuleSnapshot::exitLoopMs` | 该阶段从"被要求停"到线程退出用了多久（含它当时手里那一批） |
+
+三者都**由 `Start()` 清零**（`ModuleActor::ResetStopTiming()` / `PipelineImpl::lastStopPipelineMs`），所以
+运行中的快照不会报上一轮是怎么结束的。它们不是 `*Total`，不受"`*Total` 永不清零"那条规则约束
+（`AGENTS.md` §5 已单独写明）。写侧是 relaxed atomic（`ModuleActor::RecordStopTiming()`），
+读侧 `Pipeline::GetSnapshot()` 直接 load。
+
+`Stop()` 结束时还会打一条 DEBUG，省得调用方自己拼：
+
+```
+Pipeline drained in 125 ms of waiting, slowest stage 'timing-sink' at addad ms; whole stop took 249 ms.
+```
+
+（实测那次的数字：drain 125 ms、整体 249 ms——差额来自 sink 手里那一批还没处理完，记在它的
+`exitLoopMs` 里。）
+
+### 用例
+
+| 用例 | 断言 |
+| --- | --- |
+| `PipelineCancelTest.CancelDestroysTheBacklogInsteadOfDeliveringIt` | 慢 sink 仍有积压时 `Cancel()`：sink 收到 < N，边 `size == 0`，`discardedTotal > 0`，`received + discarded == pushed` |
+| `PipelineCancelTest.DiscardedMessagesAreChargedToTheEdgeNotToAModule` | 同上一条链路，另外所有模块 `droppedTotal == 0`、`failedTotal == 0` |
+| `PipelineCancelTest.CancelDiscardsThroughAnIntermediateStage` | 两级链路：每条边都满足不变式；relay 已投递但没进边的消息记在 relay 的 `droppedTotal` |
+| `PipelineCancelTest.CancelThenStartRunsAgain` | `Cancel()` → `Start()` 能再跑满一批；`Stop()` 不改 `discardedTotal`，`pushedTotal` 累计到 2N |
+| `PipelineCancelTest.CancelBeforeStartIsRejected` / `CancelTwiceIsRejected` / `StopThenCancelIsRejected` | 三个 guard |
+| `PipelineDrainTest.*` | `Stop()` 全量送达、每条边 `poppedTotal == pushedTotal` |
+| `SpscQueueTest.ClearDiscardsBufferedMessagesAndKeepsTheIdentity` / `ClearKeepsTheQueueClosed` / `RepeatedClearsAccumulateInsteadOfRewindingTotals` | `clear()` 析构残留、保持关闭、`*Total` 单调 |
+| `ConcurrentQueueTest.ClearDiscardsAndKeepsTheIdentity` / `ClearKeepsTheQueueClosed` | fallback 路径与上面一致 |
+| `PipelineStopTimingTest.StopRecordsDrainTimeOfTheStageThatHeldItUp` | 有积压时 `Stop()`：sink 的 `drainInputsMs >= 20`、源的 `drainInputsMs == 0`、`stopPipelineMs >= drainInputsMs`，边空且 `discardedTotal == 0` |
+| `PipelineStopTimingTest.CancelTimesTheExitInsteadOfADrain` | `Cancel()`：所有模块 `drainInputsMs == 0`、`exitLoopMs <= stopPipelineMs`，卡在 `Process()` 里的 sink `exitLoopMs >= 20` |
+| `PipelineStopTimingTest.StartForgetsThePreviousStopTiming` | `Stop()` 后 sink 的 `drainInputsMs > 0`，`Start()` 后 `stopPipelineMs`/`drainInputsMs`/`exitLoopMs` 全为 0 |
+| `PipelineStopTimingTest.SnapshotReportsZeroTimingBeforeAnyStop` | 一次都没停过时三者全为 0 |
+
+### 内部改动清单
+
+| 文件 | 改什么 |
+| --- | --- |
+| `include/nexusflow/Pipeline.hpp` | `Stop()` 文档改写；新增 `Cancel()` |
+| `include/nexusflow/Stats.hpp` | `EdgeSnapshot::discardedTotal`；`ModuleSnapshot::drainInputsMs`/`exitLoopMs`；`PipelineSnapshot::stopPipelineMs` |
+| `include/nexusflow/common/SpscQueue.hpp` | `clear()`；`QueueCounters::discardedTotal`；`DiscardBufferedLocked()`；`waitUntilEmpty()` 去掉超时参数 |
+| `include/nexusflow/common/ConcurrentQueue.hpp` | 同上（fallback 路径） |
+| `src/pipeline/Pipeline.cpp` | `Stop()` 去掉预算；新增 `Cancel()`；`GetSnapshot()` 透传 `discardedTotal` 与停机计时；`Stop()`/`Cancel()` 逐阶段计时并发布 `lastStopPipelineMs` |
+| `src/pipeline/impl/PipelineImpl.hpp` | 删除 `drainTimeout` / `stopTimeout`；新增 `lastStopPipelineMs` |
+| `src/module/ModuleActor.{hpp,cpp}` | 删除 `StopAndJoinWithin` / `IsStopOverdue` / `BlockingTime`；`WaitForInputsDrained()` 去掉参数；新增 `RecordStopTiming()` / `LastDrainInputsMs()` / `LastExitLoopMs()` / `ResetStopTiming()` |
+| `src/core/Worker.{hpp,cpp}` | 删除 `WaitForStopRequest` / `m_loopCond` / 若干只服务旧预算的 accessor；`WaitForInputsDrained()` 改为无参数 |
+
+### 别重犯的坑
+
+- **不要让 worker 自行退出**（"输入全关且取空就 break"）：与一次已通过 shutdown 检查的
+  在途 push 竞态，那条消息落地时消费者已退出。
+- **源必须「先关输出边、再 join」**：下游若是从不消费的 sink，源会永久卡在 push 里。
+- **`Cancel()` 里 `clear()` 必须在 join 之后**：`clear()` 只在没有线程使用队列时才安全。
+- **恢复备份文件后要 touch**：`Copy-Item` 保留旧时间戳会让 MSBuild 认为头文件比 obj 还旧，
+  从而不重新编译，跑的还是旧二进制。
+- **不要为了让测试通过而改测试语义**（`AGENTS.md` §6.4）。
 
 ---
 
 ## 已知小问题（不影响 1.0.0）
 
-- `src/common/MetricsCollector.cpp:157` 注释里有一个损坏字符（`p99 over ...m20 items`），
-  是历史编码事故留下的，读起来费解。
 - `docs/telemetry.md` 不入库；`AGENTS.md` §5 现在只把它当本地笔记提及，不要再当权威引用。
 
 ---

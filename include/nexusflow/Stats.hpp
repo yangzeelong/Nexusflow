@@ -37,6 +37,15 @@ struct EdgeSnapshot {
     std::uint64_t pushedTotal = 0;
     /// Messages popped out of this edge.
     std::uint64_t poppedTotal = 0;
+    /// Messages destroyed by Pipeline::Cancel() before a consumer took them.
+    ///
+    /// Charged to the edge and never to a module's droppedTotal: the producer
+    /// counted the message as processed and pushed, and no consumer ever popped
+    /// it, so either module would be counting somebody else's loss.
+    ///
+    /// pushedTotal == poppedTotal + size + discardedTotal always holds; a Stop()
+    /// drains everything and leaves discardedTotal where it was.
+    std::uint64_t discardedTotal = 0;
 
     /// "from -> to", the name a profile and a log line use.
     std::string Name() const { return from + " -> " + to; }
@@ -50,6 +59,11 @@ struct EdgeSnapshot {
  * covers messages the module could not hand downstream (a full or closed queue)
  * plus fused groups that expired; fusionExpiredTotal is the part of that which
  * expired.
+ *
+ * The two `*Ms` fields answer "where did the stop go": they are the timing of the
+ * most recent Stop()/Cancel(), which is the part of a pipeline's lifetime that a
+ * run-time profile cannot show. They are cleared when the pipeline is started
+ * again, so a snapshot taken mid-run never reports how the previous run ended.
  */
 struct ModuleSnapshot {
     std::string name;
@@ -62,6 +76,15 @@ struct ModuleSnapshot {
     std::uint64_t fusionExpiredTotal = 0;
     /// Invocations that threw. Counted per invocation, not per message.
     std::uint64_t failedTotal = 0;
+    /// How long the most recent Stop() waited for this module's inputs to empty.
+    ///
+    /// Zero for a source (it has no inputs) and zero after Cancel(), which never
+    /// drains. A stage that shows a large drainInputsMs held up the rest of the stop:
+    /// nothing downstream of it is joined until it has taken everything.
+    std::uint64_t drainInputsMs = 0;
+    /// How long the most recent stop waited for this module to leave its loop
+    /// once it had been asked to. Large for a stage stuck inside Process().
+    std::uint64_t exitLoopMs = 0;
 };
 
 /**
@@ -75,7 +98,8 @@ struct ModuleSnapshot {
  * ResetMetrics() clears only the water marks (`maxSize`). The `*Total` fields
  * are cumulative for the life of the pipeline and never go back; that is what
  * makes differencing two snapshots a rate. A restart does not reset them either,
- * so a second Start() continues the same totals.
+ * so a second Start() continues the same totals. What a restart does clear is the
+ * stop timing (`stopPipelineMs`, and each module's `drainInputsMs`/`exitLoopMs`).
  */
 struct PipelineSnapshot {
     /// Graph name of the pipeline.
@@ -84,6 +108,13 @@ struct PipelineSnapshot {
     std::vector<EdgeSnapshot> edges;
     /// One entry per module, in the pipeline's module order.
     std::vector<ModuleSnapshot> modules;
+    /// Wall time of the most recent Stop()/Cancel(), in milliseconds.
+    ///
+    /// Zero before the first stop and after Start(): a snapshot taken while the
+    /// pipeline runs describes this run, not the one that ended before it. This is
+    /// the number to look at first when a stop felt slow, then the modules' drainInputsMs
+    /// (who held the drain) and exitLoopMs (who was still inside Process()).
+    std::uint64_t stopPipelineMs = 0;
 
     /// One-line human readable form, for a log record or a CLI dump.
     std::string ToString() const;

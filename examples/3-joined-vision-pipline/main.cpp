@@ -59,7 +59,7 @@ int main(int argc, char* argv[]) {
     logger::InitializeGlobalLogger(params);
 
     if (argc < 2) {
-        LOG_ERROR("Usage: {} <config.yaml>");
+        LOG_ERROR("Usage: {} <config.yaml>", argv[0]);
         return -1;
     }
 

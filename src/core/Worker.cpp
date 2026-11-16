@@ -305,13 +305,11 @@ void Worker::WorkLoop() {
     // The loop is done writing, so a snapshot taken while we join still sees
     // every message this run recorded.
     PublishCounters();
-    // Release anyone waiting on WaitForStopRequest(); this has to happen before
-    // the thread says it is done, otherwise the join would race the flag.
+    // Published last: a joiner that sees this true also sees everything above.
     {
         std::lock_guard<std::mutex> lock(m_loopMutex);
         m_loopExited = true;
     }
-    m_loopCond.notify_all();
     LOG_DEBUG("Worker for module '{}' finished.", m_modulePtr->GetModuleName());
 }
 
@@ -505,14 +503,7 @@ std::vector<Message> Worker::PullBatchMessage(size_t maxBatchSize, std::chrono::
         // again. Without this the stage sat out the whole batch timeout after its
         // producers had gone -- dead time on the Stop() path, and a stage whose
         // upstream had already finished looked busy instead of finished.
-        bool allInputsClosed = !m_inputQueueMap.empty();
-        for (const auto& item : m_inputQueueMap) {
-            if (item.second && !item.second->isShutdown()) {
-                allInputsClosed = false;
-                break;
-            }
-        }
-        if (allInputsClosed) {
+        if (AllInputsShutdown()) {
             break;
         }
 

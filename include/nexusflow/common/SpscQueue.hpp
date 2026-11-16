@@ -84,6 +84,7 @@ public:
         std::size_t highWaterMark = 0;
         std::uint64_t pushed      = 0;
         std::uint64_t popped      = 0;
+        std::uint64_t discardedTotal = 0;
     };
 
     /**
@@ -421,11 +422,31 @@ public:
     }
 
     /**
+     * @brief Destroys whatever is still buffered, counting it as discarded.
+     * @details Only safe while no thread is using the queue: Pipeline::Cancel()
+     * calls it once every worker has been joined. The shut-down state is left
+     * alone, so this throws the backlog away without reopening the queue.
+     *
+     * The destroyed messages are charged to discardedTotal and to neither
+     * pushedTotal nor poppedTotal, which is what keeps
+     * pushed == popped + size + discarded true across any number of clears.
+     */
+    void clear() {
+        if (m_fallback) {
+            m_fallback->clear();
+            return;
+        }
+        std::lock_guard<std::mutex> lock(m_waitMutex);
+        DiscardBufferedLocked();
+    }
+
+    /**
      * @brief Reopens a shut-down queue so the owning pipeline can start again.
      * @details Only safe while no thread is using the queue (Pipeline calls this
-     * before it starts its workers). Whatever was still queued is discarded: a
-     * shut-down queue is closed at teardown, where anything left is accounted as
-     * dropped, and delivering it to a new run would report stale work.
+     * before it starts its workers). Whatever was still queued is discarded
+     * through the same path as clear(): a shut-down queue is closed at teardown,
+     * where anything left over is lost, and delivering it to a new run would
+     * report stale work.
      */
     void restart() {
         if (m_fallback) {
@@ -433,24 +454,8 @@ public:
             return;
         }
         std::lock_guard<std::mutex> lock(m_waitMutex);
-        // Destroy whatever the previous run left behind *before* the indices are
-        // rewound. ~SpscQueue() only walks [head, tail), so zeroing them first
-        // would make the leftovers unreachable: every T still parked in a slot
-        // would keep its payload alive for good, and the next run would
-        // placement-new over a live object. Neither is recoverable afterwards.
-        const std::size_t head = m_head.load(std::memory_order_relaxed);
-        const std::size_t tail = m_tail.load(std::memory_order_relaxed);
-        for (std::size_t index = head; index != tail; ++index) {
-            ElementAt(index % m_slotCount)->~T();
-        }
-        // pushed/popped are read straight off the two indices, so fold what the
-        // previous run counted into a baseline before they are rewound: *Total
-        // must never go backwards (see Stats.hpp), not even across a restart.
-        m_pushedBase += tail;
-        m_poppedBase += head;
+        DiscardBufferedLocked();
         m_shutdown.store(false, std::memory_order_release);
-        m_head.store(0, std::memory_order_release);
-        m_tail.store(0, std::memory_order_release);
         m_consumerWaiting.store(false, std::memory_order_release);
         m_producerWaiting.store(false, std::memory_order_release);
     }
@@ -495,39 +500,25 @@ public:
 
     /**
      * @brief Waits until the consumer has taken everything that was pushed.
-     * @details Producers must already have stopped; this only looks at the
-     * consumer side. It reports success as soon as the queue is empty, so the
-     * usual use is "stop the producer, then wait for the consumer to catch up".
-     * A shut-down queue is never waited on, because no consumer is left to pop.
-     * @return true when the queue emptied within the timeout.
+     * @details The caller must already have joined every producer of this edge,
+     * so an empty queue is the only state this can end in; the wait has no
+     * deadline on purpose, because a deadline would turn "the consumer is slow"
+     * into "the drain gave up and left work behind". It reports as soon as the
+     * queue is empty, so the usual use is "stop the producer, then wait for the
+     * consumer to catch up". A shut-down queue is still waited on: shutdown()
+     * only rejects further pushes, and the consumer keeps popping what is
+     * buffered.
      */
-    template <class Rep, class Per>
-    bool waitUntilEmpty(const std::chrono::duration<Rep, Per>& timeout) {
-        const auto deadline = std::chrono::steady_clock::now() + timeout;
+    void waitUntilEmpty() {
         if (m_fallback) {
             while (!m_fallback->isEmpty()) {
-                if (m_fallback->isShutdown()) {
-                    // The producer is gone, so nothing is left to wait for.
-                    return true;
-                }
-                if (std::chrono::steady_clock::now() >= deadline) {
-                    return false;
-                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-            return true;
+            return;
         }
         for (;;) {
             if (getSize() == 0) {
-                return true;
-            }
-            if (m_shutdown.load(std::memory_order_acquire)) {
-                // Once shut down, pushes fail, so the consumer will empty the
-                // queue on its own; there is nothing left for this side to wait on.
-                return true;
-            }
-            if (std::chrono::steady_clock::now() >= deadline) {
-                return false;
+                return;
             }
             // The consumer holds the wake-up lock while it checks for work, so a
             // short wait here either sees the next pop or simply re-checks.
@@ -620,6 +611,7 @@ public:
             counters.highWaterMark = fallbackCounters.highWaterMark;
             counters.pushed        = fallbackCounters.pushed;
             counters.popped        = fallbackCounters.popped;
+            counters.discardedTotal = fallbackCounters.discardedTotal;
             return counters;
         }
         counters.size          = getSize();
@@ -627,11 +619,12 @@ public:
         counters.highWaterMark = m_highWaterMark.load(std::memory_order_relaxed);
         // The ring keeps no separate per-message counters: every successful
         // push/pop moves the respective index by exactly one, and the hot path
-        // must not touch a third cache line for statistics. restart() folds the
-        // previous run's indices into a baseline first, so these two still only
-        // grow across a Stop()/Start() pair.
-        counters.pushed = m_pushedBase + m_tail.load(std::memory_order_relaxed);
-        counters.popped = m_poppedBase + m_head.load(std::memory_order_relaxed);
+        // must not touch a third cache line for statistics. restart() and clear()
+        // fold the indices into a baseline first, so these two still only grow
+        // across a Stop()/Start() pair.
+        counters.pushed    = m_pushedBase + m_tail.load(std::memory_order_relaxed);
+        counters.popped    = m_poppedBase + m_head.load(std::memory_order_relaxed);
+        counters.discardedTotal = m_discardedTotal.load(std::memory_order_relaxed);
         return counters;
     }
 
@@ -744,6 +737,32 @@ private:
             const_cast<typename std::aligned_storage<sizeof(T), alignof(T)>::type*>(&m_slots[index].storage));
     }
 
+    /**
+     * @brief Destroys the buffered items and counts them as discarded.
+     *
+     * Caller must hold m_waitMutex. The items are destroyed *before* the indices
+     * are rewound: ~SpscQueue() only walks [head, tail), so zeroing them first
+     * would make the leftovers unreachable -- every T still parked in a slot
+     * would keep its payload alive for good, and the next run would placement-new
+     * over a live object. Neither is recoverable afterwards.
+     *
+     * The indices are then folded into the published baselines so pushed/popped
+     * never go backwards, and the count of what was destroyed goes into
+     * discardedTotal instead of either of them.
+     */
+    void DiscardBufferedLocked() {
+        const std::size_t head = m_head.load(std::memory_order_relaxed);
+        const std::size_t tail = m_tail.load(std::memory_order_relaxed);
+        for (std::size_t index = head; index != tail; ++index) {
+            ElementAt(index % m_slotCount)->~T();
+        }
+        m_pushedBase += tail;
+        m_poppedBase += head;
+        m_discardedTotal.fetch_add(static_cast<std::uint64_t>(tail - head), std::memory_order_relaxed);
+        m_head.store(0, std::memory_order_release);
+        m_tail.store(0, std::memory_order_release);
+    }
+
     /// Producer-side "is there no room" check, used by waitForRoom().
     bool Full() const {
         if (m_fallback) {
@@ -854,12 +873,15 @@ private:
     std::condition_variable m_condNotEmpty;
     std::condition_variable m_condNotFull;
 
-    // Offsets folded in by restart(): the hot indices are rewound there, but the
-    // published *Total values must not go backwards, so GetStats() adds these.
-    // Written only by restart(), which is documented to run while no thread is
-    // using the queue; read by GetStats().
+    // Offsets folded in by restart()/clear(): the hot indices are rewound there,
+    // but the published *Total values must not go backwards, so GetStats() adds
+    // these. Written only when no thread is using the queue (the caller's
+    // contract for both calls); read by GetStats().
     std::size_t m_pushedBase = 0;
     std::size_t m_poppedBase = 0;
+    // Items clear()/restart() destroyed. Kept apart from the pushed/popped
+    // indices so pushed == popped + size + discarded stays exact.
+    std::atomic<std::uint64_t> m_discardedTotal{0};
 };
 
 }    // namespace nexusflow

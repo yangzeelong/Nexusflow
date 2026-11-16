@@ -23,7 +23,7 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | `include/nexusflow/` | 公开头文件（Message/Module/Pipeline/PipelineBuilder/ModuleFactory/MetricsCollector/Logging…） |
 | `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（MetricsCollector、Logging 实现与测试） |
 | `include/nexusflow/common/` | 公开的 header-only 容器/工具：`Any`、`ConcurrentQueue`、`Optional`、`ViewPtr`（`Nexusflow::nexusflow_common` INTERFACE target） |
-| `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 140 个，见 §3） |
+| `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 158 个，见 §3） |
 | `examples/` | 3 个纯框架示例：`1-how-to-use`、`2-linear-vision-pipline`、`3-joined-vision-pipline` |
 | `benchmarks/` | Google Benchmark 基准（`nexusflow_benchmarks`） |
 | `cmake/` | `include.cmake`（第三方依赖 include）、`Summary.cmake`、`3rdparty/*.cmake`（FetchContent 定义） |
@@ -109,8 +109,8 @@ cmake --build build --config Release --parallel 16
 ./build/tests/Release/nexusflow_tests.exe
 ```
 
-实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **140 tests
-from 23 suites，PASSED 140**（MSVC 19.40）。
+实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **158 tests
+from 26 suites，PASSED 158**（MSVC 19.40）。
 
 ---
 
@@ -120,7 +120,7 @@ from 23 suites，PASSED 140**（MSVC 19.40）。
 ./build/bin/nexusflow_tests      # Unix；Windows 见上（build/tests/Release/）
 ```
 
-- 当前 140 个用例（23 个 suite）：消息 7、计时器 8、图 7、Optional 23（TestOptional 18 + OptionalTest 2 + OptionalThrowingTest 3）、Any 5、ConcurrentQueue 7、Dispatcher 4、日志 7、Config 3、MessageMeta 3、SpscQueue 13、SpscMessageStress 1、Pipeline 生命周期 6、Pipeline 错误路径 12、Pipeline 图序 2、Pipeline 计时 1、Pipeline 指标 8、Pipeline 上下文 8、Worker 行为 7、Worker 启动 2、Worker 计时 2。
+- 当前 158 个用例（26 个 suite）：消息 7、计时器 10、图 7、Optional 23（TestOptional 18 + OptionalTest 2 + OptionalThrowingTest 3）、Any 5、ConcurrentQueue 9、Dispatcher 4、日志 7、Config 3、MessageMeta 3、SpscQueue 16、SpscMessageStress 1、Pipeline 生命周期 6、Pipeline 错误路径 14、Pipeline 图序 2、Pipeline 计时 1、Pipeline 指标 8、Pipeline 上下文 8、Pipeline 排水 2、Pipeline 取消 7、Pipeline 停机计时 4、Worker 行为 7、Worker 启动 2、Worker 计时 2。
 - 用例数随手改：`./build/tests/Release/nexusflow_tests.exe --gtest_list_tests` 数一遍，别照抄本节。
 - 改框架（Message/Module/Pipeline/Dispatcher/Graph/Timer）**必须**跑；不要为了
   让测试通过而改测试语义。
@@ -146,8 +146,8 @@ from 23 suites，PASSED 140**（MSVC 19.40）。
 
 | 后缀/形式 | 含义 | 例子 |
 | --- | --- | --- |
-| `*Total` | **累计计数**："发生了几次"，只增不减；两次快照相减才有意义 | `pushedTotal`、`processedTotal`、`droppedTotal`、`fusionExpiredTotal`、`failedTotal` |
-| `*Ms` | 毫秒值；**不要**在毫秒值上用 `*Total`——"total 多少毫秒"在 `items` 旁边读起来像计数 | `sumMs`（样本耗时之和）、`avgMs`、`p95Ms`、`p99Ms`、`minMs`、`maxMs`、`windowSpanMs` |
+| `*Total` | **累计计数**："发生了几次"，只增不减；两次快照相减才有意义 | `pushedTotal`、`poppedTotal`、`discardedTotal`、`processedTotal`、`droppedTotal`、`fusionExpiredTotal`、`failedTotal` |
+| `*Ms` | 毫秒值；**不要**在毫秒值上用 `*Total`——"total 多少毫秒"在 `items` 旁边读起来像计数 | `sumMs`（样本耗时之和）、`avgMs`、`p95Ms`、`p99Ms`、`minMs`、`maxMs`、`windowSpanMs`、`drainInputsMs`、`exitLoopMs`、`stopPipelineMs` |
 | 无后缀名词 | 此刻的瞬时值（gauge） | `size`、`capacity` |
 | `max*` | 自上次 `ResetMetrics()` 以来的极值（water mark） | `maxSize` |
 
@@ -176,6 +176,9 @@ from 23 suites，PASSED 140**（MSVC 19.40）。
   本身已经是原子的。
 - `Pipeline::ResetMetrics()` **只清 water mark**（`maxSize`）；`*Total` 在流水线生命周期内
   永不回退，重新 `Start()` 也不清零。写新字段时别打破这条。
+- 停机计时（`PipelineSnapshot::stopPipelineMs`、`ModuleSnapshot::drainInputsMs`/`exitLoopMs`）是"最近一次停机"
+  的描述，**由 `Start()` 清零**：一次运行中的快照不该报上一轮是怎么结束的。它们不是 `*Total`，
+  不受上一条约束。
 
 ---
 

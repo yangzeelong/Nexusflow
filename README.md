@@ -214,7 +214,7 @@ const nexusflow::PipelineSnapshot snapshot = pipeline->GetSnapshot();
 
 for (const auto& edge : snapshot.edges) {
     // edge.from, edge.to, edge.capacity, edge.size, edge.maxSize,
-    // edge.pushedTotal, edge.poppedTotal
+    // edge.pushedTotal, edge.poppedTotal, edge.discardedTotal
 }
 for (const auto& module : snapshot.modules) {
     // module.name, module.processedTotal, module.droppedTotal,
@@ -229,6 +229,63 @@ backlog observed so far. `ResetMetrics()` clears only those water marks: the
 differencing two snapshots stays a rate. The modules are read before the edges, so a
 reader can take a module and then the edge it writes into without seeing a message
 that left the module but has not reached the edge yet.
+
+## Stopping a Pipeline
+
+There are two ways to stop, and the difference is what happens to the messages that
+are already in flight between stages. Both are synchronous and both leave the
+pipeline reusable, so a later `Start()` runs it again:
+
+| Call | Messages still in an edge |
+| --- | --- |
+| `Stop()` | **drained**: sources are joined first, then each stage takes the rest of its input before it leaves, so every edge is empty when `Stop()` returns. |
+| `Cancel()` | **discarded**: every stage is told to stop at once and every edge is closed first (which releases any thread parked in a push or a pull), then whatever was still buffered is destroyed. |
+
+```cpp
+pipeline->Stop();     // graceful: delivers the backlog
+pipeline->Start();    // ...and runs again
+
+pipeline->Cancel();   // immediate: drops the backlog
+```
+
+Discarding is accounted for on the edge, not on a module: `EdgeSnapshot::discardedTotal`
+counts the messages `Cancel()` destroyed, so
+
+```
+pushedTotal == poppedTotal + size + discardedTotal
+```
+
+holds for every edge at all times. `Stop()` drains everything and therefore never
+moves `discardedTotal`. Charging a discard to a module would double-count it — the
+producer already counted it as processed and pushed, while no consumer ever popped it.
+
+Neither call takes a timeout. After the producers are joined an empty input edge is a
+state each stage reaches by itself, so the only thing that can still block a stop is a
+`Process()` that never returns — and that is a bug in the module, not something a
+deadline should paper over.
+
+Where the stop went is in the next snapshot. `PipelineSnapshot::stopPipelineMs` is the wall
+time of the last `Stop()`/`Cancel()`, and each `ModuleSnapshot` carries the part that
+stage owned: `drainInputsMs` is how long the stop waited for its input edges to empty
+(zero for a source, and zero after `Cancel()`, which never drains) and `exitLoopMs` is how
+long it then waited for the module to leave its loop. Both are cleared by `Start()`, so
+a snapshot taken mid-run never reports the previous run's numbers.
+
+```cpp
+pipeline->Stop();
+const auto snapshot = pipeline->GetSnapshot();
+LOG_INFO("stop took {} ms", snapshot.stopPipelineMs);
+for (const auto& module : snapshot.modules) {
+    if (module.drainInputsMs > 0 || module.exitLoopMs > 0) {
+        LOG_INFO("{}: drain {} ms, exit {} ms", module.name, module.drainInputsMs, module.exitLoopMs);
+    }
+}
+```
+
+A stage with a large `drainInputsMs` is what made the stop slow: since stages are torn down
+producers-first, everything downstream of it waits for that drain too. A large `exitLoopMs`
+means the stage was still busy when its turn came, usually finishing the batch it had
+already pulled.
 
 ## Pipeline Context
 
@@ -261,8 +318,8 @@ const bool stopping = context->StopRequested();
 - Metric names are prefixed with the module name (`"detect.frames"`), because the
   context is shared by the whole pipeline and a bare `"latency"` from two modules
   would be indistinguishable.
-- `RequestStop` is called by `Pipeline::Stop()` before the queues are shut down, so
-  long-running modules can leave their loop cooperatively.
+- `RequestStop` is called by `Pipeline::Stop()` / `Pipeline::Cancel()` before the queues
+  are shut down, so long-running modules can leave their loop cooperatively.
 - `Profiler()` returns a per-pipeline `nexusflow::profiling::MetricsCollector`, so two
   pipelines that use identical module names no longer merge their timing samples.
 
