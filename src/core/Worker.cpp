@@ -505,14 +505,7 @@ std::vector<Message> Worker::PullBatchMessage(size_t maxBatchSize, std::chrono::
         // again. Without this the stage sat out the whole batch timeout after its
         // producers had gone -- dead time on the Stop() path, and a stage whose
         // upstream had already finished looked busy instead of finished.
-        bool allInputsClosed = !m_inputQueueMap.empty();
-        for (const auto& item : m_inputQueueMap) {
-            if (item.second && !item.second->isShutdown()) {
-                allInputsClosed = false;
-                break;
-            }
-        }
-        if (allInputsClosed) {
+        if (AllInputsShutdown()) {
             break;
         }
 

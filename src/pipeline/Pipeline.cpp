@@ -10,6 +10,7 @@
 
 #include "impl/PipelineImpl.hpp"
 #include <yaml-cpp/yaml.h>
+#include <algorithm>
 #include <memory>
 #include <nexusflow/ErrorCode.hpp>
 #include <nexusflow/Module.hpp>
@@ -312,12 +313,15 @@ ErrorCode Pipeline::Stop() {
     // behaviour) threw away whatever was still buffered on every edge, which is
     // what produced the "the queue is shut down" warnings on every shutdown.
     //
-    // The stages are joined sinks-first, which is a valid reverse topological
-    // order. Stopping a stage makes it hand over what it already had in hand and
-    // then leave its loop; once it is joined it can push no more, so the edges it
-    // feeds are closed immediately after it. That tells the stage below "nothing
-    // more will ever arrive", which is what lets its batch pull return instead of
-    // idling out its timeout.
+    // The stages are torn down producers-first. A stage can only finish what it
+    // was given once nothing more can arrive, and that is true exactly when every
+    // stage that feeds it has been joined and its output edges closed. So each
+    // stage is joined before the stages it feeds are touched, which is also what
+    // releases a source parked inside a blocking push.
+    //
+    // Closing a stage's outputs is what tells the next stage "nothing more will
+    // ever arrive", which is what lets its batch pull return instead of idling out
+    // its timeout, and what lets it drain the backlog it still holds.
     //
     // The drain budget is per stage and covers that stage's own blocking pull: a
     // stage that is merely between two pulls (a queue reads empty for a moment
@@ -326,6 +330,9 @@ ErrorCode Pipeline::Stop() {
     // the first busy stage upstream and then give the downstream ones nothing.
     std::vector<std::string> stopOrder;
     BuildStopOrder(stopOrder);
+    // BuildStopOrder produces a valid reverse topological order (sinks first);
+    // reversing it gives a valid topological one, producers first.
+    std::reverse(stopOrder.begin(), stopOrder.end());
     // Every stage learns about the drain up front: a stage that is waiting for
     // inputs that will never arrive (a fusion module missing one of its sources)
     // has to stop waiting now, not when its turn in the order comes up.
@@ -336,48 +343,6 @@ ErrorCode Pipeline::Stop() {
         }
     }
 
-    // First pass: ask every stage to stop. A stage that is parked in a blocking
-    // read only sees the request once that read returns, so all of them are told
-    // at once and none of the requests waits on another stage's progress.
-    for (const auto& name : stopOrder) {
-        auto actorIt = m_pImpl->actorModuleMap.find(name);
-        if (actorIt != m_pImpl->actorModuleMap.end() && actorIt->second) {
-            actorIt->second->RequestStop();
-        }
-    }
-
-    // Producers have to be gone before anything downstream is drained. A source
-    // never idles on its own: it keeps filling its output until someone stops it,
-    // so a drain that starts while it is still running can never see its edge go
-    // empty. Join the producers first, then drain what they handed over.
-    //
-    // Closing the producer's output edges is what releases it. A producer can be
-    // parked inside a blocking push when the stop arrives; that push only ever
-    // returns once the queue is either non-full or shut down, and the stage that
-    // would consume it has already left. Shutting the edge down now makes the
-    // push fail immediately, so the producer leaves its loop inside its budget
-    // instead of burning the whole stop timeout and having its thread abandoned.
-    // Nothing is lost by closing early: shutdown() only rejects further pushes,
-    // it still hands out whatever is already buffered, which is exactly what the
-    // downstream drain below then consumes.
-    for (const auto& name : stopOrder) {
-        auto actorIt = m_pImpl->actorModuleMap.find(name);
-        if (actorIt == m_pImpl->actorModuleMap.end() || !actorIt->second) {
-            continue;
-        }
-        const std::shared_ptr<ModuleActor>& actor = actorIt->second;
-        if (!actor->IsStarted() || !actor->IsSource()) {
-            continue;
-        }
-        actor->ShutdownOutputs();
-        actor->StopAndJoinWithin(m_pImpl->stopTimeout);
-    }
-
-    // Second pass, sinks first: let each stage finish what it still has in its
-    // input queue, then join it. The edges are closed only after every stage has
-    // left its loop, so a producer that was asked to stop while inside a
-    // Process() call still finds its output queue open and its "one message in
-    // hand" is delivered instead of lost.
     for (const auto& name : stopOrder) {
         auto actorIt = m_pImpl->actorModuleMap.find(name);
         if (actorIt == m_pImpl->actorModuleMap.end() || !actorIt->second) {
@@ -387,16 +352,38 @@ ErrorCode Pipeline::Stop() {
         if (!actor->IsStarted()) {
             continue;
         }
+
+        if (actor->IsSource()) {
+            // A source never idles on its own: it keeps filling its output until
+            // someone stops it, so it has to be told.
+            //
+            // Closing its output edges is what releases it when it is parked in a
+            // blocking push: that push only returns once the queue is non-full or
+            // shut down, and a downstream stage is not obliged to consume anything
+            // (an idle sink leaves the edge full for good). shutdown() only rejects
+            // further pushes and still hands out what is already buffered, so the
+            // drain below loses nothing by it.
+            actor->RequestStop();
+            actor->ShutdownOutputs();
+            actor->StopAndJoinWithin(m_pImpl->stopTimeout);
+            continue;
+        }
+
+        // Every stage that feeds this one has already been joined and had its
+        // output edges closed, so this worker leaves its loop by itself once its
+        // batch pull comes back empty. Waiting for its queues to empty is what
+        // turns the drain into an actual drain instead of a deadline.
         const auto drainBudget = m_pImpl->drainTimeout + actor->BlockingTime();
         if (!actor->WaitForInputsDrained(drainBudget)) {
             LOG_WARN("Module '{}' still had buffered input after {} ms of draining; "
                      "stopping it anyway and dropping the rest.",
                      actor->GetModuleName(), static_cast<long long>(drainBudget.count()));
         }
+        actor->RequestStop();
         actor->StopAndJoinWithin(m_pImpl->stopTimeout);
-        // The stage can push no more, so the edges it feeds are closed right away:
-        // that is what turns the downstream pull into a return instead of a wait
-        // for a message that will never come.
+        // The stage can push no more, so the edges it feeds are closed before the
+        // next stage is handled: that is what tells the next one "nothing more
+        // will ever arrive".
         actor->ShutdownOutputs();
     }
 
@@ -404,13 +391,13 @@ ErrorCode Pipeline::Stop() {
     // is reusable: Start() with a closed edge used to fail in the middle of its
     // worker rollback, leaving some workers running.
     //
-    // Whatever a stage could not drain stays visible after this point as
-    // EdgeSnapshot::size (equivalently pushedTotal - poppedTotal): the producer
-    // already counted those messages as processed and as pushed, and the consumer
-    // never popped them, so charging either module's droppedTotal would count them
-    // twice -- see PipelineMetricsTest.ProcessedDroppedAndFailedAccountForEveryMessage
-    // and .StopAccountsForMessagesTheDispatcherCouldNotPush. Making the drain
-    // actually deliver them is a separate piece of work (TODO.md).
+    // Whatever a stage still could not drain (its budget ran out, or a module
+    // ignored the stop request) stays visible as EdgeSnapshot::size, equivalently
+    // pushedTotal - poppedTotal. It is deliberately not charged to either module's
+    // droppedTotal: the producer already counted it as processed and pushed, and
+    // the consumer never popped it, so either charge would count it twice -- see
+    // PipelineMetricsTest.ProcessedDroppedAndFailedAccountForEveryMessage and
+    // .StopAccountsForMessagesTheDispatcherCouldNotPush.
     for (auto& queue : m_pImpl->queues) {
         queue->shutdown();
     }

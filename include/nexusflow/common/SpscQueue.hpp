@@ -498,7 +498,10 @@ public:
      * @details Producers must already have stopped; this only looks at the
      * consumer side. It reports success as soon as the queue is empty, so the
      * usual use is "stop the producer, then wait for the consumer to catch up".
-     * A shut-down queue is never waited on, because no consumer is left to pop.
+     * A shut-down queue is still waited on: shutdown() only rejects further
+     * pushes, the consumer keeps popping what is buffered, and reporting success
+     * as soon as the flag was set is what let a drain skip the very backlog it
+     * exists to deliver.
      * @return true when the queue emptied within the timeout.
      */
     template <class Rep, class Per>
@@ -506,10 +509,6 @@ public:
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         if (m_fallback) {
             while (!m_fallback->isEmpty()) {
-                if (m_fallback->isShutdown()) {
-                    // The producer is gone, so nothing is left to wait for.
-                    return true;
-                }
                 if (std::chrono::steady_clock::now() >= deadline) {
                     return false;
                 }
@@ -519,11 +518,6 @@ public:
         }
         for (;;) {
             if (getSize() == 0) {
-                return true;
-            }
-            if (m_shutdown.load(std::memory_order_acquire)) {
-                // Once shut down, pushes fail, so the consumer will empty the
-                // queue on its own; there is nothing left for this side to wait on.
                 return true;
             }
             if (std::chrono::steady_clock::now() >= deadline) {

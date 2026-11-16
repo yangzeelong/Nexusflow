@@ -108,6 +108,21 @@ public:
 
     /// Whether this worker is a source (has no input queue to pull from).
     bool IsSource() const { return m_inputQueueMap.empty(); }
+
+    /// True when every input edge is closed, so nothing can arrive again.
+    /// A stage uses this to tell "temporarily empty" from "finished": during a
+    /// drain the second one means it has consumed everything it was given.
+    bool AllInputsShutdown() const {
+        if (m_inputQueueMap.empty()) {
+            return false;
+        }
+        for (const auto& item : m_inputQueueMap) {
+            if (item.second && !item.second->isShutdown()) {
+                return false;
+            }
+        }
+        return true;
+    }
     /// Whether this worker drives RunFusion() instead of the batch loop.
     bool HasSyncInputs() const { return m_syncInputs; }
 
