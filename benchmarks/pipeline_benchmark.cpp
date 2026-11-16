@@ -31,7 +31,7 @@ class SourceModule : public Module {
 public:
     SourceModule(std::string name) : Module(std::move(name)) {}
 
-    void Process(Message& _) override {
+    void Process(Message& /*inputMessage*/) override {
         Message msg(BenchmarkPayloadMessage{steady_clock::now()});
         Broadcast(msg);
     };

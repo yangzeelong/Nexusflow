@@ -21,11 +21,11 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | 路径 | 作用 |
 | --- | --- |
 | `include/nexusflow/` | 公开头文件（Message/Module/Pipeline/PipelineBuilder/ModuleFactory/MetricsCollector/Logging…） |
-| `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（MetricsCollector、Logging 实现与测试） |
+| `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（MetricsCollector、Logging 实现） |
 | `include/nexusflow/common/` | 公开的 header-only 容器/工具：`Any`、`ConcurrentQueue`、`Optional`、`ViewPtr`（`Nexusflow::nexusflow_common` INTERFACE target） |
-| `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 158 个，见 §3） |
+| `tests/test/` | gtest 用例（`nexusflow_tests`，当前 158 个，见 §3）；**全部用例都在这一层**，没有第二处 test 目录 |
 | `examples/` | 3 个纯框架示例：`1-how-to-use`、`2-linear-vision-pipline`、`3-joined-vision-pipline` |
-| `benchmarks/` | Google Benchmark 基准（`nexusflow_benchmarks`） |
+| `benchmarks/` | 两个基准目标：Google Benchmark 用例（`nexusflow_benchmarks`）与端到端吞吐（`pipeline_benchmark`，`--capacity`）；**全部基准源码都在这一层** |
 | `cmake/` | `include.cmake`（第三方依赖 include）、`Summary.cmake`、`3rdparty/*.cmake`（FetchContent 定义） |
 | `extensions/` | 可选扩展；机制与新增扩展见 [`extensions/README.md`](extensions/README.md) |
 | `tools/` | 仓库级脚本（`clang-format-all.sh`） |
@@ -47,7 +47,7 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | 容器/工具（Any、队列、Optional、ViewPtr） | `include/nexusflow/common/*.hpp` |
 | 日志 | `include/nexusflow/Logging.hpp`（公开门面：Level/LoggerParam/LogRecord/LogSink/SetSink，不 include spdlog）+ `src/common/Logging.cpp`（spdlog 后端） |
 | 每 pipeline 上下文（日志 sink / profiler / 自定义指标 / 停止令牌） | `include/nexusflow/PipelineContext.hpp`、`src/pipeline/PipelineContext.cpp` |
-| 单测 | `tests/test/*.cpp`、`src/base/test/`、`src/common/test/` |
+| 单测 | `tests/test/*.cpp`（扁平一层，文件名以 `Test.cpp` 结尾就自动进构建） |
 
 ---
 

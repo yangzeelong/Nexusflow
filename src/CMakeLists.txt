@@ -1,14 +1,12 @@
 file(GLOB_RECURSE NEXUSFLOW_ALL_FILES CONFIGURE_DEPENDS "**.cpp")
 
-# Split source files and test files. 
+# Everything under src/ builds the library, and every unit test lives in
+# tests/test/ (see AGENTS.md). The split stays as a guard: a file that ends in
+# Test.cpp and still sits under src/ is dropped from the library instead of
+# dragging gtest into it.
 separate_files_by_suffix("Test.cpp" "${NEXUSFLOW_ALL_FILES}" NEXUSFLOW_SRC_FILES NEXUSFLOW_TEST_FILES)
 message(STATUS "NEXUSFLOW_ALL_FILES : ${NEXUSFLOW_ALL_FILES}")
 message(STATUS "NEXUSFLOW_SRC_FILES : ${NEXUSFLOW_SRC_FILES}")
-message(STATUS "NEXUSFLOW_TEST_FILES : ${NEXUSFLOW_TEST_FILES}")
-
-if(NEXUSFLOW_TEST_FILES)
-    set_property(GLOBAL APPEND PROPERTY GLOBAL_TEST_SOURCES ${NEXUSFLOW_TEST_FILES})
-endif()
 
 
 include(GNUInstallDirs)

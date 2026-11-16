@@ -1,5 +1,26 @@
 ## 性能评测 (Performance Benchmark)
 
+### 目录内容
+
+`benchmarks/` 里放两个基准目标，**源码都在这一层**（不再有子目录）：
+
+| 文件 | 目标 | 说明 |
+| --- | --- | --- |
+| `BenchmarkMessage.cpp` + `benchmark_main.cpp` | `nexusflow_benchmarks` | Google Benchmark 微基准：消息创建/广播（拷贝）/数据访问两种实现对比 |
+| `pipeline_benchmark.cpp` | `pipeline_benchmark` | 端到端吞吐与平均延迟，带 `--capacity N`（边队列深度），自己带 `main()` |
+
+```powershell
+# 微基准
+cmake --build build --config Release --target nexusflow_benchmarks --parallel 16
+.\build\benchmarks\Release\nexusflow_benchmarks.exe
+
+# 端到端吞吐
+cmake --build build --config Release --target pipeline_benchmark --parallel 16
+.\build\benchmarks\Release\pipeline_benchmark.exe --capacity 8 --benchmark_min_time=3s
+```
+
+剩下的部分记录 `pipeline_benchmark` 的测试拓扑与历史结果（在 WSL2 上测得，数字只作参考）。
+
 为了评估 NexusFlow 框架的性能开销，项目内提供了一个基准测试脚本。该脚本用于测量在特定拓扑结构下，框架的消息**吞吐量**和端到端**平均延迟**。
 
 ### 测试拓扑
