@@ -433,6 +433,21 @@ public:
             return;
         }
         std::lock_guard<std::mutex> lock(m_waitMutex);
+        // Destroy whatever the previous run left behind *before* the indices are
+        // rewound. ~SpscQueue() only walks [head, tail), so zeroing them first
+        // would make the leftovers unreachable: every T still parked in a slot
+        // would keep its payload alive for good, and the next run would
+        // placement-new over a live object. Neither is recoverable afterwards.
+        const std::size_t head = m_head.load(std::memory_order_relaxed);
+        const std::size_t tail = m_tail.load(std::memory_order_relaxed);
+        for (std::size_t index = head; index != tail; ++index) {
+            ElementAt(index % m_slotCount)->~T();
+        }
+        // pushed/popped are read straight off the two indices, so fold what the
+        // previous run counted into a baseline before they are rewound: *Total
+        // must never go backwards (see Stats.hpp), not even across a restart.
+        m_pushedBase += tail;
+        m_poppedBase += head;
         m_shutdown.store(false, std::memory_order_release);
         m_head.store(0, std::memory_order_release);
         m_tail.store(0, std::memory_order_release);
@@ -570,17 +585,27 @@ public:
         }
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         std::unique_lock<std::mutex> lock(m_waitMutex);
+        // Raise the flag *before* re-checking room, because WakeProducer() only
+        // notifies while it is set: announcing the wait after the check would
+        // miss a wake-up that lands in between, and the producer would sit out
+        // the whole timeout. A stale "waiter" only costs one spurious notify.
+        m_producerWaiting.store(true, std::memory_order_seq_cst);
+        bool hasRoom = false;
         for (;;) {
             if (!Full()) {
-                return true;
+                hasRoom = true;
+                break;
             }
             if (m_shutdown.load(std::memory_order_acquire)) {
-                return false;
+                break;
             }
             if (m_condNotFull.wait_until(lock, deadline) == std::cv_status::timeout) {
-                return !Full();
+                hasRoom = !Full();
+                break;
             }
         }
+        m_producerWaiting.store(false, std::memory_order_seq_cst);
+        return hasRoom;
     }
 
     /**
@@ -600,11 +625,13 @@ public:
         counters.size          = getSize();
         counters.capacity      = static_cast<std::size_t>(m_capacity);
         counters.highWaterMark = m_highWaterMark.load(std::memory_order_relaxed);
-        // The ring keeps no separate counters: every successful push/pop moves
-        // the respective index by exactly one, and the hot path must not touch a
-        // third cache line for statistics.
-        counters.pushed = m_tail.load(std::memory_order_relaxed);
-        counters.popped = m_head.load(std::memory_order_relaxed);
+        // The ring keeps no separate per-message counters: every successful
+        // push/pop moves the respective index by exactly one, and the hot path
+        // must not touch a third cache line for statistics. restart() folds the
+        // previous run's indices into a baseline first, so these two still only
+        // grow across a Stop()/Start() pair.
+        counters.pushed = m_pushedBase + m_tail.load(std::memory_order_relaxed);
+        counters.popped = m_poppedBase + m_head.load(std::memory_order_relaxed);
         return counters;
     }
 
@@ -826,6 +853,13 @@ private:
     mutable std::mutex m_waitMutex;
     std::condition_variable m_condNotEmpty;
     std::condition_variable m_condNotFull;
+
+    // Offsets folded in by restart(): the hot indices are rewound there, but the
+    // published *Total values must not go backwards, so GetStats() adds these.
+    // Written only by restart(), which is documented to run while no thread is
+    // using the queue; read by GetStats().
+    std::size_t m_pushedBase = 0;
+    std::size_t m_poppedBase = 0;
 };
 
 }    // namespace nexusflow
