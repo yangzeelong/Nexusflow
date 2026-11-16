@@ -136,6 +136,32 @@ TEST(PipelineErrorTest, BuilderRejectsUnknownConnection) {
     EXPECT_EQ(pipeline, nullptr);
 }
 
+// Every module needs at least one edge: actors are derived from the edge list, so
+// a module with no edge would never get a worker while Build() still succeeded.
+TEST(PipelineErrorTest, BuilderRejectsAModuleWithNoEdge) {
+    auto lone = std::make_shared<NoOpSourceModule>("lone");
+
+    // A single module has no edges at all, so it would run nothing.
+    EXPECT_EQ(PipelineBuilder().AddModule(lone).Build(8), nullptr);
+}
+
+TEST(PipelineErrorTest, BuilderRejectsAModuleNothingConnectsTo) {
+    auto source = std::make_shared<NoOpSourceModule>("source");
+    auto sink = std::make_shared<NoOpSinkModule>("sink");
+    auto stray = std::make_shared<NoOpSinkModule>("stray");
+
+    // The connected pair is fine on its own; the third module is the one that must
+    // be refused, which is why the check cannot be "connections are empty".
+    EXPECT_EQ(PipelineBuilder()
+                  .AddModule(source)
+                  .AddModule(sink)
+                  .AddModule(stray)
+                  .Connect("source", "sink")
+                  .Build(8),
+              nullptr);
+}
+
+
 TEST(PipelineErrorTest, BuilderRejectsCycle) {
     auto source = std::make_shared<NoOpSourceModule>("source");
     auto sink = std::make_shared<NoOpSinkModule>("sink");

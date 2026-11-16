@@ -232,16 +232,16 @@ void Worker::WorkLoop() {
                                                         __FILE__, __LINE__);
                         produced = m_modulePtr->ProcessTimed(emptyMessage);
                         if (produced) {
-                            ++m_processedCount;
+                            AddProcessed(1);
                         }
                         // Hand the counters to snapshot readers once per iteration.
                         PublishCounters();
                     } catch (const std::exception& e) {
                         LOG_ERROR("Module '{}' threw while processing: {}", moduleName, e.what());
-                        ++m_failedCount;
+                        AddFailed();
                     } catch (...) {
                         LOG_ERROR("Module '{}' threw an unknown exception while processing.", moduleName);
-                        ++m_failedCount;
+                        AddFailed();
                     }
                     if (!produced) {
                         // An empty invocation either produced nothing to hand over
@@ -281,13 +281,13 @@ void Worker::WorkLoop() {
                     }
                     try {
                         m_modulePtr->ProcessBatch(batchMessage);
-                        m_processedCount += batchMessage.size();
+                        AddProcessed(batchMessage.size());
                     } catch (const std::exception& e) {
                         LOG_ERROR("Module '{}' threw while processing a batch: {}", moduleName, e.what());
-                        ++m_failedCount;
+                        AddFailed();
                     } catch (...) {
                         LOG_ERROR("Module '{}' threw an unknown exception while processing a batch.", moduleName);
-                        ++m_failedCount;
+                        AddFailed();
                     }
                     if (m_profileTimers) {
                         Profiler().EndAverage(m_processTimer);
@@ -352,10 +352,17 @@ void Worker::RunFusion() {
             if (queue->tryPop(message)) {
                 auto messageMeta = message.GetMetaData();
                 auto messageId = messageMeta.messageId;
-                auto& sourceModuleName = messageMeta.sourceName;
+                // Group by the *input edge*, not by the message's sourceName. The
+                // framework never stamps sourceName -- Message's constructor
+                // defaults it to an empty string and the dispatcher does not touch
+                // it -- so two inputs carrying the same message id both landed
+                // under "" and the group could only ever hold one entry. It never
+                // reached expectedInputCount, so every such group was dropped
+                // silently at the fusion timeout (60 s by default).
+                const std::string& inputEdge = queuePair.first;
                 cacheArrivalMs.emplace(messageId, currentTimeMs); // Keeps the first-seen time.
-                messageCache[messageId][sourceModuleName] = message;
-                LOG_DEBUG("Message with ID: {} received from source module: {}", messageId, sourceModuleName);
+                messageCache[messageId][inputEdge] = message;
+                LOG_DEBUG("Message with ID: {} received on input edge: {}", messageId, inputEdge);
             }
         }
 
@@ -373,12 +380,14 @@ void Worker::RunFusion() {
                 fusedMessageVec.push_back(MakeMessage(std::move(messageMap)));
                 try {
                     m_modulePtr->ProcessBatch(fusedMessageVec); // process the fused message
-                    m_processedCount += fusedMessageVec.size();
+                    AddProcessed(fusedMessageVec.size());
                 } catch (const std::exception& e) {
                     LOG_ERROR("Module '{}' threw while processing a fused batch: {}", m_modulePtr->GetModuleName(), e.what());
+                    AddFailed();
                 } catch (...) {
                     LOG_ERROR("Module '{}' threw an unknown exception while processing a fused batch.",
                               m_modulePtr->GetModuleName());
+                    AddFailed();
                 }
                 cacheArrivalMs.erase(messageId);
                 it = messageCache.erase(it); // remove the message from cache
@@ -411,24 +420,24 @@ void Worker::RunFusion() {
                             expectedInputCount > messageMap.size() ? expectedInputCount - messageMap.size() : 0;
                         try {
                             m_modulePtr->ProcessBatch(fusedMessageVec);
-                            m_processedCount += fusedMessageVec.size();
+                            AddProcessed(fusedMessageVec.size());
                         } catch (const std::exception& e) {
                             LOG_ERROR("Module '{}' threw while processing a partially fused batch: {}",
                                       m_modulePtr->GetModuleName(), e.what());
-                            ++m_failedCount;
+                            AddFailed();
                         } catch (...) {
                             LOG_ERROR("Module '{}' threw an unknown exception while processing a partially fused batch.",
                                       m_modulePtr->GetModuleName());
-                            ++m_failedCount;
+                            AddFailed();
                         }
-                        m_droppedCount += missing;
-                        m_fusionExpiredCount += missing;
+                        AddDropped(missing);
+                        AddFusionExpired(missing);
                     } else {
                         LOG_WARN("Timeout for message with ID: {}, will be removed from cache", messageId);
                         // Every partial in the cache is one fused message that will
                         // never reach the module, so it counts as dropped output.
-                        m_droppedCount += messageMap.size();
-                        m_fusionExpiredCount += messageMap.size();
+                        AddDropped(messageMap.size());
+                        AddFusionExpired(messageMap.size());
                     }
                     cacheArrivalMs.erase(arrivalIt);
                     it = messageCache.erase(it);
@@ -489,6 +498,21 @@ std::vector<Message> Worker::PullBatchMessage(size_t maxBatchSize, std::chrono::
     while (!m_stopFlag.load()) {
         // Check exit condition: batch is full.
         if (batchMessage.size() >= maxBatchSize) {
+            break;
+        }
+
+        // Check exit condition: every input edge is closed, so nothing can arrive
+        // again. Without this the stage sat out the whole batch timeout after its
+        // producers had gone -- dead time on the Stop() path, and a stage whose
+        // upstream had already finished looked busy instead of finished.
+        bool allInputsClosed = !m_inputQueueMap.empty();
+        for (const auto& item : m_inputQueueMap) {
+            if (item.second && !item.second->isShutdown()) {
+                allInputsClosed = false;
+                break;
+            }
+        }
+        if (allInputsClosed) {
             break;
         }
 

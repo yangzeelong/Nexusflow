@@ -128,13 +128,35 @@ std::unique_ptr<Pipeline> PipelineBuilder::Build(int edgeQueueCapacity) {
         graph->addEdge(fromIt->second, toIt->second);
     }
 
-    // --- Step 4: Check for cycles ---
+    // --- Step 4: every module needs at least one edge ---
+    // Actors are derived from the edge list, so a module with no edge never gets a
+    // worker. The pipeline used to build successfully and then quietly run
+    // without that module (a single-module pipeline ran nothing at all).
+    {
+        std::unordered_map<std::string, std::size_t> degree;
+        for (const auto& module : m_pImpl->modules) {
+            degree[module->GetModuleName()] = 0;
+        }
+        for (const auto& conn : m_pImpl->connections) {
+            ++degree[conn.first];
+            ++degree[conn.second];
+        }
+        for (const auto& entry : degree) {
+            if (entry.second == 0) {
+                LOG_ERROR("Module '{}' is connected to nothing; every module in a pipeline needs at least one edge.",
+                          entry.first);
+                return nullptr;
+            }
+        }
+    }
+
+    // --- Step 5: Check for cycles ---
     if (graph->hasCycle()) {
         LOG_ERROR("The graph built from the builder contains a cycle; refusing to build the pipeline.");
         return nullptr;
     }
 
-    // --- Step 5: Create the Pipeline from the fully constructed Graph ---
+    // --- Step 6: Create the Pipeline from the fully constructed Graph ---
     auto pipeline = std::unique_ptr<Pipeline>(new Pipeline());
     pipeline->m_pImpl->messageQueueCapacity = edgeQueueCapacity;
     const ErrorCode code = pipeline->InitWithGraph(std::move(graph));

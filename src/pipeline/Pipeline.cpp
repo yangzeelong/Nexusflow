@@ -31,15 +31,21 @@ namespace {
 void CollectDownstream(const std::string& name,
                        const std::unordered_map<std::string, std::vector<std::string>>& downstream,
                        std::unordered_set<std::string>& placed, std::vector<std::string>& order) {
+    // Mark before recursing, not after: the visited set only guards anything if a
+    // cycle sees the node already marked, and marking on the way out left an
+    // A -> B -> A graph recursing until the stack ran out. Both build paths
+    // reject cycles today, so this is the second line of defence, not the first.
+    if (!placed.insert(name).second) {
+        return;
+    }
     const auto it = downstream.find(name);
     if (it != downstream.end()) {
         for (const auto& dst : it->second) {
-            if (dst != name && placed.find(dst) == placed.end()) {
+            if (dst != name) {
                 CollectDownstream(dst, downstream, placed, order);
             }
         }
     }
-    placed.insert(name);
     order.push_back(name);
 }
 
@@ -217,6 +223,19 @@ ErrorCode Pipeline::Start() {
     }
     LOG_DEBUG("Starting pipeline...");
     m_pImpl->drainInProgress.store(false);
+    // A Stop() that overran its stop budget leaves the worker thread joinable on
+    // purpose (see ModuleActor::StopAndJoinWithin), and that thread may still be
+    // inside a blocking push. Reopening the edges first would rewind their
+    // indices underneath it and corrupt the ring, so refuse instead: reopening is
+    // only safe while no thread is using a queue (SpscQueue::restart).
+    for (auto& actorNode : m_pImpl->actorOrderedNodes) {
+        if (actorNode->IsStarted()) {
+            LOG_ERROR("Cannot start pipeline: module '{}' still owns a worker thread from an earlier stop that "
+                      "overran its budget. Wait for that module before starting the pipeline again.",
+                      actorNode->GetModuleName());
+            return ErrorCode::FAILED_ALREADY_START;
+        }
+    }
     // A pipeline may be started again after Stop(): the edges were closed at
     // teardown so that every worker was certain to exit, and they have to be
     // reopened before the workers look at them again.
@@ -384,6 +403,14 @@ ErrorCode Pipeline::Stop() {
     // Nothing can push any more, so every edge can be closed. A stopped pipeline
     // is reusable: Start() with a closed edge used to fail in the middle of its
     // worker rollback, leaving some workers running.
+    //
+    // Whatever a stage could not drain stays visible after this point as
+    // EdgeSnapshot::size (equivalently pushedTotal - poppedTotal): the producer
+    // already counted those messages as processed and as pushed, and the consumer
+    // never popped them, so charging either module's droppedTotal would count them
+    // twice -- see PipelineMetricsTest.ProcessedDroppedAndFailedAccountForEveryMessage
+    // and .StopAccountsForMessagesTheDispatcherCouldNotPush. Making the drain
+    // actually deliver them is a separate piece of work (TODO.md).
     for (auto& queue : m_pImpl->queues) {
         queue->shutdown();
     }
@@ -400,6 +427,17 @@ PipelineSnapshot Pipeline::GetSnapshot() const {
     }
     if (m_pImpl->graph) {
         metrics.name = m_pImpl->graph->getName();
+    }
+
+    // Modules before their edges: a module records a message as processed only
+    // after ProcessBatch() returned, while the message reached its edge from
+    // inside that same call. Reading modules first therefore keeps a reader from
+    // seeing an edge that already holds a message the module has not counted yet.
+    // Pipeline.hpp, Stats.hpp and AGENTS.md §5 all state this order; the loops
+    // used to run the other way round while the comment claimed otherwise.
+    metrics.modules.reserve(m_pImpl->actorOrderedNodes.size());
+    for (const auto& actor : m_pImpl->actorOrderedNodes) {
+        metrics.modules.push_back(TakeModuleSnapshot(*actor));
     }
 
     metrics.edges.reserve(m_pImpl->queues.size());
@@ -426,13 +464,6 @@ PipelineSnapshot Pipeline::GetSnapshot() const {
         metrics.edges.push_back(std::move(edge));
     }
 
-    // Modules before their edges: a reader can then take a module and the edge it
-    // writes into in that order and never see a message that left the module but
-    // has not reached the edge yet.
-    metrics.modules.reserve(m_pImpl->actorOrderedNodes.size());
-    for (const auto& actor : m_pImpl->actorOrderedNodes) {
-        metrics.modules.push_back(TakeModuleSnapshot(*actor));
-    }
     return metrics;
 }
 

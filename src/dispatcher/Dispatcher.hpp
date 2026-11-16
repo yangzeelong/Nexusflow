@@ -82,7 +82,7 @@ public:
      */
     std::uint64_t DroppedCount() const {
         std::atomic_thread_fence(std::memory_order_acquire);
-        return m_droppedCount;
+        return m_droppedCount.load(std::memory_order_relaxed);
     }
 
     /**
@@ -144,9 +144,10 @@ private:
     }
 
     void RecordDroppedPush(const std::string& outputName) {
-        // The owning module's worker thread is the only writer, but a drop is
-        // rare enough that the ordering cost does not matter.
-        m_droppedCount += 1;
+        // Atomic rather than plain: Broadcast and SendTo both run on the owning
+        // module's worker thread, but a counter read without an atomic object in
+        // between the fence pair is a data race by the letter of the standard.
+        m_droppedCount.fetch_add(1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
         if (m_shuttingDown && m_shuttingDown->load(std::memory_order_relaxed)) {
             LOG_DEBUG("Broadcast to output queue {} failed during shutdown: the queue is already closed", outputName);
@@ -158,8 +159,8 @@ private:
     ViewPtr<Config> m_configView;
     std::unordered_map<std::string, ViewPtr<MessageQueue>> m_subscriberMap;
     /// Only the owning module's worker thread writes this (Broadcast and SendTo
-    /// run there), so it is a plain counter; readers fence in DroppedCount().
-    std::uint64_t m_droppedCount = 0;
+    /// run there), so the add is relaxed; DroppedCount() fences before it loads.
+    std::atomic<std::uint64_t> m_droppedCount{0};
     std::atomic<bool>* m_shuttingDown = nullptr;
 };
 

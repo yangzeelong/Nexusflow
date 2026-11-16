@@ -25,8 +25,22 @@ ModuleActor::~ModuleActor() {
     // RAII safety net: ModuleActor owns a joinable std::thread. Destroying it
     // without Stop() would call std::terminate from ~std::thread, which is
     // exactly what happens when a Pipeline is dropped while running.
+    //
+    // A thread that already overran its stop budget is deliberately *not* detached
+    // here. Detaching would hide a module that never finished what it was handed,
+    // so the destructor waits for it instead -- and says so before it starts, so a
+    // hang is attributable to the module that caused it rather than looking like a
+    // framework deadlock.
     if (m_workThread.joinable()) {
-        LOG_WARN("ModuleActor '{}' destroyed while its worker thread was still running; stopping it.", GetModuleName());
+        if (m_stopOverdue) {
+            LOG_ERROR("ModuleActor '{}' is being destroyed while a worker thread that already overran its stop budget "
+                      "is still running; waiting for it to return. A module whose Process() never returns cannot be "
+                      "torn down.",
+                      GetModuleName());
+        } else {
+            LOG_WARN("ModuleActor '{}' destroyed while its worker thread was still running; stopping it.",
+                     GetModuleName());
+        }
         Stop();
     }
 }

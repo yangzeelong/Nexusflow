@@ -110,6 +110,12 @@ public:
      */
     bool IsStarted() const { return m_workThread.joinable(); }
 
+    /// True when the last stop abandoned this module's thread because it did not
+    /// leave its loop within the stop budget. The thread stays joinable, so
+    /// Pipeline::Start() refuses to reopen its edges, and ~ModuleActor waits for it
+    /// rather than detaching. Exposed so a caller can report which module it was.
+    bool IsStopOverdue() const { return m_stopOverdue; }
+
     /**
      * @brief Whether the worker of a previous run is still executing.
      * @details A joined worker reports false. This stays true after

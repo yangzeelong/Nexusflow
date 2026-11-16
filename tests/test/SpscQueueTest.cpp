@@ -163,4 +163,76 @@ TEST(SpscQueueTest, MessageQueueUsesTheLockFreeStorage) {
     EXPECT_EQ(queue.capacity(), 5);
 }
 
+namespace {
+/// Counts live instances so a test can tell a destroyed payload from a leaked one.
+struct LifetimeTracked {
+    explicit LifetimeTracked(int initial = 0) : value(initial) { ++live; }
+    LifetimeTracked(const LifetimeTracked& other) : value(other.value) { ++live; }
+    LifetimeTracked(LifetimeTracked&& other) : value(other.value) { ++live; }
+    LifetimeTracked& operator=(const LifetimeTracked&) = default;
+    LifetimeTracked& operator=(LifetimeTracked&&)      = default;
+    ~LifetimeTracked() { --live; }
+    int value = 0;
+    static std::atomic<int> live;
+};
+std::atomic<int> LifetimeTracked::live{0};
+}    // namespace
+
+// restart() rewinds the two indices, so it has to destroy what they were spanning
+// first: a message left in a slot would keep its payload alive forever and the
+// next push would placement-new straight over a live object.
+TEST(SpscQueueTest, RestartDestroysLeftoversAndKeepsTotals) {
+    LifetimeTracked::live.store(0);
+    {
+        SpscQueue<LifetimeTracked> queue(4);
+        ASSERT_TRUE(queue.push(LifetimeTracked(1)));
+        ASSERT_TRUE(queue.push(LifetimeTracked(2)));
+        ASSERT_EQ(LifetimeTracked::live.load(), 2);
+
+        // shutdown() keeps the buffered items; restart() is what the pipeline
+        // calls on Start(), and it is the call that discards them.
+        queue.shutdown();
+        queue.restart();
+        EXPECT_EQ(LifetimeTracked::live.load(), 0) << "restart() leaked the messages it discarded";
+
+        // pushed/popped are derived from the indices, so a rewind must not take
+        // *Total back to zero: Stats.hpp promises a cumulative counter.
+        const auto afterRestart = queue.GetStats();
+        EXPECT_EQ(afterRestart.pushed, std::size_t(2)) << "*Total must not go backwards across a restart";
+        EXPECT_EQ(afterRestart.popped, std::size_t(0));
+
+        ASSERT_TRUE(queue.push(LifetimeTracked(3)));
+        EXPECT_EQ(queue.GetStats().pushed, std::size_t(3)) << "*Total must keep counting after a restart";
+    }
+    EXPECT_EQ(LifetimeTracked::live.load(), 0);
+}
+
+// A producer parked in waitForRoom() is released by the consumer's wake-up path.
+// That only works because the producer registers itself before it waits;
+// WakeProducer() does nothing while the flag is clear.
+TEST(SpscQueueTest, WaitForRoomWakesWhenConsumerFreesSpace) {
+    SpscQueue<int> queue(1);
+    ASSERT_TRUE(queue.push(1));
+
+    std::atomic<bool> popped{false};
+    std::thread consumer([&queue, &popped]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        int value = 0;
+        queue.tryPop(value);
+        popped.store(true);
+    });
+
+    const auto started = std::chrono::steady_clock::now();
+    const bool hasRoom = queue.waitForRoom(std::chrono::milliseconds(5000));
+    const auto waited =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started);
+    consumer.join();
+
+    EXPECT_TRUE(hasRoom);
+    EXPECT_TRUE(popped.load());
+    // Generous bound: the point is that the wait ends long before the 5000 ms
+    // deadline, not that it is fast to the millisecond.
+    EXPECT_LT(waited.count(), 4000) << "waitForRoom() was not woken by the consumer freeing space";
+}
+
 }    // namespace
