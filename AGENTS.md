@@ -23,7 +23,7 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | `include/nexusflow/` | 公开头文件（Message/Module/Pipeline/PipelineBuilder/ModuleFactory/MetricsCollector/Logging…） |
 | `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（MetricsCollector、Logging 实现与测试） |
 | `include/nexusflow/common/` | 公开的 header-only 容器/工具：`Any`、`ConcurrentQueue`、`Optional`、`ViewPtr`（`Nexusflow::nexusflow_common` INTERFACE target） |
-| `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 134 个，见 §3） |
+| `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 138 个，见 §3） |
 | `examples/` | 3 个纯框架示例：`1-how-to-use`、`2-linear-vision-pipline`、`3-joined-vision-pipline` |
 | `benchmarks/` | Google Benchmark 基准（`nexusflow_benchmarks`） |
 | `cmake/` | `include.cmake`（第三方依赖 include）、`Summary.cmake`、`3rdparty/*.cmake`（FetchContent 定义） |
@@ -43,7 +43,7 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | 模块注册 | `include/nexusflow/ModuleFactory.hpp` |
 | 计时器 / profile（`nexusflow::profiling`，p95、单轴） | `include/nexusflow/MetricsCollector.hpp`、`src/common/MetricsCollector.cpp` |
 | 运行期快照（边/模块计数、`ToString()`） | `include/nexusflow/Stats.hpp`、`src/common/Stats.cpp` |
-| 计数器/快照的命名与并发规则 | 本文件 §5、`docs/telemetry.md`（不入库） |
+| 计数器/快照的命名与并发规则 | 本文件 §5 |
 | 容器/工具（Any、队列、Optional、ViewPtr） | `include/nexusflow/common/*.hpp` |
 | 日志 | `include/nexusflow/Logging.hpp`（公开门面：Level/LoggerParam/LogRecord/LogSink/SetSink，不 include spdlog）+ `src/common/Logging.cpp`（spdlog 后端） |
 | 每 pipeline 上下文（日志 sink / profiler / 自定义指标 / 停止令牌） | `include/nexusflow/PipelineContext.hpp`、`src/pipeline/PipelineContext.cpp` |
@@ -109,8 +109,8 @@ cmake --build build --config Release --parallel 16
 ./build/tests/Release/nexusflow_tests.exe
 ```
 
-实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **134 tests
-from 23 suites，PASSED 134**（MSVC 19.40）。
+实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **138 tests
+from 23 suites，PASSED 138**（MSVC 19.40）。
 
 ---
 
@@ -120,7 +120,7 @@ from 23 suites，PASSED 134**（MSVC 19.40）。
 ./build/bin/nexusflow_tests      # Unix；Windows 见上（build/tests/Release/）
 ```
 
-- 当前 134 个用例（23 个 suite）：消息 7、计时器 8、图 7、Optional 23（TestOptional 18 + OptionalTest 2 + OptionalThrowingTest 3）、Any 5、ConcurrentQueue 7、Dispatcher 4、日志 7、Config 3、MessageMeta 3、SpscQueue 11、SpscMessageStress 1、Pipeline 生命周期 6、Pipeline 错误路径 10、Pipeline 图序 2、Pipeline 计时 1、Pipeline 指标 8、Pipeline 上下文 8、Worker 行为 5、Worker 启动 2、Worker 计时 2。
+- 当前 138 个用例（23 个 suite）：消息 7、计时器 8、图 7、Optional 23（TestOptional 18 + OptionalTest 2 + OptionalThrowingTest 3）、Any 5、ConcurrentQueue 7、Dispatcher 4、日志 7、Config 3、MessageMeta 3、SpscQueue 13、SpscMessageStress 1、Pipeline 生命周期 6、Pipeline 错误路径 12、Pipeline 图序 2、Pipeline 计时 1、Pipeline 指标 8、Pipeline 上下文 8、Worker 行为 5、Worker 启动 2、Worker 计时 2。
 - 用例数随手改：`./build/tests/Release/nexusflow_tests.exe --gtest_list_tests` 数一遍，别照抄本节。
 - 改框架（Message/Module/Pipeline/Dispatcher/Graph/Timer）**必须**跑；不要为了
   让测试通过而改测试语义。
@@ -140,7 +140,7 @@ from 23 suites，PASSED 134**（MSVC 19.40）。
 
 ## 5. 计数器与快照的命名/并发规则
 
-写新的运行期指标时按这一节走，`docs/telemetry.md`（不入库）有完整对照表。
+写新的运行期指标时按这一节走（`docs/telemetry.md` 是本地设计笔记，不入库，不要引用它）。
 
 **命名**
 
@@ -154,7 +154,7 @@ from 23 suites，PASSED 134**（MSVC 19.40）。
 - **`*Total` 只给计数用**。一个"值的累加和"（耗时、字节、像素）用 `*Ms`/`*Bytes` 之类带单位的
   名字，不要写成 `totalMs`：`items` 与它并列时，`totalMs` 会让读者以为"相对谁的 total"，而
   `sumMs` 读作"这些样本加起来是多少毫秒"。早先的 `TimerStats::totalMs` 就是因此改名为
-  `sumMs`（见 `docs/telemetry.md` §1）。
+  `sumMs`。
 - 不要再造 `Stats` / `Metrics` 这种泛称做结构体名：快照用 `*Snapshot`
   （`EdgeSnapshot`/`ModuleSnapshot`/`PipelineSnapshot`），队列计数用
   `QueueCounters`，采样统计用 `MetricSamples`。
@@ -162,14 +162,18 @@ from 23 suites，PASSED 134**（MSVC 19.40）。
 
 **并发**
 
-- 每个计数器只有一个写者（该模块的 worker 线程 / 该模块的 dispatcher），所以用**普通
-  `uint64_t` + `++`**，热路径不付 `lock xadd`（实测 0.3 ns vs 3.4 ns/次）。
+- 计数器是 `std::atomic<uint64_t>`：写用 relaxed `fetch_add`，读用 relaxed `load`。之所以
+  不是"普通 `uint64_t` + `++`"：两侧只有一对 fence、中间没有任何原子对象时，fence-to-fence
+  并不建立 happens-before，按标准就是 data race。relaxed 的 add 在 x86 上仍是一条普通
+  `add`，不额外付 `lock xadd`（热路径代价与原来相同）。
 - 写者每个循环迭代结束调一次 `PublishCounters()`（release fence）发布；读者先调
-  `ObserveCounters()`（acquire fence）再直接读普通变量。读者可能读到"从未同时出现"的组合
+  `ObserveCounters()`（acquire fence）再读。读者可能读到"从未同时出现"的组合
   （例如 pushed 已经 `+1` 而 popped 还没跟上），所以 `GetSnapshot()` **先填 modules 再填
   edges**：先读模块、后读它写出去的那条边，就不会看到凭空出现的消息。
-- 对外可写的计数器入口（如 `Worker::RecordDropped`）一旦被第二个线程调用，就自动切到
-  `m_writerMutex` + 原子加的慢路径，写者数量不再是"约定"而是"检测"。
+- 对外可写的入口（`Worker::RecordDropped` / `RecordFailed`）第一次被第二个线程调用时，
+  用一次 compare-exchange 把 `m_counterWriters` 由 1 翻到 0，此后
+  `CountersAreSingleWriter()` 返回 false。这是**检测**而非约定；正确性不依赖它，因为计数器
+  本身已经是原子的。
 - `Pipeline::ResetMetrics()` **只清 water mark**（`maxSize`）；`*Total` 在流水线生命周期内
   永不回退，重新 `Start()` 也不清零。写新字段时别打破这条。
 
@@ -186,6 +190,6 @@ from 23 suites，PASSED 134**（MSVC 19.40）。
 4. 改完必须验证：构建退出码 0 + `nexusflow_tests` 全绿；**跑了就说跑了，没跑就
    明确说没跑**，不要含糊。
 5. **行尾**：提交前比对 `git diff --stat` 与 `git diff --stat --ignore-cr-at-eol`。
-   本仓库工作区已配置仓库局部 `core.autocrlf true`（Windows 下 Git Bash 的
-   `git` 默认 `autocrlf=false` 会把整个工作区显示成 CRLF 假 diff）。
+   本机 `git` 的 `core.autocrlf` 是 `true`（全局配置，不是仓库局部）。在 Windows
+   上用 Git Bash 时 `git` 默认 `autocrlf=false`，会把整个工作区显示成 CRLF 假 diff。
 6. 汇报带**数字 + 命令原文**；拿不准标"未确认"，不要猜。
