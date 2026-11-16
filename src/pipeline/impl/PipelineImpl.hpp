@@ -42,6 +42,11 @@ public:
     // flag instead of warning again.
     std::atomic<bool> drainInProgress{false};
 
+    // Wall time of the most recent Stop()/Cancel() in milliseconds, published by
+    // Pipeline::Stop()/Cancel() and cleared by Pipeline::Start() (see
+    // PipelineSnapshot::stopPipelineMs).
+    std::atomic<std::uint64_t> lastStopPipelineMs{0};
+
     // Actors in graph order (producers before consumers). Pipeline::Init and
     // Pipeline::Start walk this forward, DeInit walks it backward.
     std::vector<std::shared_ptr<ActorNode>> actorOrderedNodes;

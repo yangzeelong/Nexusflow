@@ -5,6 +5,7 @@
 #include "dispatcher/Dispatcher.hpp"
 #include "nexusflow/ErrorCode.hpp"
 #include <nexusflow/Module.hpp>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <thread>
@@ -159,6 +160,30 @@ public:
         return m_dispatcher->GetOutputQueues();
     }
 
+    /// Milliseconds the most recent stop spent waiting for this module's inputs to
+    /// empty. Written by the thread that ran Stop()/Cancel() and read by whatever
+    /// thread takes a snapshot, so both ends use a relaxed atomic.
+    std::uint64_t LastDrainInputsMs() const { return m_lastDrainInputsMs.load(std::memory_order_relaxed); }
+
+    /// Milliseconds the most recent stop spent waiting for this module's worker
+    /// loop to return once it had been asked to.
+    std::uint64_t LastExitLoopMs() const { return m_lastExitLoopMs.load(std::memory_order_relaxed); }
+
+    /// @brief Publishes how long this module's part of the stop took.
+    /// @details Called by Pipeline::Stop()/Cancel() after handing out the weights:
+    /// the drain wait is zero for a source and for Cancel().
+    void RecordStopTiming(std::uint64_t drainInputsMs, std::uint64_t exitLoopMs) {
+        m_lastDrainInputsMs.store(drainInputsMs, std::memory_order_relaxed);
+        m_lastExitLoopMs.store(exitLoopMs, std::memory_order_relaxed);
+    }
+
+    /// @brief Forgets the previous stop's timing, so a snapshot taken during the
+    /// next run does not report how the previous one ended.
+    void ResetStopTiming() {
+        m_lastDrainInputsMs.store(0, std::memory_order_relaxed);
+        m_lastExitLoopMs.store(0, std::memory_order_relaxed);
+    }
+
 private:
     std::shared_ptr<core::Worker>& GetWorker() { return m_worker; }
     std::shared_ptr<dispatcher::Dispatcher>& GetDispatcher() { return m_dispatcher; }
@@ -169,6 +194,9 @@ private:
     std::unique_ptr<Config> m_config;
 
     std::thread m_workThread;
+
+    std::atomic<std::uint64_t> m_lastDrainInputsMs{0};
+    std::atomic<std::uint64_t> m_lastExitLoopMs{0};
 };
 } // namespace nexusflow
 

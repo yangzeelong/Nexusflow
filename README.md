@@ -264,6 +264,29 @@ state each stage reaches by itself, so the only thing that can still block a sto
 `Process()` that never returns — and that is a bug in the module, not something a
 deadline should paper over.
 
+Where the stop went is in the next snapshot. `PipelineSnapshot::stopPipelineMs` is the wall
+time of the last `Stop()`/`Cancel()`, and each `ModuleSnapshot` carries the part that
+stage owned: `drainInputsMs` is how long the stop waited for its input edges to empty
+(zero for a source, and zero after `Cancel()`, which never drains) and `exitLoopMs` is how
+long it then waited for the module to leave its loop. Both are cleared by `Start()`, so
+a snapshot taken mid-run never reports the previous run's numbers.
+
+```cpp
+pipeline->Stop();
+const auto snapshot = pipeline->GetSnapshot();
+LOG_INFO("stop took {} ms", snapshot.stopPipelineMs);
+for (const auto& module : snapshot.modules) {
+    if (module.drainInputsMs > 0 || module.exitLoopMs > 0) {
+        LOG_INFO("{}: drain {} ms, exit {} ms", module.name, module.drainInputsMs, module.exitLoopMs);
+    }
+}
+```
+
+A stage with a large `drainInputsMs` is what made the stop slow: since stages are torn down
+producers-first, everything downstream of it waits for that drain too. A large `exitLoopMs`
+means the stage was still busy when its turn came, usually finishing the batch it had
+already pulled.
+
 ## Pipeline Context
 
 Each pipeline owns one context object that its modules can reach through

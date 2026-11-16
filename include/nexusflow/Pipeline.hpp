@@ -68,7 +68,10 @@ public:
      * owns its own call, and a framework that guessed a deadline for it would be
      * reporting a timeout it cannot act on.
      *
-     * The pipeline stays usable: Start() runs it again.
+     * The pipeline stays usable: Start() runs it again. Where the time went is in
+     * the next snapshot: PipelineSnapshot::stopPipelineMs is the whole call and each
+     * ModuleSnapshot carries the drainInputsMs (waiting for its inputs to empty) and
+     * exitLoopMs (waiting for it to leave its loop) that stage owned.
      */
     ErrorCode Stop();
 
@@ -82,7 +85,9 @@ public:
      * module counter is charged for it.
      *
      * Blocking on the same terms as Stop(): it returns when every worker thread
-     * has exited. The pipeline stays usable: Start() runs it again.
+     * has exited. The pipeline stays usable: Start() runs it again. The snapshot
+     * reports PipelineSnapshot::stopPipelineMs and each ModuleSnapshot::exitLoopMs, but every
+     * drainInputsMs stays zero: a cancel never drains.
      */
     ErrorCode Cancel();
 

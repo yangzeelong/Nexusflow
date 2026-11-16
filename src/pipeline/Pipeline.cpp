@@ -11,6 +11,7 @@
 #include "impl/PipelineImpl.hpp"
 #include <yaml-cpp/yaml.h>
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <nexusflow/ErrorCode.hpp>
 #include <nexusflow/Module.hpp>
@@ -64,7 +65,15 @@ ModuleSnapshot TakeModuleSnapshot(const ModuleActor& actor) {
     module.droppedTotal = actor.DroppedCount();
     module.fusionExpiredTotal = actor.FusionExpiredCount();
     module.failedTotal = actor.FailedCount();
+    module.drainInputsMs = actor.LastDrainInputsMs();
+    module.exitLoopMs = actor.LastExitLoopMs();
     return module;
+}
+
+// Milliseconds between two points of the stop. Stop() is the only caller, and it
+// only ever feeds strictly increasing readings, so the result cannot be negative.
+std::uint64_t ElapsedMs(std::chrono::steady_clock::time_point from, std::chrono::steady_clock::time_point to) {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(to - from).count());
 }
 
 } // namespace
@@ -243,6 +252,13 @@ ErrorCode Pipeline::Start() {
         queue->restart();
     }
 
+    // What the previous stop measured describes the previous run, so a snapshot
+    // taken from here on reports this one (all zeros until it stops again).
+    m_pImpl->lastStopPipelineMs.store(0, std::memory_order_relaxed);
+    for (auto& actorNode : m_pImpl->actorOrderedNodes) {
+        actorNode->ResetStopTiming();
+    }
+
     std::vector<std::shared_ptr<ActorNode>> startedActors;
     for (auto& actorNode : m_pImpl->actorOrderedNodes) {
         const ErrorCode errCode = actorNode->Start();
@@ -299,6 +315,13 @@ ErrorCode Pipeline::Stop() {
     }
 
     LOG_DEBUG("Stopping pipeline...");
+    // Timed from here so a caller can ask afterwards where the stop went: the
+    // per-stage split lands in ModuleSnapshot::drainInputsMs/exitLoopMs, the total in
+    // PipelineSnapshot::stopPipelineMs.
+    const auto stopStart = std::chrono::steady_clock::now();
+    std::uint64_t drainInputsTotalMs = 0;
+    std::uint64_t slowestDrainInputsMs = 0;
+    std::string slowestDrainStage;
     // From here on, pushes into an edge that the drain already closed count as
     // expected shutdown loss rather than a warning per message.
     m_pImpl->drainInProgress.store(true);
@@ -364,7 +387,10 @@ ErrorCode Pipeline::Stop() {
             // drain below loses nothing by it.
             actor->RequestStop();
             actor->ShutdownOutputs();
+            const auto joinStart = std::chrono::steady_clock::now();
             actor->Stop();
+            // A source has nothing to drain, so its drain weight is always zero.
+            actor->RecordStopTiming(0, ElapsedMs(joinStart, std::chrono::steady_clock::now()));
             continue;
         }
 
@@ -372,9 +398,20 @@ ErrorCode Pipeline::Stop() {
         // output edges closed, so this worker leaves its loop by itself once its
         // batch pull comes back empty. Waiting for its queues to empty is what
         // turns the drain into an actual drain instead of a deadline.
+        const auto drainStart = std::chrono::steady_clock::now();
         actor->WaitForInputsDrained();
+        const auto drainEnd = std::chrono::steady_clock::now();
         actor->RequestStop();
         actor->Stop();
+        const auto joinEnd = std::chrono::steady_clock::now();
+
+        const std::uint64_t drainInputsMs = ElapsedMs(drainStart, drainEnd);
+        actor->RecordStopTiming(drainInputsMs, ElapsedMs(drainEnd, joinEnd));
+        drainInputsTotalMs += drainInputsMs;
+        if (drainInputsMs > slowestDrainInputsMs) {
+            slowestDrainInputsMs = drainInputsMs;
+            slowestDrainStage = name;
+        }
         // The stage can push no more, so the edges it feeds are closed before the
         // next stage is handled: that is what tells the next one "nothing more
         // will ever arrive".
@@ -395,7 +432,14 @@ ErrorCode Pipeline::Stop() {
     }
     m_pImpl->started = false;
     m_pImpl->drainInProgress.store(false);
-    LOG_DEBUG("Pipeline stopped successfully.");
+    const std::uint64_t stopPipelineMs = ElapsedMs(stopStart, std::chrono::steady_clock::now());
+    m_pImpl->lastStopPipelineMs.store(stopPipelineMs, std::memory_order_relaxed);
+    if (slowestDrainInputsMs > 0) {
+        LOG_DEBUG("Pipeline drained in {} ms of waiting, slowest stage '{}' at {} ms; whole stop took {} ms.",
+                  drainInputsTotalMs, slowestDrainStage, slowestDrainInputsMs, stopPipelineMs);
+    } else {
+        LOG_DEBUG("Pipeline stopped successfully, nothing left to drain; whole stop took {} ms.", stopPipelineMs);
+    }
     return ErrorCode::SUCCESS;
 }
 
@@ -409,6 +453,9 @@ ErrorCode Pipeline::Cancel() {
     }
 
     LOG_DEBUG("Cancelling pipeline...");
+    // Timed like Stop(): the per-stage weight is join only, because Cancel() never
+    // drains (ModuleSnapshot::drainInputsMs stays zero).
+    const auto cancelStart = std::chrono::steady_clock::now();
     // Same as Stop(): pushes into an edge the cancel already closed are expected
     // shutdown loss, not a warning per message.
     m_pImpl->drainInProgress.store(true);
@@ -432,7 +479,9 @@ ErrorCode Pipeline::Cancel() {
     }
     for (auto& actorNode : m_pImpl->actorOrderedNodes) {
         if (actorNode && actorNode->IsStarted()) {
+            const auto joinStart = std::chrono::steady_clock::now();
             actorNode->Stop();
+            actorNode->RecordStopTiming(0, ElapsedMs(joinStart, std::chrono::steady_clock::now()));
         }
     }
 
@@ -445,7 +494,9 @@ ErrorCode Pipeline::Cancel() {
     }
     m_pImpl->started = false;
     m_pImpl->drainInProgress.store(false);
-    LOG_DEBUG("Pipeline cancelled successfully.");
+    const std::uint64_t cancelPipelineMs = ElapsedMs(cancelStart, std::chrono::steady_clock::now());
+    m_pImpl->lastStopPipelineMs.store(cancelPipelineMs, std::memory_order_relaxed);
+    LOG_DEBUG("Pipeline cancelled in {} ms; nothing was drained.", cancelPipelineMs);
     return ErrorCode::SUCCESS;
 }
 
@@ -457,6 +508,7 @@ PipelineSnapshot Pipeline::GetSnapshot() const {
     if (m_pImpl->graph) {
         metrics.name = m_pImpl->graph->getName();
     }
+    metrics.stopPipelineMs = m_pImpl->lastStopPipelineMs.load(std::memory_order_relaxed);
 
     // Modules before their edges: a module records a message as processed only
     // after ProcessBatch() returned, while the message reached its edge from

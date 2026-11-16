@@ -4,7 +4,7 @@
 
 **同步基线**：分支 `fix/pipeline-drain-on-stop`（基于 `master` @ `0b3ce51`，PR #21 已合并）。
 本轮 `Stop()`/`Cancel()` 的改动在**工作区**，尚未提交。
-**测试基线**：`154 tests from 25 test suites，PASSED 154`（MSVC 19.40）。
+**测试基线**：`158 tests from 26 test suites，PASSED 158`（MSVC 19.40）。
 **构建**：`cmake --build build --config Release --parallel 16` → 退出码 0。注意会刷出
 大量 `C4819`（源文件含 UTF-8 中文注释，MSVC 按 936 代码页读取）。想要干净构建，
 给目标加 `/utf-8`；在加上之前不要在本文件里声称"无 warning"。
@@ -290,6 +290,30 @@ pushedTotal == poppedTotal + size + discardedTotal
 **不要把 discarded 记进模块的 `droppedTotal`**：生产者已经把它算进 `processedTotal` +
 `pushedTotal`，消费者从未 pop 过它，记给谁都是重复计账。
 
+### 停机计时（可观测性）
+
+`Stop()` / `Cancel()` 自己计时，结果落在快照里，不需要在外部用 `steady_clock` 把调用包一层：
+
+| 字段 | 含义 |
+| --- | --- |
+| `PipelineSnapshot::stopPipelineMs` | 最近一次 `Stop()`/`Cancel()` 的墙钟时间 |
+| `ModuleSnapshot::drainInputsMs` | 这次停机里该阶段等输入边变空用了多久；源的天然是 0，`Cancel()` 之后全是 0 |
+| `ModuleSnapshot::exitLoopMs` | 该阶段从"被要求停"到线程退出用了多久（含它当时手里那一批） |
+
+三者都**由 `Start()` 清零**（`ModuleActor::ResetStopTiming()` / `PipelineImpl::lastStopPipelineMs`），所以
+运行中的快照不会报上一轮是怎么结束的。它们不是 `*Total`，不受"`*Total` 永不清零"那条规则约束
+（`AGENTS.md` §5 已单独写明）。写侧是 relaxed atomic（`ModuleActor::RecordStopTiming()`），
+读侧 `Pipeline::GetSnapshot()` 直接 load。
+
+`Stop()` 结束时还会打一条 DEBUG，省得调用方自己拼：
+
+```
+Pipeline drained in 125 ms of waiting, slowest stage 'timing-sink' at addad ms; whole stop took 249 ms.
+```
+
+（实测那次的数字：drain 125 ms、整体 249 ms——差额来自 sink 手里那一批还没处理完，记在它的
+`exitLoopMs` 里。）
+
 ### 用例
 
 | 用例 | 断言 |
@@ -302,18 +326,22 @@ pushedTotal == poppedTotal + size + discardedTotal
 | `PipelineDrainTest.*` | `Stop()` 全量送达、每条边 `poppedTotal == pushedTotal` |
 | `SpscQueueTest.ClearDiscardsBufferedMessagesAndKeepsTheIdentity` / `ClearKeepsTheQueueClosed` / `RepeatedClearsAccumulateInsteadOfRewindingTotals` | `clear()` 析构残留、保持关闭、`*Total` 单调 |
 | `ConcurrentQueueTest.ClearDiscardsAndKeepsTheIdentity` / `ClearKeepsTheQueueClosed` | fallback 路径与上面一致 |
+| `PipelineStopTimingTest.StopRecordsDrainTimeOfTheStageThatHeldItUp` | 有积压时 `Stop()`：sink 的 `drainInputsMs >= 20`、源的 `drainInputsMs == 0`、`stopPipelineMs >= drainInputsMs`，边空且 `discardedTotal == 0` |
+| `PipelineStopTimingTest.CancelTimesTheExitInsteadOfADrain` | `Cancel()`：所有模块 `drainInputsMs == 0`、`exitLoopMs <= stopPipelineMs`，卡在 `Process()` 里的 sink `exitLoopMs >= 20` |
+| `PipelineStopTimingTest.StartForgetsThePreviousStopTiming` | `Stop()` 后 sink 的 `drainInputsMs > 0`，`Start()` 后 `stopPipelineMs`/`drainInputsMs`/`exitLoopMs` 全为 0 |
+| `PipelineStopTimingTest.SnapshotReportsZeroTimingBeforeAnyStop` | 一次都没停过时三者全为 0 |
 
 ### 内部改动清单
 
 | 文件 | 改什么 |
 | --- | --- |
 | `include/nexusflow/Pipeline.hpp` | `Stop()` 文档改写；新增 `Cancel()` |
-| `include/nexusflow/Stats.hpp` | `EdgeSnapshot::discardedTotal` |
+| `include/nexusflow/Stats.hpp` | `EdgeSnapshot::discardedTotal`；`ModuleSnapshot::drainInputsMs`/`exitLoopMs`；`PipelineSnapshot::stopPipelineMs` |
 | `include/nexusflow/common/SpscQueue.hpp` | `clear()`；`QueueCounters::discardedTotal`；`DiscardBufferedLocked()`；`waitUntilEmpty()` 去掉超时参数 |
 | `include/nexusflow/common/ConcurrentQueue.hpp` | 同上（fallback 路径） |
-| `src/pipeline/Pipeline.cpp` | `Stop()` 去掉预算；新增 `Cancel()`；`GetSnapshot()` 透传 `discardedTotal` |
-| `src/pipeline/impl/PipelineImpl.hpp` | 删除 `drainTimeout` / `stopTimeout` |
-| `src/module/ModuleActor.{hpp,cpp}` | 删除 `StopAndJoinWithin` / `IsStopOverdue` / `BlockingTime`；`WaitForInputsDrained()` 去掉参数 |
+| `src/pipeline/Pipeline.cpp` | `Stop()` 去掉预算；新增 `Cancel()`；`GetSnapshot()` 透传 `discardedTotal` 与停机计时；`Stop()`/`Cancel()` 逐阶段计时并发布 `lastStopPipelineMs` |
+| `src/pipeline/impl/PipelineImpl.hpp` | 删除 `drainTimeout` / `stopTimeout`；新增 `lastStopPipelineMs` |
+| `src/module/ModuleActor.{hpp,cpp}` | 删除 `StopAndJoinWithin` / `IsStopOverdue` / `BlockingTime`；`WaitForInputsDrained()` 去掉参数；新增 `RecordStopTiming()` / `LastDrainInputsMs()` / `LastExitLoopMs()` / `ResetStopTiming()` |
 | `src/core/Worker.{hpp,cpp}` | 删除 `WaitForStopRequest` / `m_loopCond` / 若干只服务旧预算的 accessor；`WaitForInputsDrained()` 改为无参数 |
 
 ### 别重犯的坑
