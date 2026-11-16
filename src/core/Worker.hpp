@@ -203,7 +203,7 @@ public:
      */
     std::uint64_t ProcessedCount() const {
         ObserveCounters();
-        return m_processedCount;
+        return m_processedCount.load(std::memory_order_relaxed);
     }
 
     /**
@@ -213,33 +213,21 @@ public:
      */
     std::uint64_t DroppedCount() const {
         ObserveCounters();
-        return m_droppedCount;
+        return m_droppedCount.load(std::memory_order_relaxed);
     }
 
     /// Returns false once a second thread recorded a drop or a failure, i.e.
-    /// once this worker's counters no longer have a single writer.
-    bool CountersAreSingleWriter() const {
-        return m_counterWriters.load(std::memory_order_relaxed) == 1U && m_extraWriters.load(std::memory_order_relaxed) == 0U;
-    }
+    /// once this worker's counters are no longer driven by the loop thread alone.
+    bool CountersAreSingleWriter() const { return m_counterWriters.load(std::memory_order_acquire) == 1U; }
 
     /// Bumps the drop counter.
-    /// @details Normally called from this worker's own loop, which is the only
-    /// writer, so the counter is a plain increment. RecordDropped() is public so
-    /// a second thread can report a drop too; when that happens this switches to
-    /// a mutex-protected atomic add and PublishCounters() takes the same lock.
-    /// See the comment on the counter members for why the plain increment is
-    /// worth the extra branch.
+    /// @details The loop thread increments its counters directly (see the Add*
+    /// helpers), which is the common path. This entry is public so another thread
+    /// can report a drop as well; the statistics it affects are atomics, so the
+    /// only thing this has to do beyond the add is claim the multi-writer state.
     void RecordDropped(std::uint64_t count = 1) {
-        if (CountersAreSingleWriter()) {
-            m_droppedCount += count;
-            return;
-        }
-        // A second writer exists: fall back to a locked read-modify-write and let
-        // the loop thread take the same lock from now on.
-        m_extraWriters.fetch_add(1, std::memory_order_relaxed);
-        m_counterWriters.store(0, std::memory_order_relaxed);
-        std::lock_guard<std::mutex> lock(m_writerMutex);
-        m_droppedCount += count;
+        EnterMultiWriter();
+        AddDropped(count);
     }
 
     /**
@@ -249,7 +237,7 @@ public:
      */
     std::uint64_t FusionExpiredCount() const {
         ObserveCounters();
-        return m_fusionExpiredCount;
+        return m_fusionExpiredCount.load(std::memory_order_relaxed);
     }
 
     /**
@@ -260,18 +248,12 @@ public:
      */
     std::uint64_t FailedCount() const {
         ObserveCounters();
-        return m_failedCount;
+        return m_failedCount.load(std::memory_order_relaxed);
     }
 
     void RecordFailed() {
-        if (CountersAreSingleWriter()) {
-            ++m_failedCount;
-            return;
-        }
-        m_extraWriters.fetch_add(1, std::memory_order_relaxed);
-        m_counterWriters.store(0, std::memory_order_relaxed);
-        std::lock_guard<std::mutex> lock(m_writerMutex);
-        ++m_failedCount;
+        EnterMultiWriter();
+        AddFailed();
     }
 
     /** @brief Signals the loop to return without joining (used by the drain). */
@@ -352,47 +334,45 @@ private:
      * PublishCounters() and every reader calls ObserveCounters(), which is the
      * matching acquire fence, first.
      *
-     * RecordDropped()/RecordFailed() are public, so a caller could bump them
-     * from a second thread. The moment that happens m_counterWriters drops to 0
-     * and every writer, the loop included, takes m_writerMutex and uses an
-     * atomic add: correctness first, and the fallback costs nothing while there
-     * is only one writer.
+     * RecordDropped()/RecordFailed() are public, so a caller can bump them from a
+     * second thread. Keeping the counters atomic is what makes that legal at
+     * all: a fence-to-fence pair with no atomic object in between establishes no
+     * happens-before, so plain counters read while a second thread wrote them were
+     * a data race by the letter of the standard, not just in theory.
      */
-    std::uint64_t m_processedCount = 0;
-    std::uint64_t m_droppedCount = 0;
+    std::atomic<std::uint64_t> m_processedCount{0};
+    std::atomic<std::uint64_t> m_droppedCount{0};
     /// Subset of m_droppedCount: fusion groups dropped after the timeout.
-    std::uint64_t m_fusionExpiredCount = 0;
-    std::uint64_t m_failedCount = 0;
-    /// 1 while the loop thread is the only writer, 0 once anybody else has
-    /// recorded a drop or a failure.
+    std::atomic<std::uint64_t> m_fusionExpiredCount{0};
+    std::atomic<std::uint64_t> m_failedCount{0};
+    /// 1 while only the loop thread writes, 0 once a second thread has reported a
+    /// drop or a failure. Flipped by a compare-exchange: the test-then-set this
+    /// replaces could let two threads both conclude they were the only writer, and
+    /// it could never switch at all -- only the slow path cleared the flag, and the
+    /// slow path was only reached once the flag was already clear.
     std::atomic<unsigned> m_counterWriters{1};
-    std::atomic<unsigned> m_extraWriters{0};
-    mutable std::mutex m_writerMutex;
+
+    /// Claims the multi-writer state. Only the transition matters; a thread that
+    /// arrives after it finds the flag already 0 and changes nothing.
+    void EnterMultiWriter() {
+        unsigned expected = 1U;
+        (void)m_counterWriters.compare_exchange_strong(expected, 0U, std::memory_order_acq_rel,
+                                                       std::memory_order_relaxed);
+    }
+
+    void AddProcessed(std::uint64_t count) { m_processedCount.fetch_add(count, std::memory_order_relaxed); }
+    void AddFailed() { m_failedCount.fetch_add(1, std::memory_order_relaxed); }
+    void AddDropped(std::uint64_t count) { m_droppedCount.fetch_add(count, std::memory_order_relaxed); }
+    void AddFusionExpired(std::uint64_t count) { m_fusionExpiredCount.fetch_add(count, std::memory_order_relaxed); }
 
     /// Acquire-side bookend: everyone who reads a counter loads this first.
-    /// Cheap enough for a snapshot, and it keeps the plain counter's reads from
+    /// Cheap enough for a snapshot, and it keeps a snapshot's counter loads from
     /// being reordered before the writes the loop published.
-    void ObserveCounters() const {
-        if (m_counterWriters.load(std::memory_order_relaxed) == 1U && m_extraWriters.load(std::memory_order_relaxed) == 0U) {
-            std::atomic_thread_fence(std::memory_order_acquire);
-            return;
-        }
-        m_writerMutex.lock();
-        m_writerMutex.unlock();
-        std::atomic_thread_fence(std::memory_order_acquire);
-    }
+    void ObserveCounters() const { std::atomic_thread_fence(std::memory_order_acquire); }
 
     /// Publishers everything this worker recorded. Called by the loop thread
     /// once per iteration; also the release-side bookend for readers.
-    void PublishCounters() const {
-        if (m_counterWriters.load(std::memory_order_relaxed) == 1U && m_extraWriters.load(std::memory_order_relaxed) == 0U) {
-            std::atomic_thread_fence(std::memory_order_seq_cst);
-            return;
-        }
-        m_writerMutex.lock();
-        m_writerMutex.unlock();
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-    }
+    void PublishCounters() const { std::atomic_thread_fence(std::memory_order_seq_cst); }
 
     // Wakes a caller waiting for the loop to leave (see WaitForStopRequest()).
     mutable std::mutex m_loopMutex;
