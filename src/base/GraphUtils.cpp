@@ -192,6 +192,17 @@ std::unique_ptr<Graph> CreateGraphFromYaml(const std::string& configPath) {
             LOG_INFO("Final Created {} connections.", connections_yaml.size());
         }
 
+        // Every module needs at least one edge. Actors are derived from the edge
+        // list, so a module that is declared but connected to nothing never gets a
+        // worker: the graph would load successfully and silently run without it.
+        for (const auto& pair : tempNodeMap) {
+            if (inDegree[pair.first] == 0 && outDegree[pair.first] == 0) {
+                LOG_ERROR("Module '{}' is connected to nothing; every module in a pipeline needs at least one edge.",
+                          pair.first);
+                return nullptr;
+            }
+        }
+
         // TODO:
         // // 4. 验证图的拓扑结构 (这是关键步骤！)
         // // 尽管 Graph 不再存储输入/输出节点，但我们必须验证它们是否存在且唯一
