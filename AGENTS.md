@@ -23,7 +23,7 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | `include/nexusflow/` | 公开头文件（Message/Module/Pipeline/PipelineBuilder/ModuleFactory/MetricsCollector/Logging…） |
 | `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（MetricsCollector、Logging 实现与测试） |
 | `include/nexusflow/common/` | 公开的 header-only 容器/工具：`Any`、`ConcurrentQueue`、`Optional`、`ViewPtr`（`Nexusflow::nexusflow_common` INTERFACE target） |
-| `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 140 个，见 §3） |
+| `tests/test/`、`src/*/test/` | gtest 用例（`nexusflow_tests`，当前 142 个，见 §3） |
 | `examples/` | 3 个纯框架示例：`1-how-to-use`、`2-linear-vision-pipline`、`3-joined-vision-pipline` |
 | `benchmarks/` | Google Benchmark 基准（`nexusflow_benchmarks`） |
 | `cmake/` | `include.cmake`（第三方依赖 include）、`Summary.cmake`、`3rdparty/*.cmake`（FetchContent 定义） |
@@ -109,8 +109,8 @@ cmake --build build --config Release --parallel 16
 ./build/tests/Release/nexusflow_tests.exe
 ```
 
-实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **140 tests
-from 23 suites，PASSED 140**（MSVC 19.40）。
+实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **142 tests
+from 24 suites，PASSED 142**（MSVC 19.40）。
 
 ---
 
@@ -120,7 +120,7 @@ from 23 suites，PASSED 140**（MSVC 19.40）。
 ./build/bin/nexusflow_tests      # Unix；Windows 见上（build/tests/Release/）
 ```
 
-- 当前 140 个用例（23 个 suite）：消息 7、计时器 8、图 7、Optional 23（TestOptional 18 + OptionalTest 2 + OptionalThrowingTest 3）、Any 5、ConcurrentQueue 7、Dispatcher 4、日志 7、Config 3、MessageMeta 3、SpscQueue 13、SpscMessageStress 1、Pipeline 生命周期 6、Pipeline 错误路径 12、Pipeline 图序 2、Pipeline 计时 1、Pipeline 指标 8、Pipeline 上下文 8、Worker 行为 7、Worker 启动 2、Worker 计时 2。
+- 当前 142 个用例（24 个 suite）：消息 7、计时器 8、图 7、Optional 23（TestOptional 18 + OptionalTest 2 + OptionalThrowingTest 3）、Any 5、ConcurrentQueue 7、Dispatcher 4、日志 7、Config 3、MessageMeta 3、SpscQueue 13、SpscMessageStress 1、Pipeline 生命周期 6、Pipeline 错误路径 12、Pipeline 图序 2、Pipeline 计时 1、Pipeline 指标 8、Pipeline 上下文 8、Pipeline 排水 2、Worker 行为 7、Worker 启动 2、Worker 计时 2。
 - 用例数随手改：`./build/tests/Release/nexusflow_tests.exe --gtest_list_tests` 数一遍，别照抄本节。
 - 改框架（Message/Module/Pipeline/Dispatcher/Graph/Timer）**必须**跑；不要为了
   让测试通过而改测试语义。

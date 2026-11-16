@@ -203,22 +203,31 @@ cmake --build build\perf-probe\build --config Release --target pipeline_benchmar
 
 ---
 
-## 停机排水（真排水）：待设计
+## 停机排水（已实现）
 
-现状：`Worker` 的循环条件是 `while (!m_stopFlag.load())`，收到停止就退出，**不消费积压**。
-`Pipeline::Stop()` 的"排水"因此对源模块的直接下游是空操作（`waitUntilEmpty` 在队列
-shutdown 时短路返回 true，不看 `size`），残留消息留在边里 —— 既没被处理，也不计进任何
-`*Total`，只能通过 `EdgeSnapshot::size`（等价于 `pushedTotal - poppedTotal`）看到。
+`Stop()` 现在是**生产者优先**的单趟拓扑顺序：停一个阶段时，先 `RequestStop`、关掉它的输出边、
+再 join，然后才轮到他下游的阶段。关掉输出边是释放"卡在 push 里等空位"的生产者所必需的——
+下游完全可能根本不消费。下游阶段此时的输入边已经关闭，于是它自己把积压消费完，
+`WaitForInputsDrained` 这时才真的等到队列清空。
 
-**不要**把残留记进某个模块的 `droppedTotal`：生产者已经把它算进 `processedTotal` 和
-`pushedTotal`，再记一次就是重复计账；消费者又没 pop 过它，记给消费者会破坏"丢弃记在
-尝试发送的模块"这条约定（见 `PipelineMetricsTest` 的
-`ProcessedDroppedAndFailedAccountForEveryMessage` 与
-`StopAccountsForMessagesTheDispatcherCouldNotPush` 两条用例）。
+`SpscQueue::waitUntilEmpty()` 不再在 shutdown 时短路返回 true：shutdown 只是拒绝新 push，
+消费者仍在 pop，提前返回正是"排水跳过积压"的原因。
 
-正确方向：停机时让消费者**继续消费**，直到它的输入边全部 shutdown 且为空再停该阶段。
-现有的 sinks-first 顺序配合"输入边一空闲就 `RequestStop`"能自底向上收敛，但要重整
-`Stop()` 的请求时序，改动面不小，单独排期。
+**踩过的两只坑**，每个都让实现回退过一次，别再犯：
+
+1. 曾让 worker 在"输入全关且取空"时自行退出循环。看起来更简洁，但有竞态：一次已经通过
+   shutdown 检查的 push 可能在该边关闭之后才落地，而消费者已按"空 + 已关"退出，于是这条
+   消息没人取，排水只能白等整个预算。现在消费者只在被 `RequestStop` 时退出。
+2. 曾把源的 `ShutdownOutputs()` 挪到 join 之后。当下游是"从不消费的 sink"时，源会永久卡在
+   push 里，只能等 `stopTimeout` 被放弃线程。所以源必须**先关边、再 join**。
+
+回归用例：`PipelineDrainTest.StopDeliversWhateverTheSinkHasNotTakenYet` 与
+`PipelineDrainTest.StopDrainsThroughAnIntermediateStage`。前者在旧实现上会看到边里剩一半
+消息（pushed 8 / popped 4）。
+
+仍然成立：排水预算用尽时残留的消息只体现在 `EdgeSnapshot::size`（= pushedTotal - poppedTotal），
+**不要**把它记进任何模块的 `droppedTotal`——生产者已经算过 processed+pushed，消费者从未 pop
+过它，记给谁都是重复计账。
 
 ---
 
