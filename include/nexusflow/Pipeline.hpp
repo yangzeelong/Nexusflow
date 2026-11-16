@@ -23,10 +23,10 @@ class PipelineContext;
 namespace nexusflow {
 
 // There is deliberately no framework-wide default edge capacity. Queue depth is
-// a property of the pipeline being built -- a 4K vision stage and a 959-wide
+// a property of the pipeline being built -- a 4K vision stage and a 640-wide
 // detector want very different backlogs -- so every pipeline states it:
-// PipelineBuilder::Build(int) for code, buildQueueCapacity for yaml. A graph that
-// arrives without one (CreateFromGraph) takes the capacity the graph carries.
+// PipelineBuilder::Build(int) for code, graph.messageQueueCapacity for yaml.
+// A pipeline that arrives without one is refused, not given a guess.
 
 /**
  * @brief Capacity of the shared queue inside a peer-to-peer (join) group.
