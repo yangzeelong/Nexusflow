@@ -43,6 +43,8 @@
 - 去框架级默认边容量 `kDefaultMessageQueueCapacity`；`Build(int)` / `graph.messageQueueCapacity` 必填（PR #18）。
 - 源模块背压改为 park 在满输出边上（`SpscQueue::waitForRoom`），不再定时 sleep（PR #18）。
 - `Pipeline::Start()` 幂等；删除全部 `@deprecated`（PR #18）。
+- 停机语义 `Stop()`（排空）/ `Cancel()`（丢弃）＋每阶段 `drainInputsMs`/`exitLoopMs`（PR #23）。
+- 目录归位：全部用例收进 `tests/test/`、全部基准源码收进 `benchmarks/`（PR #24）。
 
 ---
 
@@ -55,10 +57,11 @@ error LNK2019: 无法解析的外部符号 "nexusflow::profiling::TimerRegistry:
 ```
 
 该探针源码（`build/perf-probe/`，不入库）仍在用已删除的 `TimerRegistry`。
-**只构建 `pipeline_benchmark` 目标时不受影响**：
+**仓库内已有 `pipeline_benchmark` 目标，不需要那个探针副本**：
 
 ```powershell
-cmake --build build\perf-probe\build --config Release --target pipeline_benchmark --parallel 16
+cmake --build build --config Release --target pipeline_benchmark --parallel 16
+.\build\benchmarks\Release\pipeline_benchmark.exe --capacity 8 --benchmark_min_time=3s
 ```
 
 - [ ] 决定：删掉 `perf_probe` 目标，或把它改到 `MetricsCollector`

@@ -29,10 +29,6 @@ include("cmake/include.cmake")
 include("cmake/Utils.cmake")
 
 
-# Define global variables.
-set_property(GLOBAL PROPERTY GLOBAL_TEST_SOURCES "")
-message(STATUS "Initialized global test sources list.")
-
 add_subdirectory(src)
 
 if(WITH_TESTING)
