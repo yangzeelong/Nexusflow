@@ -32,6 +32,16 @@
 #include <thread>
 #include <vector>
 
+#if defined(__linux__)
+#include <sched.h>
+#endif
+
+#if defined(_WIN32)
+#include <windows.h>
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
+#endif
+
 using namespace nexusflow;
 using namespace nexusflow_bench;
 using Clock = std::chrono::steady_clock;
@@ -43,12 +53,16 @@ struct Options {
     std::string label = "local";
     int modules = 3;      // linear: total stages including source and sink
     int branches = 2;     // diamond: number of parallel branches
-    int capacity = 0;     // 0 = derive from payload
+    int capacity = 4;     // queue depth per edge; 4 is where throughput saturates
     int durationSeconds = 10;
     int repeat = 3;
+    int cpus = 0;  // 0 = let the OS use every logical CPU
+    bool modulesGiven = false;
+    bool branchesGiven = false;
     bool syncInputs = false;
     bool freshPayload = false;
     PayloadKind payload = PayloadKind::None;
+    WorkloadSpec workload;
 };
 
 const char* Platform() {
@@ -63,14 +77,40 @@ bool StartsWith(const std::string& text, const std::string& prefix) {
     return text.size() >= prefix.size() && text.compare(0, prefix.size(), prefix) == 0;
 }
 
+[[noreturn]] void Fail(const std::string& message) {
+    std::cerr << "pipeline_benchmark: " << message << "\n";
+    std::cerr << "try --help for the accepted options\n";
+    std::exit(2);
+}
+
+void PrintUsage() {
+    std::cout
+        << "usage: pipeline_benchmark [options]\n"
+           "  --topology diamond|linear  default diamond (source -> branches -> sink)\n"
+           "  --modules N                linear stages incl. source and sink (default 3)\n"
+           "  --branches N               diamond width (default 2)\n"
+           "  --capacity N               queue depth per edge (default 4)\n"
+           "  --payload none|1080p-rgb|1080p-yuv420|2k-rgb|2k-yuv420  default none\n"
+           "  --payload-fresh            allocate a frame per message instead of reusing one\n"
+           "  --workload none|delay|compute|memory  cost added by each intermediate stage (default none)\n"
+           "  --delay-us N               workload=delay: sleep per message (default 100)\n"
+           "  --compute-iters N          workload=compute: sin/cos iterations per message (default 5000)\n"
+           "  --memory-bytes N           workload=memory: bytes copied per message (default 65536)\n"
+           "  --sync-inputs              run the diamond sink through the fusion path\n"
+           "  --duration S               seconds per run (default 10)\n"
+           "  --repeat R                 measured runs after one warm-up (default 3)\n"
+           "  --cpus N                   pin the process to the first N logical CPUs (default 0 = all)\n"
+           "  --label TEXT               written into every CSV line\n";
+}
+
 // Accepts `--flag value` and `--flag=value`; returns true when it consumed an arg.
 bool TakeValue(const std::string& arg, const std::string& flag, int argc, char* argv[], int& index, std::string& out) {
     if (arg == flag) {
-        if (index + 1 < argc) {
-            out = argv[++index];
-            return true;
+        if (index + 1 >= argc) {
+            Fail("missing value for " + flag);
         }
-        return false;
+        out = argv[++index];
+        return true;
     }
     const std::string withEquals = flag + "=";
     if (StartsWith(arg, withEquals)) {
@@ -80,21 +120,50 @@ bool TakeValue(const std::string& arg, const std::string& flag, int argc, char* 
     return false;
 }
 
-int ToInt(const std::string& text, int fallback) {
+bool ParseInt(const std::string& text, int* out) {
+    std::size_t consumed = 0;
     try {
-        const int value = std::stoi(text);
-        return value;
+        const int value = std::stoi(text, &consumed);
+        if (consumed != text.size()) {
+            return false;
+        }
+        *out = value;
+        return true;
     } catch (const std::exception&) {
-        return fallback;
+        return false;
     }
 }
 
-PayloadKind ParsePayload(const std::string& text) {
-    if (text == "1080p-rgb") return PayloadKind::Rgb1080p;
-    if (text == "1080p-yuv420") return PayloadKind::Yuv420_1080p;
-    if (text == "2k-rgb") return PayloadKind::Rgb2k;
-    if (text == "2k-yuv420") return PayloadKind::Yuv420_2k;
-    return PayloadKind::None;
+bool ParsePayload(const std::string& text, PayloadKind* out) {
+    if (text == "none") {
+        *out = PayloadKind::None;
+    } else if (text == "1080p-rgb") {
+        *out = PayloadKind::Rgb1080p;
+    } else if (text == "1080p-yuv420") {
+        *out = PayloadKind::Yuv420_1080p;
+    } else if (text == "2k-rgb") {
+        *out = PayloadKind::Rgb2k;
+    } else if (text == "2k-yuv420") {
+        *out = PayloadKind::Yuv420_2k;
+    } else {
+        return false;
+    }
+    return true;
+}
+
+bool ParseWorkload(const std::string& text, WorkloadKind* out) {
+    if (text == "none") {
+        *out = WorkloadKind::None;
+    } else if (text == "delay") {
+        *out = WorkloadKind::Delay;
+    } else if (text == "compute") {
+        *out = WorkloadKind::Compute;
+    } else if (text == "memory") {
+        *out = WorkloadKind::Memory;
+    } else {
+        return false;
+    }
+    return true;
 }
 
 Options ParseOptions(int argc, char* argv[]) {
@@ -103,39 +172,152 @@ Options ParseOptions(int argc, char* argv[]) {
         const std::string arg = argv[i];
         std::string value;
         if (TakeValue(arg, "--topology", argc, argv, i, value)) {
+            if (value != "linear" && value != "diamond") {
+                Fail("unknown topology: " + value);
+            }
             options.topology = value;
         } else if (TakeValue(arg, "--label", argc, argv, i, value)) {
             options.label = value;
         } else if (TakeValue(arg, "--payload", argc, argv, i, value)) {
-            options.payload = ParsePayload(value);
+            if (!ParsePayload(value, &options.payload)) {
+                Fail("unknown payload: " + value);
+            }
+        } else if (TakeValue(arg, "--workload", argc, argv, i, value)) {
+            if (!ParseWorkload(value, &options.workload.kind)) {
+                Fail("unknown workload: " + value);
+            }
+        } else if (TakeValue(arg, "--delay-us", argc, argv, i, value)) {
+            if (!ParseInt(value, &options.workload.delayUs)) {
+                Fail("--delay-us expects an integer, got: " + value);
+            }
+        } else if (TakeValue(arg, "--compute-iters", argc, argv, i, value)) {
+            if (!ParseInt(value, &options.workload.computeIterations)) {
+                Fail("--compute-iters expects an integer, got: " + value);
+            }
+        } else if (TakeValue(arg, "--memory-bytes", argc, argv, i, value)) {
+            int bytes = 0;
+            if (!ParseInt(value, &bytes) || bytes < 1) {
+                Fail("--memory-bytes expects a positive integer, got: " + value);
+            }
+            options.workload.memoryBytes = static_cast<std::size_t>(bytes);
         } else if (TakeValue(arg, "--modules", argc, argv, i, value)) {
-            options.modules = ToInt(value, options.modules);
+            if (!ParseInt(value, &options.modules)) {
+                Fail("--modules expects an integer, got: " + value);
+            }
+            options.modulesGiven = true;
         } else if (TakeValue(arg, "--branches", argc, argv, i, value)) {
-            options.branches = ToInt(value, options.branches);
+            if (!ParseInt(value, &options.branches)) {
+                Fail("--branches expects an integer, got: " + value);
+            }
+            options.branchesGiven = true;
         } else if (TakeValue(arg, "--capacity", argc, argv, i, value)) {
-            options.capacity = ToInt(value, options.capacity);
+            if (!ParseInt(value, &options.capacity)) {
+                Fail("--capacity expects an integer, got: " + value);
+            }
         } else if (TakeValue(arg, "--duration", argc, argv, i, value)) {
-            options.durationSeconds = ToInt(value, options.durationSeconds);
+            if (!ParseInt(value, &options.durationSeconds)) {
+                Fail("--duration expects an integer, got: " + value);
+            }
         } else if (TakeValue(arg, "--repeat", argc, argv, i, value)) {
-            options.repeat = ToInt(value, options.repeat);
+            if (!ParseInt(value, &options.repeat)) {
+                Fail("--repeat expects an integer, got: " + value);
+            }
+        } else if (TakeValue(arg, "--cpus", argc, argv, i, value)) {
+            if (!ParseInt(value, &options.cpus)) {
+                Fail("--cpus expects an integer, got: " + value);
+            }
         } else if (arg == "--sync-inputs") {
             options.syncInputs = true;
         } else if (arg == "--payload-fresh") {
             options.freshPayload = true;
         } else if (arg == "--help" || arg == "-h") {
-            std::cout << "usage: pipeline_benchmark [--topology diamond|linear] [--modules N] "
-                         "[--branches N] [--capacity N] [--payload none|1080p-rgb|1080p-yuv420|2k-rgb|2k-yuv420] "
-                         "[--duration S] [--repeat R] [--sync-inputs] [--payload-fresh] [--label TEXT]\n";
+            PrintUsage();
             std::exit(0);
+        } else {
+            Fail("unknown argument: " + arg);
         }
     }
+
+    if (options.topology == "linear") {
+        if (options.modules < 2) {
+            Fail("--topology linear needs --modules >= 2 (source, sink)");
+        }
+        if (options.branchesGiven) {
+            Fail("--branches only applies to --topology diamond");
+        }
+        if (options.syncInputs) {
+            Fail("--sync-inputs only applies to --topology diamond");
+        }
+    } else {
+        if (options.branches < 2) {
+            Fail("--topology diamond needs --branches >= 2");
+        }
+        if (options.modulesGiven) {
+            Fail("--modules only applies to --topology linear");
+        }
+    }
+    if (options.capacity < 1) {
+        Fail("--capacity must be >= 1");
+    }
     if (options.durationSeconds < 1) {
-        options.durationSeconds = 1;
+        Fail("--duration must be >= 1");
     }
     if (options.repeat < 1) {
-        options.repeat = 1;
+        Fail("--repeat must be >= 1");
+    }
+    if (options.cpus < 0) {
+        Fail("--cpus must be >= 0");
+    }
+    if (options.workload.delayUs < 0) {
+        Fail("--delay-us must be >= 0");
+    }
+    if (options.workload.computeIterations < 0) {
+        Fail("--compute-iters must be >= 0");
     }
     return options;
+}
+
+int LogicalCpuCount() {
+    const unsigned count = std::thread::hardware_concurrency();
+    return count == 0 ? 1 : static_cast<int>(count);
+}
+
+/// Restricts this process to the first `count` logical CPUs; 0 leaves it alone.
+/// Called before the first pipeline starts, so every worker thread inherits the mask.
+bool PinToCpus(int count, std::string* error) {
+    if (count == 0) {
+        return true;
+    }
+    const int available = LogicalCpuCount();
+    if (count > available) {
+        *error = "--cpus " + std::to_string(count) + " exceeds the " + std::to_string(available) + " logical CPUs";
+        return false;
+    }
+#if defined(_WIN32)
+    DWORD_PTR mask = 0;
+    for (int cpu = 0; cpu < count; ++cpu) {
+        mask |= static_cast<DWORD_PTR>(1) << cpu;
+    }
+    if (!SetProcessAffinityMask(GetCurrentProcess(), mask)) {
+        *error = "SetProcessAffinityMask failed (error " + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    return true;
+#elif defined(__linux__)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    for (int cpu = 0; cpu < count; ++cpu) {
+        CPU_SET(static_cast<std::size_t>(cpu), &set);
+    }
+    if (sched_setaffinity(0, sizeof(set), &set) != 0) {
+        *error = "sched_setaffinity failed";
+        return false;
+    }
+    return true;
+#else
+    *error = "--cpus is only implemented on Windows and Linux";
+    return false;
+#endif
 }
 
 struct Sample {
@@ -163,8 +345,9 @@ double Median(std::vector<double> values) {
 
 Sample RunOnce(const Options& options, const PayloadSpec& spec, std::size_t capacity) {
     BuiltTopology built = options.topology == "linear"
-                              ? BuildLinear(options.modules, capacity, spec, options.freshPayload)
-                              : BuildDiamond(options.branches, capacity, spec, options.freshPayload, options.syncInputs);
+                              ? BuildLinear(options.modules, capacity, spec, options.freshPayload, options.workload)
+                              : BuildDiamond(options.branches, capacity, spec, options.freshPayload,
+                                             options.syncInputs, options.workload);
     if (built.pipeline == nullptr) {
         std::cerr << "failed to build the " << options.topology << " topology\n";
         std::exit(1);
@@ -181,11 +364,12 @@ Sample RunOnce(const Options& options, const PayloadSpec& spec, std::size_t capa
         std::exit(1);
     }
     std::this_thread::sleep_for(std::chrono::seconds(options.durationSeconds));
-    const Clock::time_point finished = Clock::now();
 
-    // Capture the counters after Stop(): the sink's histogram is written by its
-    // worker thread, so reading it while the pipeline still runs would race.
+    // Stop() drains the queues and joins the workers. Take the clock after it
+    // returns: wall time then covers the same interval as the counters, which
+    // are only safe to read once the sink thread has exited.
     built.pipeline->Stop();
+    const Clock::time_point finished = Clock::now();
     const double cpuAfter = ProcessCpuSeconds();
 
     const std::uint64_t delivered = built.sink->Count();
@@ -211,8 +395,10 @@ Sample RunOnce(const Options& options, const PayloadSpec& spec, std::size_t capa
 void PrintCsv(const Options& options, std::size_t capacity, int repetition, const Sample& sample) {
     std::cout << "csv," << options.label << ',' << Platform() << ',' << options.topology << ',' << options.modules << ','
               << options.branches << ',' << capacity << ',' << NameOf(options.payload) << ','
-              << (options.freshPayload ? 1 : 0) << ',' << (options.syncInputs ? 1 : 0) << ',' << options.durationSeconds
-              << ',' << repetition << ',' << sample.delivered << ',' << static_cast<std::uint64_t>(sample.throughput)
+              << NameOf(options.workload.kind) << ',' << WorkloadParameter(options.workload) << ','
+              << (options.freshPayload ? 1 : 0) << ',' << (options.syncInputs ? 1 : 0) << ',' << options.cpus << ','
+              << options.durationSeconds << ',' << repetition << ',' << sample.delivered << ','
+              << static_cast<std::uint64_t>(sample.throughput)
               << ',' << sample.cpuSeconds << ',' << sample.cores << ',' << sample.latencyAvgUs << ','
               << sample.latencyP50Us << ',' << sample.latencyP95Us << ',' << sample.latencyP99Us << ','
               << sample.latencyMinUs << ',' << sample.latencyMaxUs << '\n';
@@ -220,25 +406,48 @@ void PrintCsv(const Options& options, std::size_t capacity, int repetition, cons
 
 } // namespace
 
+/// The Windows scheduler's default timer tick is 15.6 ms, which turns a
+/// `sleep_for(100 us)` into a 15.6 ms sleep. The delay workload measures a stage
+/// that waits, so ask for the finest tick while the benchmark runs and restore it
+/// on exit. POSIX sleep resolution is already fine.
+struct TimerResolutionGuard {
+#if defined(_WIN32)
+    TimerResolutionGuard() { timeBeginPeriod(1); }
+    ~TimerResolutionGuard() { timeEndPeriod(1); }
+#endif
+};
+
 int main(int argc, char* argv[]) {
     const Options options = ParseOptions(argc, argv);
     logger::InitializeGlobalLogger({logger::LogLevel::WARN});
+    TimerResolutionGuard timerResolution;
+
+    std::string pinError;
+    if (!PinToCpus(options.cpus, &pinError)) {
+        std::cerr << "pipeline_benchmark: " << pinError << "\n";
+        return 2;
+    }
 
     const PayloadSpec spec = SpecFor(options.payload);
-    // Queue depth times payload size is the memory each edge holds: with 1080p
-    // RGB a capacity of 64 would park ~380 MiB per edge, so payload runs default
-    // to a shallow queue unless the caller asks for a specific one.
-    const std::size_t capacity =
-        options.capacity > 0 ? static_cast<std::size_t>(options.capacity) : (spec.empty() ? 64u : 4u);
+    const std::size_t capacity = static_cast<std::size_t>(options.capacity);
 
     std::cout << "--- NexusFlow pipeline benchmark ---\n";
+    if (options.cpus > 0) {
+        std::cout << "affinity: first " << options.cpus << " of " << LogicalCpuCount() << " logical CPUs\n";
+    } else {
+        std::cout << "affinity: all " << LogicalCpuCount() << " logical CPUs\n";
+    }
     std::cout << "topology: " << options.topology << "  modules=" << options.modules << "  branches=" << options.branches
               << "  sync_inputs=" << (options.syncInputs ? "yes" : "no") << "\n";
     std::cout << "payload: " << NameOf(options.payload) << " (" << spec.bytes << " bytes/frame, "
               << (options.freshPayload ? "fresh per message" : "one buffer reused") << ")  capacity=" << capacity
               << "  streams=" << options.repeat << " x " << options.durationSeconds << "s (+1 warm-up)\n";
+    if (!options.workload.empty()) {
+        std::cout << "workload: " << NameOf(options.workload.kind) << " (parameter " << WorkloadParameter(options.workload)
+                  << ") on every intermediate stage\n";
+    }
     if (!spec.empty()) {
-        const std::size_t edges = options.topology == "linear" ? static_cast<std::size_t>(options.modules)
+        const std::size_t edges = options.topology == "linear" ? static_cast<std::size_t>(options.modules - 1)
                                                                : static_cast<std::size_t>(options.branches) * 2;
         std::cout << "edge memory at full depth: ~" << (capacity * spec.bytes * edges) / (1024 * 1024) << " MiB\n";
     }

@@ -7,10 +7,13 @@
 #include <nexusflow/Module.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -94,7 +97,7 @@ struct BenchmarkPayload {
  *
  *  - reuse (default): one frame buffer is allocated once and shared by every
  *    message. This is what proves the framework's claim that copying a Message
- *    copies a pointer, not pixels -- with 05720p payloads the throughput should
+ *    copies a pointer, not pixels -- with 1080p payloads the throughput should
  *    stay close to the empty-payload run.
  *  - fresh (`--payload-fresh`): a new buffer per message, the way a decoder hands
  *    over a fresh picture. This measures allocation and fill cost instead of
@@ -148,6 +151,109 @@ protected:
 };
 
 /**
+ * @brief What the intermediate stages spend their time on.
+ *
+ * The pass-through stage isolates framework cost, but a real pipeline never only
+ * copies pointers. These three loads put one controlled cost per message in the
+ * middle of the graph, so the question changes from "how fast is the graph" to
+ * "when does real work stop being hidden by the pipeline":
+ *
+ *  - Delay    : sleeps, the shape of an I/O or inference wait.
+ *  - Compute  : a serial sin/cos chain, CPU work with no allocation.
+ *  - Memory   : memcpy over a private buffer, the bandwidth-bound shape.
+ */
+enum class WorkloadKind {
+    None,
+    Delay,
+    Compute,
+    Memory
+};
+
+inline const char* NameOf(WorkloadKind kind) {
+    switch (kind) {
+    case WorkloadKind::None: return "none";
+    case WorkloadKind::Delay: return "delay";
+    case WorkloadKind::Compute: return "compute";
+    case WorkloadKind::Memory: return "memory";
+    }
+    return "?";
+}
+
+struct WorkloadSpec {
+    WorkloadKind kind = WorkloadKind::None;
+    int delayUs = 100;            ///< Delay: sleep per message
+    int computeIterations = 5000; ///< Compute: sin/cos iterations per message
+    std::size_t memoryBytes = 65536; ///< Memory: bytes copied per message
+
+    bool empty() const { return kind == WorkloadKind::None; }
+};
+
+inline std::size_t WorkloadParameter(const WorkloadSpec& spec) {
+    switch (spec.kind) {
+    case WorkloadKind::Delay: return static_cast<std::size_t>(spec.delayUs);
+    case WorkloadKind::Compute: return static_cast<std::size_t>(spec.computeIterations);
+    case WorkloadKind::Memory: return spec.memoryBytes;
+    case WorkloadKind::None: break;
+    }
+    return 0;
+}
+
+/// A pass-through stage that first burns the configured amount of time/CPU/memory.
+class WorkloadModule : public nexusflow::Module {
+public:
+    WorkloadModule(std::string name, WorkloadSpec spec)
+        : nexusflow::Module(std::move(name)), m_spec(spec), m_buffer(spec.memoryBytes, 0), m_scratch(spec.memoryBytes, 0) {}
+
+protected:
+    void Process(nexusflow::Message& message) override {
+        switch (m_spec.kind) {
+        case WorkloadKind::None:
+            break;
+        case WorkloadKind::Delay:
+            std::this_thread::sleep_for(std::chrono::microseconds(m_spec.delayUs));
+            break;
+        case WorkloadKind::Compute:
+            RunCompute();
+            break;
+        case WorkloadKind::Memory:
+            RunMemory();
+            break;
+        }
+        Broadcast(message);
+    }
+
+private:
+    void RunCompute() {
+        // The member write keeps the chain observable, so the compiler cannot
+        // fold the loop away; the result itself is meaningless.
+        double value = m_computeGuard;
+        for (int i = 0; i < m_spec.computeIterations; ++i) {
+            const double x = static_cast<double>(i) * 0.001;
+            value += std::sin(x) * std::cos(x);
+        }
+        m_computeGuard = value;
+    }
+
+    void RunMemory() {
+        if (m_buffer.empty()) {
+            return;
+        }
+        // Move the second half to the front and the first half to the back, so
+        // both halves are read and written once per message.
+        const std::size_t half = m_buffer.size() / 2;
+        const std::size_t rest = m_buffer.size() - half;
+        std::memcpy(m_scratch.data(), m_buffer.data(), half);
+        std::memcpy(m_buffer.data(), m_buffer.data() + half, rest);
+        std::memcpy(m_buffer.data() + rest, m_scratch.data(), half);
+    }
+
+    WorkloadSpec m_spec;
+    double m_computeGuard = 0.0;
+    std::vector<std::uint8_t> m_buffer;
+    std::vector<std::uint8_t> m_scratch;
+};
+
+/**
  * @class SinkModule
  * @brief Terminal stage: records end-to-end latency and counts what it received.
  *
@@ -162,7 +268,6 @@ public:
 
     std::uint64_t Count() const { return m_count; }
     const LatencyHistogram& Latency() const { return m_latency; }
-    std::uint64_t FrameCount() const { return m_frameCount; }
 
 protected:
     void Process(nexusflow::Message& message) override {
@@ -176,7 +281,6 @@ protected:
             for (const auto& entry : *fused) {
                 if (const BenchmarkPayload* payload = entry.second.BorrowPtr<BenchmarkPayload>()) {
                     Record(*payload);
-                    ++m_frameCount;
                     return;
                 }
             }
@@ -191,7 +295,6 @@ private:
     }
 
     std::uint64_t m_count = 0;
-    std::uint64_t m_frameCount = 0;
     LatencyHistogram m_latency;
 };
 

@@ -26,19 +26,30 @@ struct BuiltTopology {
     std::shared_ptr<SourceModule> source;
     std::shared_ptr<SinkModule> sink;
     std::vector<std::shared_ptr<nexusflow::Module>> modules;
-    std::size_t moduleCount = 0;
 };
 
+/// A pass-through stage, unless a workload was requested for the intermediate
+/// stages. Keeping the zero-work node for `none` means the framework-only numbers
+/// stay comparable with the previous report.
+inline std::shared_ptr<nexusflow::Module> MakeStageModule(const std::string& name, const WorkloadSpec& workload) {
+    if (workload.empty()) {
+        return std::make_shared<PassThroughModule>(name);
+    }
+    return std::make_shared<WorkloadModule>(name, workload);
+}
+
 /**
- * @brief Source -> (modules-2) pass-through stages -> sink.
+ * @brief Source -> (modules-2) stages -> sink.
  *
  * `modules` counts the stages including source and sink, so modules=3 is
- * source -> one pass-through -> sink. This is the topology whose per-stage cost
- * a thread model has to beat.
+ * source -> one stage -> sink. This is the topology whose per-stage cost
+ * a thread model has to beat. Intermediate stages run `workload`, which is a
+ * pass-through when `workload.empty()`.
  */
-inline BuiltTopology BuildLinear(int modules, std::size_t capacity, PayloadSpec spec, bool freshPayload) {
+inline BuiltTopology BuildLinear(int modules, std::size_t capacity, PayloadSpec spec, bool freshPayload,
+                                 const WorkloadSpec& workload = WorkloadSpec{}) {
     BuiltTopology built;
-    const int stages = modules < 3 ? 3 : modules;
+    const int stages = modules < 2 ? 2 : modules;
 
     built.source = std::make_shared<SourceModule>("source", spec, freshPayload);
     built.modules.push_back(built.source);
@@ -51,7 +62,7 @@ inline BuiltTopology BuildLinear(int modules, std::size_t capacity, PayloadSpec 
     names.push_back("source");
     for (int i = 0; i < stages - 2; ++i) {
         const std::string name = "stage_" + std::to_string(i);
-        auto stage = std::make_shared<PassThroughModule>(name);
+        auto stage = MakeStageModule(name, workload);
         built.modules.push_back(stage);
         builder.AddModule(stage);
         names.push_back(name);
@@ -59,10 +70,8 @@ inline BuiltTopology BuildLinear(int modules, std::size_t capacity, PayloadSpec 
     }
     builder.AddModule(built.sink);
     builder.Connect(names.back(), "sink");
-    names.push_back("sink");
 
     built.pipeline = builder.Build(static_cast<int>(capacity));
-    built.moduleCount = names.size();
     return built;
 }
 
@@ -73,10 +82,10 @@ inline BuiltTopology BuildLinear(int modules, std::size_t capacity, PayloadSpec 
  * which is the shape the original harness measured. With `syncInputs` the
  * framework runs the sink through the fusion path: it waits for every branch of
  * one message id and hands over a map of Messages, which is the only way the
- * fusion batching cost becomes measurable.
+ * fusion batching cost becomes measurable. Branches run `workload`.
  */
 inline BuiltTopology BuildDiamond(int branches, std::size_t capacity, PayloadSpec spec, bool freshPayload,
-                                  bool syncInputs) {
+                                  bool syncInputs, const WorkloadSpec& workload = WorkloadSpec{}) {
     BuiltTopology built;
     const int count = branches < 2 ? 2 : branches;
 
@@ -89,7 +98,7 @@ inline BuiltTopology BuildDiamond(int branches, std::size_t capacity, PayloadSpe
     builder.AddModule(built.source);
     for (int i = 0; i < count; ++i) {
         const std::string name = "branch_" + std::to_string(i);
-        auto branch = std::make_shared<PassThroughModule>(name);
+        auto branch = MakeStageModule(name, workload);
         built.modules.push_back(branch);
         builder.AddModule(branch);
         builder.Connect("source", name);
@@ -104,7 +113,6 @@ inline BuiltTopology BuildDiamond(int branches, std::size_t capacity, PayloadSpe
     }
 
     built.pipeline = builder.Build(static_cast<int>(capacity));
-    built.moduleCount = built.modules.size();
     return built;
 }
 

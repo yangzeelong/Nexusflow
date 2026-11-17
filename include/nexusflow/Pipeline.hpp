@@ -37,6 +37,19 @@ namespace nexusflow {
 constexpr int kPeerGroupHeadroom = 1;
 
 /**
+ * @brief Outcome of Pipeline::Push() / Pipeline::TryPush().
+ */
+enum class PushResult {
+    kOk = 0,          ///< Every output edge of the source accepted the message.
+    kNotRunning,      ///< The pipeline has not been started.
+    kUnknownModule,   ///< No module of the pipeline has that name.
+    kNotSource,       ///< The named module has inputs: it is not a boundary source.
+    kNotPassiveSource,///< The source produces on its own; see Module::IsPassiveSource().
+    kQueueFull,       ///< TryPush only: an output edge is full right now.
+    kClosed,          ///< An output edge is shut down (the pipeline is stopping).
+};
+
+/**
  * @brief Pipeline
  *
  */
@@ -117,6 +130,46 @@ public:
      * always stated by whoever builds it. 0 before Init().
      */
     int GetEdgeCapacity() const;
+
+    /**
+     * @brief Hands one message to a passive source module, as if that module had
+     *        produced it itself.
+     *
+     * @details The message is written to every edge leaving `sourceName`, which
+     * is exactly what Module::Broadcast() does from inside Process(). The target
+     * must be a source (no input edges) and must report
+     * Module::IsPassiveSource(), so the caller is the only producer those edges
+     * ever see.
+     *
+     * The call blocks while an output edge is full, which is how the pipeline's
+     * backpressure reaches the caller: while the queue is full the caller waits
+     * in the same place the source's Broadcast() would. It returns as soon as
+     * the pipeline is not running any more.
+     *
+     * Contract: only one thread may call Push()/TryPush() at a time. The edge
+     * queues are single-producer, so concurrent callers would be a data race --
+     * a caller that needs several producers must feed a lock-protected queue of
+     * its own and inject from one thread.
+     *
+     * @param sourceName Name of the passive source module (GetModuleName()).
+     * @param msg Message to hand downstream. A copy is made per output edge.
+     * @return kOk when every edge accepted it; kNotRunning before Start() and
+     * after Stop(); kUnknownModule / kNotSource / kNotPassiveSource when the
+     * target is not an injectable boundary; kClosed when an edge is shut down.
+     */
+    PushResult Push(const std::string& sourceName, const Message& msg);
+
+    /**
+     * @brief Non-blocking variant of Push(): never waits for room.
+     * @details Returns kQueueFull instead of waiting when an output edge is
+     * full. With more than one output edge a failure can leave the message
+     * delivered to the edges visited before it, so treat a multi-output source
+     * as best-effort under full backpressure.
+     * @param sourceName Name of the passive source module.
+     * @param msg Message to hand downstream.
+     * @return Same values as Push(), plus kQueueFull.
+     */
+    PushResult TryPush(const std::string& sourceName, const Message& msg);
 
     /**
      * @brief Returns this pipeline's context: per-pipeline log sink, profiler,

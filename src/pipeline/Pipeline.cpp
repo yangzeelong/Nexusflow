@@ -562,6 +562,14 @@ void Pipeline::ResetMetrics() {
 
 int Pipeline::GetEdgeCapacity() const { return m_pImpl ? m_pImpl->messageQueueCapacity : 0; }
 
+PushResult Pipeline::Push(const std::string& sourceName, const Message& msg) {
+    return m_pImpl ? m_pImpl->PushToSource(sourceName, msg, true) : PushResult::kNotRunning;
+}
+
+PushResult Pipeline::TryPush(const std::string& sourceName, const Message& msg) {
+    return m_pImpl ? m_pImpl->PushToSource(sourceName, msg, false) : PushResult::kNotRunning;
+}
+
 std::shared_ptr<PipelineContext> Pipeline::GetContext() const {
     if (!m_pImpl) {
         return nullptr;
