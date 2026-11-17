@@ -26,11 +26,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure
-        # Benchmarks stay off in CI: they pull in the Google Benchmark test
-        # targets and dominate the build time without guarding anything here.
+        # Benchmarks are built here but never run: building them is the only
+        # thing that stops the benchmark sources from rotting against the
+        # framework API. Numbers are measured on a developer machine, not on a
+        # shared runner.
         # CMAKE_POLICY_VERSION_MINIMUM lets yaml-cpp 0.8.0 (which still declares
         # cmake_minimum_required(VERSION 3.4)) configure under CMake 4.x.
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DWITH_BENCHMARK=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DWITH_BENCHMARK=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
       - name: Build
         # --parallel 16 is not a preference: a malformed value exits non-zero
@@ -75,9 +77,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure
+        # Same as the Windows job: benchmarks are compiled (so they cannot rot)
+        # but not executed here.
         # CMake 4 (once the image moves there) rejects dependencies that declare
         # cmake_minimum_required below 3.5; yaml-cpp 0.8.0 still declares 3.4.
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_BENCHMARK=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_BENCHMARK=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
       - name: Build
         run: cmake --build build --parallel 16
