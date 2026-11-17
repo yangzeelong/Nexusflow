@@ -145,8 +145,12 @@ struct Sample {
     double cpuSeconds = 0.0;
     double latencyAvgUs = 0.0;
     double latencyP50Us = 0.0;
+    double latencyP95Us = 0.0;
     double latencyP99Us = 0.0;
+    double latencyMinUs = 0.0;
     double latencyMaxUs = 0.0;
+    /// CPU seconds / wall seconds: how many cores this configuration burns.
+    double cores = 0.0;
 };
 
 double Median(std::vector<double> values) {
@@ -194,8 +198,11 @@ Sample RunOnce(const Options& options, const PayloadSpec& spec, std::size_t capa
     sample.throughput = sample.wallSeconds > 0.0 ? static_cast<double>(delivered) / sample.wallSeconds : 0.0;
     sample.latencyAvgUs = latency.MeanNs() / 1000.0;
     sample.latencyP50Us = latency.PercentileNs(50.0) / 1000.0;
+    sample.latencyP95Us = latency.PercentileNs(95.0) / 1000.0;
     sample.latencyP99Us = latency.PercentileNs(99.0) / 1000.0;
+    sample.latencyMinUs = static_cast<double>(latency.MinNs()) / 1000.0;
     sample.latencyMaxUs = static_cast<double>(latency.MaxNs()) / 1000.0;
+    sample.cores = sample.wallSeconds > 0.0 ? sample.cpuSeconds / sample.wallSeconds : 0.0;
 
     built.pipeline->DeInit();
     return sample;
@@ -203,10 +210,12 @@ Sample RunOnce(const Options& options, const PayloadSpec& spec, std::size_t capa
 
 void PrintCsv(const Options& options, std::size_t capacity, int repetition, const Sample& sample) {
     std::cout << "csv," << options.label << ',' << Platform() << ',' << options.topology << ',' << options.modules << ','
-              << options.branches << ',' << capacity << ',' << NameOf(options.payload) << ',' << options.durationSeconds
+              << options.branches << ',' << capacity << ',' << NameOf(options.payload) << ','
+              << (options.freshPayload ? 1 : 0) << ',' << (options.syncInputs ? 1 : 0) << ',' << options.durationSeconds
               << ',' << repetition << ',' << sample.delivered << ',' << static_cast<std::uint64_t>(sample.throughput)
-              << ',' << sample.latencyAvgUs << ',' << sample.latencyP50Us << ',' << sample.latencyP99Us << ','
-              << sample.latencyMaxUs << ',' << sample.cpuSeconds << '\n';
+              << ',' << sample.cpuSeconds << ',' << sample.cores << ',' << sample.latencyAvgUs << ','
+              << sample.latencyP50Us << ',' << sample.latencyP95Us << ',' << sample.latencyP99Us << ','
+              << sample.latencyMinUs << ',' << sample.latencyMaxUs << '\n';
 }
 
 } // namespace
@@ -247,24 +256,37 @@ int main(int argc, char* argv[]) {
 
     std::vector<double> throughputs;
     std::vector<double> p50s;
+    std::vector<double> p95s;
     std::vector<double> p99s;
+    std::vector<double> mins;
+    std::vector<double> maxs;
     std::vector<double> cpus;
+    std::vector<double> cores;
     for (const Sample& sample : samples) {
         throughputs.push_back(sample.throughput);
         p50s.push_back(sample.latencyP50Us);
+        p95s.push_back(sample.latencyP95Us);
         p99s.push_back(sample.latencyP99Us);
+        mins.push_back(sample.latencyMinUs);
+        maxs.push_back(sample.latencyMaxUs);
         cpus.push_back(sample.cpuSeconds);
+        cores.push_back(sample.cores);
     }
     const double medianThroughput = Median(throughputs);
     const double medianP50 = Median(p50s);
+    const double medianP95 = Median(p95s);
     const double medianP99 = Median(p99s);
+    const double medianMin = Median(mins);
+    const double medianMax = Median(maxs);
     const double medianCpu = Median(cpus);
+    const double medianCores = Median(cores);
 
     std::cout << "-------------------------\n";
     std::cout << "median throughput: " << static_cast<std::uint64_t>(medianThroughput) << " msg/s\n";
-    std::cout << "median latency:    p50 " << medianP50 << " us / p99 " << medianP99 << " us\n";
-    std::cout << "median cpu time:   " << medianCpu << " s over " << options.durationSeconds
-              << " s wall (per repetition)\n";
+    std::cout << "median latency:    p50 " << medianP50 << " / p95 " << medianP95 << " / p99 " << medianP99 << " / min "
+              << medianMin << " / max " << medianMax << " us\n";
+    std::cout << "median cpu time:   " << medianCpu << " s over " << options.durationSeconds << " s wall = "
+              << medianCores << " cores\n";
     std::cout << "-------------------------\n";
     return 0;
 }
