@@ -172,3 +172,17 @@ TEST(LoggingTest, DefaultSinkWritesToADailyRotatedFile) {
     std::remove(path.c_str());
 }
 
+// Pins the shipped default: a host that never calls SetLogLevel sees INFO and
+// above only, so the per-message framework diagnostics (now at TRACE) stay off.
+// Changing LoggerParam's default or CurrentLevel()'s initial value must be a
+// deliberate, test-breaking decision rather than an accident.
+TEST(LoggingTest, DefaultLevelIsInfo) {
+    nexusflow::log::InitializeGlobalLogger(nexusflow::log::LoggerParam());
+
+    EXPECT_EQ(nexusflow::log::GetLogLevel(), nexusflow::log::Level::INFO);
+    EXPECT_TRUE(nexusflow::log::IsLevelEnabled(nexusflow::log::Level::INFO));
+    EXPECT_TRUE(nexusflow::log::IsLevelEnabled(nexusflow::log::Level::WARN));
+    EXPECT_FALSE(nexusflow::log::IsLevelEnabled(nexusflow::log::Level::DEBUG));
+    EXPECT_FALSE(nexusflow::log::IsLevelEnabled(nexusflow::log::Level::TRACE));
+}
+

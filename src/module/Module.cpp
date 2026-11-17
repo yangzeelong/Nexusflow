@@ -56,7 +56,7 @@ void Module::DiscardPendingOutputs() {
 
 void Module::ProcessBatch(std::vector<Message>& inputBatchMessages) {
     // Process the batch of input messages.
-    LOG_DEBUG("Module '{}' processing batch of {} messages.", m_moduleName, inputBatchMessages.size());
+    LOG_TRACE("Module '{}' processing batch of {} messages.", m_moduleName, inputBatchMessages.size());
     for (auto& message : inputBatchMessages) {
         ProcessTimed(message);
     }
@@ -64,7 +64,14 @@ void Module::ProcessBatch(std::vector<Message>& inputBatchMessages) {
 
 bool Module::ProcessTimed(Message& inputMessage) {
     m_pendingOutputs.clear();
-    m_activeInputTimingMs = inputMessage.GetMetaData().GetModuleTimings();
+    // Copying the upstream timing map on every message is the single largest cost
+    // of the framework hot path (measured at ~2x throughput on a 3-stage
+    // pipeline), so it only happens when someone opted in.
+    if (CapturesModuleTimings()) {
+        m_activeInputTimingMs = inputMessage.GetMetaData().GetModuleTimings();
+    } else {
+        m_activeInputTimingMs.clear();
+    }
     m_processing = true;
     const auto started = std::chrono::steady_clock::now();
 
@@ -89,30 +96,32 @@ bool Module::ProcessTimed(Message& inputMessage) {
     }
     m_activeInputTimingMs.clear();
 
-    LOG_DEBUG("ModuleTiming: module='{}' elapsed_ms={:.3f}", m_moduleName, elapsedMs);
+    LOG_TRACE("ModuleTiming: module='{}' elapsed_ms={:.3f}", m_moduleName, elapsedMs);
     return produced;
 }
 
 void Module::DispatchOutput(const PendingOutput& output, double elapsedMs) {
     Message routed = output.message;
-    auto& timings = routed.MetaData().MutableModuleTimings();
-    for (const auto& entry : m_activeInputTimingMs) {
-        if (timings.find(entry.first) == timings.end()) {
-            timings[entry.first] = entry.second;
+    if (CapturesModuleTimings()) {
+        auto& timings = routed.MetaData().MutableModuleTimings();
+        for (const auto& entry : m_activeInputTimingMs) {
+            if (timings.find(entry.first) == timings.end()) {
+                timings[entry.first] = entry.second;
+            }
         }
+        timings[m_moduleName] = elapsedMs;
     }
-    timings[m_moduleName] = elapsedMs;
 
     if (output.named) {
         if (m_dispatcherPtr != nullptr) {
-            LOG_DEBUG("Module '{}' sending message to '{}'.", m_moduleName, output.outputName);
+            LOG_TRACE("Module '{}' sending message to '{}'.", m_moduleName, output.outputName);
             if (!m_dispatcherPtr->SendTo(output.outputName, routed)) {
                 LOG_WARN("Module '{}' could not send message to '{}': the output is missing or shut down.",
                          m_moduleName, output.outputName);
             }
         }
     } else if (m_dispatcherPtr != nullptr) {
-        LOG_DEBUG("Module '{}' broadcasting message.", m_moduleName);
+        LOG_TRACE("Module '{}' broadcasting message.", m_moduleName);
         m_dispatcherPtr->Broadcast(std::move(routed));
     }
 }
@@ -123,7 +132,7 @@ void Module::Broadcast(const Message& message) {
         return;
     }
     if (m_dispatcherPtr != nullptr) {
-        LOG_DEBUG("Module '{}' broadcasting message.", m_moduleName);
+        LOG_TRACE("Module '{}' broadcasting message.", m_moduleName);
         m_dispatcherPtr->Broadcast(message);
     } else {
         LOG_WARN("Module '{}' has no handle, cannot broadcast message.", m_moduleName);
@@ -136,7 +145,7 @@ void Module::Broadcast(Message&& message) {
         return;
     }
     if (m_dispatcherPtr != nullptr) {
-        LOG_DEBUG("Module '{}' broadcasting message.", m_moduleName);
+        LOG_TRACE("Module '{}' broadcasting message.", m_moduleName);
         m_dispatcherPtr->Broadcast(std::move(message));
     } else {
         LOG_WARN("Module '{}' has no handle, cannot broadcast message.", m_moduleName);
@@ -149,7 +158,7 @@ bool Module::SendTo(const std::string& outputName, const Message& msg) {
         return true;
     }
     if (m_dispatcherPtr != nullptr) {
-        LOG_DEBUG("Module '{}' sending message to '{}'.", m_moduleName, outputName);
+        LOG_TRACE("Module '{}' sending message to '{}'.", m_moduleName, outputName);
         return m_dispatcherPtr->SendTo(outputName, msg);
     }
     LOG_WARN("Module '{}' has no handle, cannot send message.", m_moduleName);
@@ -158,9 +167,23 @@ bool Module::SendTo(const std::string& outputName, const Message& msg) {
 
 const std::string& Module::GetModuleName() const { return m_moduleName; }
 
-void Module::AttachContext(std::shared_ptr<PipelineContext> context) { m_context = std::move(context); }
+void Module::AttachContext(std::shared_ptr<PipelineContext> context) {
+    m_context = std::move(context);
+    m_contextRaw = m_context.get();
+}
 
 std::shared_ptr<PipelineContext> Module::GetContext() const { return m_context; }
+
+void Module::SetModuleTimingsEnabled(bool enabled) { m_moduleTimingsEnabled = enabled; }
+
+bool Module::ModuleTimingsEnabled() const { return m_moduleTimingsEnabled; }
+
+bool Module::CapturesModuleTimings() const {
+    if (m_moduleTimingsEnabled) {
+        return true;
+    }
+    return m_contextRaw != nullptr && m_contextRaw->ModuleTimingsEnabled();
+}
 
 void Module::SetDispatcher(const std::shared_ptr<dispatcher::Dispatcher>& dispatcher) { m_dispatcherPtr = dispatcher; }
 

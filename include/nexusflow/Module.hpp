@@ -121,6 +121,33 @@ public:
     void AttachContext(std::shared_ptr<PipelineContext> context);
 
     /**
+     * @brief Enables or disables the per-hop timing chain for this module.
+     *
+     * When enabled, every message this module dispatches carries the accumulated
+     * per-stage elapsed times (`MessageMeta::GetModuleTimings()`), and the worker
+     * copies the upstream map on every hop. That copy is not free: measured on a
+     * 3-stage linear pipeline it costs roughly 2x the end-to-end throughput, so
+     * the chain is off unless the pipeline asks for it
+     * (`PipelineContext::EnableModuleTimings()`) or a single module opts in here.
+     * This setter is the per-module override for a pipeline-wide switch.
+     */
+    void SetModuleTimingsEnabled(bool enabled);
+
+    /**
+     * @brief Returns whether this module records and propagates per-stage timings.
+     */
+    bool ModuleTimingsEnabled() const;
+
+    /**
+     * @brief True when per-hop timings should be recorded for this module.
+     * @details Either the owning pipeline's context asked for them
+     * (PipelineContext::EnableModuleTimings) or this single module opted in via
+     * SetModuleTimingsEnabled(). Off by default in both places, because the chain
+     * deep-copies a map on every hop.
+     */
+    bool CapturesModuleTimings() const;
+
+    /**
      * @brief Returns the context attached by the framework, or nullptr when the
      * module does not belong to a pipeline (e.g. a unit test constructing it).
      */
@@ -185,6 +212,9 @@ private:
 
     // Set by ModuleActor from the owning pipeline; null for standalone modules.
     std::shared_ptr<PipelineContext> m_context;
+    /// Raw view of m_context for the hot path: CapturesModuleTimings() must not
+    /// pay a shared_ptr refcount round trip per message.
+    PipelineContext* m_contextRaw = nullptr;
 
     // The internal dispatcher handle.
     std::shared_ptr<dispatcher::Dispatcher> m_dispatcherPtr;
@@ -193,6 +223,7 @@ private:
     core::Worker* m_worker = nullptr;
 
     bool m_processing = false;
+    bool m_moduleTimingsEnabled = false;  ///< Off by default: see SetModuleTimingsEnabled().
     std::map<std::string, double> m_activeInputTimingMs;
     std::vector<PendingOutput> m_pendingOutputs;
 };
