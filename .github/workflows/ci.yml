@@ -61,13 +61,17 @@ jobs:
 
   linux-gcc:
     name: Linux / GCC Release
-    runs-on: ubuntu-latest
+    # Pinned to 24.04 (GCC 13, CMake 3.28). On ubuntu-latest GCC 15 refuses to
+    # build yaml-cpp 0.8.0: its src/emitterutils.cpp uses uint16_t/uint32_t
+    # without including <cstdint>, which older GCCs pulled in transitively. The
+    # real fix is bumping that dependency, not pinning the image.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure
-        # CMake 4 rejects dependencies that declare cmake_minimum_required below
-        # 3.5; yaml-cpp 0.8.0 still declares 3.4.
+        # CMake 4 (once the image moves there) rejects dependencies that declare
+        # cmake_minimum_required below 3.5; yaml-cpp 0.8.0 still declares 3.4.
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_BENCHMARK=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
       - name: Build
