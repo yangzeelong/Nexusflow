@@ -19,14 +19,18 @@ env:
 jobs:
   windows-msvc:
     name: Windows / MSVC Release
-    runs-on: windows-latest
+    # Pinned to the 2022 image: `windows-latest` no longer carries Visual Studio
+    # 2022, so the "Visual Studio 17 2022" generator below cannot be found there.
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
 
       - name: Configure
         # Benchmarks stay off in CI: they pull in the Google Benchmark test
         # targets and dominate the build time without guarding anything here.
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DWITH_BENCHMARK=OFF
+        # CMAKE_POLICY_VERSION_MINIMUM lets yaml-cpp 0.8.0 (which still declares
+        # cmake_minimum_required(VERSION 3.4)) configure under CMake 4.x.
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DWITH_BENCHMARK=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
       - name: Build
         # --parallel 16 is not a preference: a malformed value exits non-zero
@@ -62,7 +66,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_BENCHMARK=OFF
+        # CMake 4 rejects dependencies that declare cmake_minimum_required below
+        # 3.5; yaml-cpp 0.8.0 still declares 3.4.
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_BENCHMARK=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
       - name: Build
         run: cmake --build build --parallel 16
