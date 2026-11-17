@@ -1,15 +1,17 @@
 # NexusFlow 开发路线图与待办事项
 
-本文档记录 NexusFlow 框架当前状态与下一步计划，供跨设备/跨 agent 协作时同步。
+本文档记录 NexusFlow 框架的**长期路线图**：已完成的历史、待办事项，以及踩过的坑。
 
-**同步基线**：分支 `fix/pipeline-drain-on-stop`（基于 `master` @ `0b3ce51`，PR #21 已合并）。
-本轮 `Stop()`/`Cancel()` 的改动在**工作区**，尚未提交。
-**测试基线**：`158 tests from 26 test suites，PASSED 158`（MSVC 19.40）。
+- 下一版怎么落地（工作项、要先拍板的决策、验收口径）→ [`NEXT-VERSION.md`](NEXT-VERSION.md)
+- 基准数字、测量协议与测量机器 → [`benchmarks/README.md`](benchmarks/README.md)
+- 构建/测试命令、用例基线、硬规则 → [`AGENTS.md`](AGENTS.md)
+
 **构建**：`cmake --build build --config Release --parallel 16` → 退出码 0。注意会刷出
 大量 `C4819`（源文件含 UTF-8 中文注释，MSVC 按 936 代码页读取）。想要干净构建，
 给目标加 `/utf-8`；在加上之前不要在本文件里声称"无 warning"。
 
-> 改框架后必须跑：上面两条命令 + `git diff --stat` 与 `git diff --stat --ignore-cr-at-eol` 比对。
+> 改框架后必须跑：构建 + `nexusflow_tests` + `git diff --stat` 与 `git diff --stat --ignore-cr-at-eol` 比对。
+> 用例数以 `AGENTS.md` §3 为准（这里不再复述，免得两处数字打架）。
 > 细则见 `AGENTS.md`，尤其 §5（计数器与快照的命名/并发规则）。
 
 ---
@@ -371,6 +373,7 @@ Pipeline drained in 125 ms of waiting, slowest stage 'timing-sink' at addad ms; 
 | --- | --- | --- |
 | 陈旧 MSBuild 节点 | 构建显示 exit 0，但改动没进二进制 | `Get-Process MSBuild \| Stop-Process -Force` |
 | 陈旧 `.obj` | 改了测试，exe 还是旧断言 | `Remove-Item build\tests\nexusflow_tests.dir\Release\<File>.obj -Force` 后重建 |
+| `Copy-Item` 还原源码 | 文件 mtime 跟着备份一起回退，MSBuild 认为源码比 `.obj` 旧 → **静默不重编**，测出来的还是上一版 | 还原后 `(Get-Item <file>).LastWriteTime = Get-Date`，并删掉对应 `.obj` 再 build |
 | `--parallel` 参数写错 | 构建 exit 1 且**什么都没编** | 永远 `--parallel 16` |
 | PowerShell 改写文件 | UTF-8 被转 GBK，出现 U+FFFD / U+00BE | 用 `[System.IO.File]::ReadAllBytes` + `UTF8Encoding($false,$true)`；改完扫 `[char]0x00BE` |
 | `read` 越界 offset | 反复报同一错误 | 按报错里的总行数重新给 offset |
