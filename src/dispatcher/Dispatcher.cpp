@@ -23,19 +23,23 @@ void Dispatcher::Broadcast(const Message& message) {
 }
 
 void Dispatcher::Broadcast(Message&& message) {
-    if (m_subscriberMap.empty()) {
+    auto first = m_subscriberMap.begin();
+    if (first == m_subscriberMap.end()) {
         return;
     }
-    auto it = m_subscriberMap.begin();
-    const auto last = std::prev(m_subscriberMap.end());
-    for (; it != last; ++it) {
+    // The subscriber that takes ownership of the moved message is picked by
+    // iterating from the *second* entry rather than by std::prev(end()):
+    // unordered_map's iterator is only a forward iterator, so std::prev on it is
+    // undefined behaviour. It happened to work under MSVC and produced a null
+    // iterator under libstdc++, which hung (or crashed) the first broadcast.
+    auto it = first;
+    for (++it; it != m_subscriberMap.end(); ++it) {
         if (!PushTo(it->second, message)) {
             RecordDroppedPush(it->first);
         }
     }
-    // The last subscriber takes ownership of the message instead of copying it.
-    if (!PushTo(last->second, std::move(message))) {
-        RecordDroppedPush(last->first);
+    if (!PushTo(first->second, std::move(message))) {
+        RecordDroppedPush(first->first);
     }
 }
 
