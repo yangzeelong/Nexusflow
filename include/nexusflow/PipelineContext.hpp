@@ -45,7 +45,8 @@ public:
     /// Installs a sink for records logged by this pipeline's module threads.
     /// Passing nullptr removes the override and falls back to the process-wide
     /// sink. The override only affects threads owned by this pipeline.
-    void SetSink(std::shared_ptr<log::LogSink> sink);
+    /// Chainable, like the other setters on this context.
+    PipelineContext& SetSink(std::shared_ptr<log::LogSink> sink);
     std::shared_ptr<log::LogSink> GetSink() const;
     bool HasOwnSink() const;
 
@@ -118,6 +119,26 @@ public:
     void RequestStop();
     bool StopRequested() const;
 
+    /**
+     * @brief Enables or disables the per-hop stage timing chain for this pipeline.
+     *
+     * When enabled, every message a module dispatches carries the accumulated
+     * per-stage elapsed times (`MessageMeta::GetModuleTimings()`). That chain
+     * deep-copies a map on every hop: measured on a 3-stage linear pipeline it
+     * cost roughly 2x the end-to-end throughput, so it is **off by default**.
+     *
+     * Chainable with the other setters:
+     *     pipeline->GetContext()->SetSink(sink).EnableModuleTimings();
+     *
+     * Safe to call while the pipeline runs; modules observe the change on their
+     * next message. A module can also opt in on its own through
+     * Module::SetModuleTimingsEnabled().
+     */
+    PipelineContext& EnableModuleTimings(bool enabled = true);
+
+    /// Whether this pipeline's modules record per-hop stage timings.
+    bool ModuleTimingsEnabled() const;
+
 private:
     std::string m_name;
 
@@ -133,6 +154,9 @@ private:
     std::unordered_map<std::string, MetricHandle> m_metricNames;
 
     std::atomic<bool> m_stopRequested{false};
+    /// See EnableModuleTimings(): pressing this switch is the only pipeline-wide
+    /// reason to pay for the per-hop timing map.
+    std::atomic<bool> m_moduleTimingsEnabled{false};
 };
 
 } // namespace nexusflow

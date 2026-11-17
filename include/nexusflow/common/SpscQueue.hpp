@@ -884,6 +884,14 @@ private:
     std::atomic<std::uint64_t> m_discardedTotal{0};
 };
 
+// C++14 needs an out-of-class definition for a static constexpr data member as
+// soon as it is odr-used, and std::chrono::milliseconds(kParkTimeoutMs) does that
+// at -O0. Release builds constant-fold the value and link, so the omission only
+// shows up as a link error in a Debug build. A member of a class template is
+// exempt from the one-definition rule, so defining it in the header is safe.
+template <typename T>
+constexpr int SpscQueue<T>::kParkTimeoutMs;
+
 }    // namespace nexusflow
 
 #endif    // NEXUSFLOW_COMMON_SPSC_QUEUE_HPP

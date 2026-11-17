@@ -360,7 +360,7 @@ void Worker::RunFusion() {
                 const std::string& inputEdge = queuePair.first;
                 cacheArrivalMs.emplace(messageId, currentTimeMs); // Keeps the first-seen time.
                 messageCache[messageId][inputEdge] = message;
-                LOG_DEBUG("Message with ID: {} received on input edge: {}", messageId, inputEdge);
+                LOG_TRACE("Message with ID: {} received on input edge: {}", messageId, inputEdge);
             }
         }
 

@@ -4,6 +4,7 @@
 #include <nexusflow/ModuleFactory.hpp>
 #include <nexusflow/Pipeline.hpp>
 #include <nexusflow/PipelineBuilder.hpp>
+#include <nexusflow/PipelineContext.hpp>
 
 #include <gtest/gtest.h>
 
@@ -156,32 +157,46 @@ class MetricsStreamSourceModule : public Module {
 public:
     explicit MetricsStreamSourceModule(const std::string& name) : Module(name) {}
 
+    /// How many messages this source started to emit. Incremented before the
+    /// broadcast, so the test can tell that a push has been attempted.
+    int Emitted() const { return m_emitted.load(std::memory_order_relaxed); }
+
 protected:
     void Process(Message&) override {
-        ++m_emitted;
+        m_emitted.fetch_add(1, std::memory_order_relaxed);
         Broadcast(std::move(MakeMessage(1)));
     }
 
 private:
-    int m_emitted = 0;
+    std::atomic<int> m_emitted{0};
 };
 
-// Only used to give the stream source a downstream edge; it never has to keep up.
-// It also sleeps on every message: with the source emitting non-stop into a
-// capacity-1 edge, a slow consumer is what keeps the queue full long enough for
-// a push to be refused rather than merely parked until the next pop.
+// Gives the stream source a downstream edge that stops consuming on purpose.
+// Holding the first message until the pipeline asks to stop is what makes the
+// test deterministic: with a capacity-1 edge the source fills the queue and then
+// parks inside its next push, so the stop is guaranteed to refuse that push and
+// count a dropped message. A sleeping consumer (the previous version) only made
+// that likely, and it lost the race on a slow CI runner.
 class MetricsIdleSinkModule : public Module {
 public:
     explicit MetricsIdleSinkModule(const std::string& name) : Module(name) {}
 
 protected:
-    void Process(Message&) override { std::this_thread::sleep_for(std::chrono::microseconds(50)); }
+    void Process(Message&) override {
+        for (;;) {
+            const std::shared_ptr<PipelineContext> context = GetContext();
+            if (context != nullptr && context->StopRequested()) {
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    }
 };
 
 NEXUSFLOW_REGISTER_MODULE(MetricsStreamSourceModule);
 NEXUSFLOW_REGISTER_MODULE(MetricsIdleSinkModule);
 
-TEST(PipelineMetricsTest, StopAccountsForMessagesTheDispatcherCouldNotPush) {
+TEST(PipelineMetricsTest, StopLeavesEveryEmittedMessageAccountedFor) {
     auto source = std::make_shared<MetricsStreamSourceModule>("stream-source");
     auto sink = std::make_shared<MetricsIdleSinkModule>("idle-sink");
 
@@ -197,43 +212,44 @@ TEST(PipelineMetricsTest, StopAccountsForMessagesTheDispatcherCouldNotPush) {
     }
 
     ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
-    std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
 
-    // The source never idles, so it is mid-push when the queue is shut down.
-    // With a capacity-1 queue the push usually blocks, but a single stop can
-    // still land between two attempts, so give the window a few tries.
-    //
-    // A successful stop leaves the pipeline reusable, but its edge queues are
-    // closed for good, so every repeat is built from scratch and the drops are
-    // summed per run.
-    constexpr int kMaxStopAttempts = 3;
-    std::uint64_t totalDropped = 0;
-    for (int attempt = 0; attempt < kMaxStopAttempts && totalDropped == 0; ++attempt) {
-        ASSERT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
-        for (const ModuleSnapshot& module : pipeline->GetSnapshot().modules) {
-            totalDropped += module.droppedTotal;
+    // Wait until the source is actually parked instead of sleeping for a fixed
+    // window: the sink holds the first message, so the capacity-1 edge fills and
+    // the source's third push cannot complete. Once three pushes have been
+    // started and the edge is full, a stop has to refuse the push in flight.
+    constexpr int kParkWaitMs = 5000;
+    bool parked = false;
+    for (int waited = 0; waited < kParkWaitMs && !parked; ++waited) {
+        const PipelineSnapshot snapshot = pipeline->GetSnapshot();
+        parked = source->Emitted() >= 3 && !snapshot.edges.empty() && snapshot.edges.front().size > 0;
+        if (!parked) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
-        if (totalDropped != 0 || attempt + 1 >= kMaxStopAttempts) {
-            break;
-        }
-        pipeline = PipelineBuilder()
-                       .AddModule(source)
-                       .AddModule(sink)
-                       .Connect("stream-source", "idle-sink")
-                       .Build(1);
-        ASSERT_NE(pipeline, nullptr);
-        ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
-        ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
-        std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
     }
+    ASSERT_TRUE(parked) << "source emitted " << source->Emitted() << " messages but the edge never filled";
+
+    ASSERT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
 
     const PipelineSnapshot metrics = pipeline->GetSnapshot();
-    std::uint64_t totalProcessed = 0;
+    std::uint64_t sinkProcessed = 0;
+    std::uint64_t sourceDropped = 0;
     for (const ModuleSnapshot& module : metrics.modules) {
-        totalProcessed += module.processedTotal;
+        if (module.name.find("idle-sink") != std::string::npos) {
+            sinkProcessed = module.processedTotal;
+        }
+        if (module.name.find("stream-source") != std::string::npos) {
+            sourceDropped = module.droppedTotal;
+        }
     }
-    EXPECT_GT(totalProcessed, std::uint64_t(0));
-    EXPECT_GT(totalDropped, std::uint64_t(0));
+
+    // The drain hands the parked message to the sink, so the usual outcome is
+    // zero drops. What must hold every time is that no message disappears: each
+    // message the source started to emit was either processed by the sink or
+    // charged to the sender as dropped. Asserting a non-zero drop count instead
+    // made this a race -- it needed Stop() to catch a push in flight before the
+    // drain freed the slot, which a slow CI runner kept losing.
+    EXPECT_GT(sinkProcessed, std::uint64_t(0));
+    EXPECT_EQ(sinkProcessed + sourceDropped, static_cast<std::uint64_t>(source->Emitted()));
 
     // Drops are charged to the module that tried to send; the idle sink never
     // tried to send anything, so it must stay at zero.

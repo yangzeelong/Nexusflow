@@ -34,7 +34,7 @@ namespace {
 constexpr std::size_t kLevelWidth = 5;
 
 std::atomic<Level>& CurrentLevel() {
-    static std::atomic<Level> level{Level::DEBUG};
+    static std::atomic<Level> level{Level::INFO};
     return level;
 }
 

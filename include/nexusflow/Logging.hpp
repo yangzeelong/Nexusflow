@@ -42,7 +42,7 @@ enum class Level : std::int8_t { TRACE = 0, DEBUG, INFO, WARN, ERR, CRITICAL, OF
 // Parameters of the default logger. Field names are kept stable because they are
 // part of the public API used by the applications.
 struct LoggerParam {
-    Level logLevel = Level::DEBUG;  // default log level
+    Level logLevel = Level::INFO;  // default log level
     std::string logDir;             // if empty, no file logger will be created
     std::string logName;            // if empty, a default name will be used
     std::size_t maxRetentionDays = 0;  // if 0, no retention limit
@@ -67,7 +67,7 @@ public:
     virtual void Write(const LogRecord& record) = 0;
 };
 
-// Level control. The default level is DEBUG.
+// Level control. The default level is INFO.
 void SetLogLevel(Level level);
 Level GetLogLevel();
 bool IsLevelEnabled(Level level);

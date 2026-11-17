@@ -10,9 +10,10 @@ PipelineContext::~PipelineContext() = default;
 
 const std::string& PipelineContext::GetName() const { return m_name; }
 
-void PipelineContext::SetSink(std::shared_ptr<log::LogSink> sink) {
+PipelineContext& PipelineContext::SetSink(std::shared_ptr<log::LogSink> sink) {
     std::lock_guard<std::mutex> lock(m_sinkMutex);
     m_sink = std::move(sink);
+    return *this;
 }
 
 std::shared_ptr<log::LogSink> PipelineContext::GetSink() const {
@@ -81,5 +82,14 @@ const PipelineContext::Metric* PipelineContext::FindMetric(MetricHandle handle) 
 void PipelineContext::RequestStop() { m_stopRequested.store(true, std::memory_order_relaxed); }
 
 bool PipelineContext::StopRequested() const { return m_stopRequested.load(std::memory_order_relaxed); }
+
+PipelineContext& PipelineContext::EnableModuleTimings(bool enabled) {
+    m_moduleTimingsEnabled.store(enabled, std::memory_order_relaxed);
+    return *this;
+}
+
+bool PipelineContext::ModuleTimingsEnabled() const {
+    return m_moduleTimingsEnabled.load(std::memory_order_relaxed);
+}
 
 } // namespace nexusflow

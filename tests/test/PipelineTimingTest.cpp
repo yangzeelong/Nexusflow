@@ -3,6 +3,7 @@
 #include <nexusflow/Module.hpp>
 #include <nexusflow/Pipeline.hpp>
 #include <nexusflow/PipelineBuilder.hpp>
+#include <nexusflow/PipelineContext.hpp>
 
 #include <gtest/gtest.h>
 
@@ -34,11 +35,14 @@ public:
     explicit TimingSinkModule(const std::string& name) : Module(name) {}
 
     std::atomic<int> messagesWithSourceTiming{0};
+    std::atomic<int> messagesReceived{0};
 
 protected:
     void Process(Message& inputMessage) override {
+        messagesReceived.fetch_add(1, std::memory_order_relaxed);
         // The dispatcher adds the producing module's elapsed time before the
-        // message leaves the source stage, so it must be visible here.
+        // message leaves the source stage, so it must be visible here when the
+        // timing chain is enabled.
         if (inputMessage.GetMetaData().GetModuleTimings().count("source") > 0) {
             messagesWithSourceTiming.fetch_add(1, std::memory_order_relaxed);
         }
@@ -48,6 +52,31 @@ protected:
 } // namespace
 
 TEST(PipelineTimingTest, OutputMessagesCarryUpstreamModuleTimings) {
+    auto source = std::make_shared<TimingSourceModule>("source");
+    auto sink = std::make_shared<TimingSinkModule>("sink");
+
+    // The chain is opt-in and off by default, because propagating the timings map
+    // deep-copies it on every hop. A pipeline turns it on through its context.
+    auto pipeline = PipelineBuilder()
+                        .AddModule(source)
+                        .AddModule(sink)
+                        .Connect(source->GetModuleName(), sink->GetModuleName())
+                        .Build(8);
+    ASSERT_NE(pipeline, nullptr);
+    pipeline->GetContext()->EnableModuleTimings();
+    ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
+    ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
+    std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
+    ASSERT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
+
+    EXPECT_GT(sink->messagesReceived.load(std::memory_order_relaxed), 0);
+    EXPECT_GT(sink->messagesWithSourceTiming.load(std::memory_order_relaxed), 0);
+}
+
+// Pins the shipped default. Propagating stage timings deep-copies a map on every
+// hop, which measured roughly 2x the end-to-end throughput, so a pipeline that
+// never calls PipelineContext::EnableModuleTimings() must not pay it.
+TEST(PipelineTimingTest, ModuleTimingsAreOffByDefault) {
     auto source = std::make_shared<TimingSourceModule>("source");
     auto sink = std::make_shared<TimingSinkModule>("sink");
 
@@ -62,5 +91,6 @@ TEST(PipelineTimingTest, OutputMessagesCarryUpstreamModuleTimings) {
     std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
     ASSERT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
 
-    EXPECT_GT(sink->messagesWithSourceTiming.load(std::memory_order_relaxed), 0);
+    EXPECT_GT(sink->messagesReceived.load(std::memory_order_relaxed), 0);
+    EXPECT_EQ(sink->messagesWithSourceTiming.load(std::memory_order_relaxed), 0);
 }

@@ -299,3 +299,26 @@ TEST(PipelineContextTest, ContextCanBeDetachedWithoutBreakingTheModule) {
     source->AttachContext(nullptr);
     EXPECT_EQ(source->GetContext(), nullptr);
 }
+
+// The per-hop timing chain is a pipeline-wide switch on the context: off by
+// default, and chainable with the context's other setters.
+TEST(PipelineContextTest, ModuleTimingsSwitchIsOffByDefaultAndChainable) {
+    ScopedGlobalSink quiet(std::make_shared<NullSink>());
+    auto source = std::make_shared<ContextSourceModule>("context-source");
+    auto sink = std::make_shared<ContextSinkModule>("context-sink");
+    auto pipeline = BuildContextPipeline(source, sink);
+    ASSERT_NE(pipeline, nullptr);
+
+    auto context = pipeline->GetContext();
+    ASSERT_NE(context, nullptr);
+    EXPECT_FALSE(context->ModuleTimingsEnabled());
+
+    PipelineContext& chained = context->EnableModuleTimings();
+    EXPECT_EQ(&chained, context.get());
+    EXPECT_TRUE(context->ModuleTimingsEnabled());
+
+    // The setters chain, so a caller can configure a pipeline in one expression.
+    EXPECT_EQ(&context->SetSink(std::make_shared<NullSink>()).EnableModuleTimings(), context.get());
+
+    EXPECT_FALSE(context->EnableModuleTimings(false).ModuleTimingsEnabled());
+}
