@@ -41,11 +41,16 @@ jobs:
         shell: pwsh
         run: |
           $output = & .\build\tests\Release\nexusflow_tests.exe 2>&1
-          $output | Select-Object -Last 40
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "nexusflow_tests exited $LASTEXITCODE"
+          $exit = $LASTEXITCODE
+          if ($exit -ne 0) {
+            # The gtest summary names the failing test but not the assertion, so
+            # print the failure lines themselves before giving up.
+            $output | Select-String -Pattern '\[  FAILED  \]|Failure|Expected|Which is|Actual|\.cpp\(\d+\)'
+            $output | Select-Object -Last 20
+            Write-Error "nexusflow_tests exited $exit"
             exit 1
           }
+          $output | Select-Object -Last 5
           $summary = ($output | Select-String -Pattern '\[==========\] (\d+) tests? from (\d+) test suites? ran').Matches
           if (-not $summary) {
             Write-Error "could not find the gtest summary line"
