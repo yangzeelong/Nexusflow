@@ -8,6 +8,16 @@
 
 The core idea of the framework is to decompose complex processing workflows into a series of independent **Modules**, which can then be connected like LEGO bricks into a powerful **Directed Acyclic Graph (DAG)** using simple configurations.
 
+## Documentation map
+
+| File | What it covers |
+| --- | --- |
+| [`AGENTS.md`](AGENTS.md) | Rules for anyone (human or agent) changing this repo: build, tests, counter conventions, hard rules. |
+| [`TODO.md`](TODO.md) | Long-term roadmap: finished work, open items, known pitfalls. |
+| [`NEXT-VERSION.md`](NEXT-VERSION.md) | The next release's work order: items, decisions to settle first, acceptance criteria. |
+| [`benchmarks/README.md`](benchmarks/README.md) | Benchmark numbers, measurement protocol, and the machine they were taken on. |
+| [`extensions/README.md`](extensions/README.md) | Extension layout and how to add a new one. |
+
 ## Core Features
 
 *   **Modular Design, Highly Decoupled**: Each module focuses exclusively on its own business logic. Modules communicate asynchronously via message queues, remaining completely unaware of each other's existence.
