@@ -78,6 +78,8 @@ jobs:
         run: cmake --build build --parallel 16
 
       - name: Test
-        # Unix Makefiles put the binaries in build/bin (AGENTS.md §2).
-        run: ./build/bin/nexusflow_tests
+        # No OUTPUT_DIRECTORY is set anywhere in this tree, so Makefiles put the
+        # binaries next to their sources: build/tests/nexusflow_tests (there is
+        # no build/bin/).
+        run: ./build/tests/nexusflow_tests
 

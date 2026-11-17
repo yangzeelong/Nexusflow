@@ -66,9 +66,11 @@ cmake --build build --parallel 16
 启用扩展：`cmake -S . -B build -DNEXUSFLOW_EXTENSIONS=aifootball`（详见
 `extensions/README.md`）。
 
-产物（Unix Makefiles）：`build/bin/`（`nexusflow_tests`、示例、扩展 app）；
-`build/lib/`（`nexusflow`、扩展库）。多配置生成器（Visual Studio）落在
-`build/<subdir>/<Config>/`，例如 `build/src/Release/nexusflow.lib`。
+产物（Unix Makefiles）：库在 `build/src/libnexusflow.a`，测试在
+`build/tests/nexusflow_tests`，示例在 `build/examples/<name>/<exe>`。这份树没有设置
+任何 `*_OUTPUT_DIRECTORY`，所以是 CMake 的默认布局——**没有** `build/bin/` 或
+`build/lib/`。多配置生成器（Visual Studio）落在 `build/<subdir>/<Config>/`，
+例如 `build/src/Release/nexusflow.lib`。
 
 安装/导出：`cmake --install build --prefix <dir>` 会装 `lib/libnexusflow.a`、
 `include/nexusflow/**`（含 `include/nexusflow/common/`）与
@@ -117,7 +119,7 @@ from 26 suites，PASSED 161**（MSVC 19.40）。
 ## 3. 测试
 
 ```bash
-./build/bin/nexusflow_tests      # Unix；Windows 见上（build/tests/Release/）
+./build/tests/nexusflow_tests   # Unix（Makefiles 默认布局）；Windows 见上（build/tests/Release/）
 ```
 
 - 当前 161 个用例（26 个 suite）：消息 7、计时器 10、图 7、Optional 23（TestOptional 18 + OptionalTest 2 + OptionalThrowingTest 3）、Any 5、ConcurrentQueue 9、Dispatcher 4、日志 8、Config 3、MessageMeta 3、SpscQueue 16、SpscMessageStress 1、Pipeline 生命周期 6、Pipeline 错误路径 14、Pipeline 图序 2、Pipeline 计时 2、Pipeline 指标 8、Pipeline 上下文 9、Pipeline 排水 2、Pipeline 取消 7、Pipeline 停机计时 4、Worker 行为 7、Worker 启动 2、Worker 计时 2。
