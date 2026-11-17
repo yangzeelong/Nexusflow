@@ -6,6 +6,9 @@ install/
 !.clang-format
 !.clangd
 !.gitignore
+# CI workflows live under a dot-directory, which the `.*` rule above would
+# otherwise swallow.
+!.github/
 !CMakeLists.txt
 
 # Runtime and conversion artifacts.

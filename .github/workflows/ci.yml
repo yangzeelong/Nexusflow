@@ -1,0 +1,73 @@
+name: CI
+
+# Runs on every pull request, and on demand from the Actions tab.
+# Pushes to branches (i.e. every commit) deliberately do NOT trigger it:
+# use "Run workflow" when you want a build for a branch tip.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Keep in step with AGENTS.md §3. The last step fails when these drift, which
+  # is the point: the documented count must match the binary.
+  EXPECTED_TEST_COUNT: 161
+  EXPECTED_SUITE_COUNT: 26
+
+jobs:
+  windows-msvc:
+    name: Windows / MSVC Release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        # Benchmarks stay off in CI: they pull in the Google Benchmark test
+        # targets and dominate the build time without guarding anything here.
+        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DWITH_BENCHMARK=OFF
+
+      - name: Build
+        # --parallel 16 is not a preference: a malformed value exits non-zero
+        # after compiling nothing (see AGENTS.md §2).
+        run: cmake --build build --config Release --parallel 16
+
+      - name: Test
+        shell: pwsh
+        run: |
+          $output = & .\build\tests\Release\nexusflow_tests.exe 2>&1
+          $output | Select-Object -Last 40
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "nexusflow_tests exited $LASTEXITCODE"
+            exit 1
+          }
+          $summary = ($output | Select-String -Pattern '\[==========\] (\d+) tests? from (\d+) test suites? ran').Matches
+          if (-not $summary) {
+            Write-Error "could not find the gtest summary line"
+            exit 1
+          }
+          $tests = [int]$summary[0].Groups[1].Value
+          $suites = [int]$summary[0].Groups[2].Value
+          Write-Host "tests=$tests suites=$suites expected=$env:EXPECTED_TEST_COUNT/$env:EXPECTED_SUITE_COUNT"
+          if ($tests -ne [int]$env:EXPECTED_TEST_COUNT -or $suites -ne [int]$env:EXPECTED_SUITE_COUNT) {
+            Write-Error "test count drifted from AGENTS.md §3: got $tests tests / $suites suites, expected $env:EXPECTED_TEST_COUNT / $env:EXPECTED_SUITE_COUNT. Update AGENTS.md §3 and this file together."
+            exit 1
+          }
+
+  linux-gcc:
+    name: Linux / GCC Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_BENCHMARK=OFF
+
+      - name: Build
+        run: cmake --build build --parallel 16
+
+      - name: Test
+        # Unix Makefiles put the binaries in build/bin (AGENTS.md §2).
+        run: ./build/bin/nexusflow_tests
+
