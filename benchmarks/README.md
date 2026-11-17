@@ -25,8 +25,9 @@ cmake --build build --config Release --target pipeline_benchmark --parallel 16
 .\build\benchmarks\Release\pipeline_benchmark.exe --payload 1080p-rgb --payload-fresh   # 每帧新建
 ```
 
-每次运行会打印一行 `csv,<label>,<platform>,<topology>,<modules>,<branches>,<capacity>,<payload>,<duration>,<rep>,<delivered>,<throughput>,<avg>,<p50>,<p99>,<max>,<cpu_s>`，
-批量跑时 `grep '^csv,'` 收集成表。
+每次运行会打印一行
+`csv,<label>,<platform>,<topology>,<modules>,<branches>,<capacity>,<payload>,<fresh>,<sync>,<duration>,<rep>,<delivered>,<throughput>,<cpu_s>,<cores>,<avg>,<p50>,<p95>,<p99>,<min>,<max>`，
+批量跑时 `grep '^csv,'` 收集成表。`min`/`max` 是单次样本的极值（`max` 通常是调度离群点，别当稳态读）。
 
 `--payload` 档位：`none` / `1080p-rgb`（5.937 MiB）/ `1080p-yuv420`（2.969 MiB）/ `2k-rgb`（QHD 2560×1440，10.547 MiB）/ `2k-yuv420`（5.273 MiB）。
 `--capacity` 在载荷模式下默认 4，因为 `capacity × payload` 就是每条边占的内存（1080p RGB × 64 ≈ 380 MiB/边）。
