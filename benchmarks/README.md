@@ -7,21 +7,36 @@
 | 文件 | 目标 | 说明 |
 | --- | --- | --- |
 | `BenchmarkMessage.cpp` + `benchmark_main.cpp` | `nexusflow_benchmarks` | Google Benchmark 微基准：消息创建/广播（拷贝）/数据访问两种实现对比 |
-| `pipeline_benchmark.cpp` | `pipeline_benchmark` | 端到端吞吐与平均延迟，带 `--capacity N`（边队列深度），自己带 `main()` |
+| `pipeline_benchmark.cpp` | `pipeline_benchmark` | 端到端吞吐与延迟扫描：`--topology diamond|linear`、`--modules`、`--branches`、`--capacity`、`--payload`、`--duration`、`--repeat`、`--sync-inputs`、`--payload-fresh`；自己带 `main()`。结果见 [`PERFORMANCE.md`](PERFORMANCE.md) |
+| `LatencyHistogram.hpp` / `ProcessCpuTime.hpp` | — | 对数桶直方图（P50/P99）与 CPU 时间采集 |
+| `BenchmarkNodes.hpp` / `BenchmarkTopology.hpp` | — | 基准用的模块与拓扑构造器（线性 / 扇出扇入） |
 
 ```powershell
 # 微基准
 cmake --build build --config Release --target nexusflow_benchmarks --parallel 16
 .\build\benchmarks\Release\nexusflow_benchmarks.exe
 
-# 端到端吞吐（时长固定 10 s，`--benchmark_min_time` 是无效参数）
+# 端到端扫描（默认 diamond 2 分支，与旧基线同构）
 cmake --build build --config Release --target pipeline_benchmark --parallel 16
-.\build\benchmarks\Release\pipeline_benchmark.exe --capacity 8
+.\build\benchmarks\Release\pipeline_benchmark.exe --duration 5 --repeat 3
+.\build\benchmarks\Release\pipeline_benchmark.exe --topology linear --modules 3 --capacity 8
+.\build\benchmarks\Release\pipeline_benchmark.exe --topology diamond --branches 2 --sync-inputs
+.\build\benchmarks\Release\pipeline_benchmark.exe --payload 1080p-rgb          # 复用一块帧缓冲
+.\build\benchmarks\Release\pipeline_benchmark.exe --payload 1080p-rgb --payload-fresh   # 每帧新建
 ```
+
+每次运行会打印一行 `csv,<label>,<platform>,<topology>,<modules>,<branches>,<capacity>,<payload>,<duration>,<rep>,<delivered>,<throughput>,<avg>,<p50>,<p99>,<max>,<cpu_s>`，
+批量跑时 `grep '^csv,'` 收集成表。
+
+`--payload` 档位：`none` / `1080p-rgb`（5.937 MiB）/ `1080p-yuv420`（2.969 MiB）/ `2k-rgb`（QHD 2560×1440，10.547 MiB）/ `2k-yuv420`（5.273 MiB）。
+`--capacity` 在载荷模式下默认 4，因为 `capacity × payload` 就是每条边占的内存（1080p RGB × 64 ≈ 380 MiB/边）。
 
 ### 结果
 
-#### 本机 Windows / MSVC 实测（2026-11-17）
+**完整矩阵**（拓扑 / 容量 / 载荷 / 融合维度，带分析与优化方向）在 [`PERFORMANCE.md`](PERFORMANCE.md)。
+下面两张表是 1.0.0 收尾时的最小基线，保留作对照。
+
+#### 本机 Windows / MSVC 实测（2026-11-17，旧工具：diamond 2 分支、仅 avg 延迟）
 
 | 提交 | 平台 | capacity | 吞吐 (msg/s) | 平均延迟 (µs) |
 | --- | --- | --- | --- | --- |
