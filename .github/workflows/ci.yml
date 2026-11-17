@@ -80,6 +80,9 @@ jobs:
       - name: Test
         # No OUTPUT_DIRECTORY is set anywhere in this tree, so Makefiles put the
         # binaries next to their sources: build/tests/nexusflow_tests (there is
-        # no build/bin/).
-        run: ./build/tests/nexusflow_tests
+        # no build/bin/). stdbuf keeps gtest's progress lines unbuffered, so a
+        # hanging test shows up as the last line of the log instead of blaming
+        # whatever happened to fill the pipe buffer.
+        timeout-minutes: 5
+        run: stdbuf -oL -eL ./build/tests/nexusflow_tests
 
