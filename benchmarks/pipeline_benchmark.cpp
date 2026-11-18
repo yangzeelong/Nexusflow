@@ -16,14 +16,25 @@
 
 #include "BenchmarkTopology.hpp"
 #include "ProcessCpuTime.hpp"
+#include "ProcessMemory.hpp"
 #include "RawPipeline.hpp"
 
 #include <nexusflow/Logging.hpp>
 #include <nexusflow/Module.hpp>
 #include <nexusflow/Pipeline.hpp>
+#include <nexusflow/PipelineContext.hpp>
+
+#if defined(_WIN32)
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
+#elif defined(__linux__)
+#include <sched.h>
+#endif
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -40,7 +51,7 @@ using Clock = std::chrono::steady_clock;
 namespace {
 
 struct Options {
-    std::string topology = "diamond";  // diamond (default, matches the old harness) or linear
+    std::string topology = "diamond";  // diamond (default), linear, or inject
     std::string label = "local";
     /// `framework`, or one of the bare baselines that subtract out (HARNESS.md §3):
     /// `raw` (plain struct message, nothing allocated) and `raw-alloc` (one
@@ -68,6 +79,20 @@ struct Options {
     bool syncInputs = false;
     bool freshPayload = false;
     PayloadKind payload = PayloadKind::None;
+    // --- extension knobs, outside the HARNESS.md ladders ---
+    /// Controlled work on every intermediate stage: none, delay, compute, memory.
+    WorkloadSpec workload;
+    /// 0 = no affinity (all logical CPUs); > 0 pins the process to the first N.
+    int cpus = 0;
+    /// inject: `block` waits for room like an external decoder; `try` counts
+    /// refusals and yields while an edge is full, never dropping a message.
+    std::string pushMode = "block";
+    /// diamond: branch_0 sleeps this many microseconds, the straggler that keeps
+    /// fused groups half-complete.
+    int stragglerUs = 0;
+    /// Enable the module per-hop timing chain (`PipelineContext::EnableModuleTimings`).
+    bool timings = false;
+    std::string logLevel = "warn";
 };
 
 const char* Platform() {
@@ -170,6 +195,65 @@ PayloadKind ParsePayload(const std::string& text) {
     return PayloadKind::None;
 }
 
+WorkloadKind ParseWorkload(const std::string& text) {
+    if (text == "none") return WorkloadKind::None;
+    if (text == "delay") return WorkloadKind::Delay;
+    if (text == "compute") return WorkloadKind::Compute;
+    if (text == "memory") return WorkloadKind::Memory;
+    return WorkloadKind::None;
+}
+
+logger::LogLevel LogLevelFromName(const std::string& name) {
+    if (name == "trace") return logger::LogLevel::TRACE;
+    if (name == "debug") return logger::LogLevel::DEBUG;
+    if (name == "info") return logger::LogLevel::INFO;
+    if (name == "err") return logger::LogLevel::ERR;
+    if (name == "off") return logger::LogLevel::OFF;
+    return logger::LogLevel::WARN;
+}
+
+int LogicalCpuCount() {
+    const unsigned int count = std::thread::hardware_concurrency();
+    return count > 0 ? static_cast<int>(count) : 1;
+}
+
+/// Pins the process to the first `count` logical CPUs; 0 means no affinity.
+bool PinToCpus(int count, std::string* error) {
+    if (count == 0) {
+        return true;
+    }
+    const int available = LogicalCpuCount();
+    if (count > available) {
+        *error = "--cpus " + std::to_string(count) + " exceeds the " + std::to_string(available) + " logical CPUs";
+        return false;
+    }
+#if defined(_WIN32)
+    DWORD_PTR mask = 0;
+    for (int cpu = 0; cpu < count; ++cpu) {
+        mask |= static_cast<DWORD_PTR>(1) << cpu;
+    }
+    if (!SetProcessAffinityMask(GetCurrentProcess(), mask)) {
+        *error = "SetProcessAffinityMask failed (error " + std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    return true;
+#elif defined(__linux__)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    for (int cpu = 0; cpu < count; ++cpu) {
+        CPU_SET(static_cast<std::size_t>(cpu), &set);
+    }
+    if (sched_setaffinity(0, sizeof(set), &set) != 0) {
+        *error = "sched_setaffinity failed";
+        return false;
+    }
+    return true;
+#else
+    *error = "--cpus is only implemented on Windows and Linux";
+    return false;
+#endif
+}
+
 Options ParseOptions(int argc, char* argv[]) {
     Options options;
     for (int i = 1; i < argc; ++i) {
@@ -222,15 +306,58 @@ Options ParseOptions(int argc, char* argv[]) {
             options.repeat = NumberOrExit("--repeat", value);
         } else if (TakeValue(arg, "--max-spread", argc, argv, i, value)) {
             options.maxSpreadPercent = NumberOrExitDouble("--max-spread", value);
+        } else if (TakeValue(arg, "--workload", argc, argv, i, value)) {
+            options.workload.kind = ParseWorkload(value);
+            if (NameOf(options.workload.kind) != value) {
+                std::cerr << "unknown --workload '" << value << "': expected none, delay, compute or memory\n";
+                std::exit(1);
+            }
+        } else if (TakeValue(arg, "--delay-us", argc, argv, i, value)) {
+            options.workload.delayUs = NumberOrExit("--delay-us", value);
+        } else if (TakeValue(arg, "--compute-iters", argc, argv, i, value)) {
+            options.workload.computeIterations = NumberOrExit("--compute-iters", value);
+        } else if (TakeValue(arg, "--memory-bytes", argc, argv, i, value)) {
+            const int bytes = NumberOrExit("--memory-bytes", value);
+            if (bytes < 1) {
+                std::cerr << "--memory-bytes " << bytes << ": a copy of zero bytes measures nothing\n";
+                std::exit(1);
+            }
+            options.workload.memoryBytes = static_cast<std::size_t>(bytes);
+        } else if (TakeValue(arg, "--cpus", argc, argv, i, value)) {
+            options.cpus = NumberOrExit("--cpus", value);
+        } else if (TakeValue(arg, "--straggler-us", argc, argv, i, value)) {
+            options.stragglerUs = NumberOrExit("--straggler-us", value);
+        } else if (TakeValue(arg, "--push-mode", argc, argv, i, value)) {
+            if (value != "block" && value != "try") {
+                std::cerr << "unknown --push-mode '" << value << "': expected block or try\n";
+                std::exit(1);
+            }
+            options.pushMode = value;
+        } else if (TakeValue(arg, "--log-level", argc, argv, i, value)) {
+            if (value != "trace" && value != "debug" && value != "info" && value != "warn" && value != "err" &&
+                value != "off") {
+                std::cerr << "unknown --log-level '" << value << "': expected trace, debug, info, warn, err or off\n";
+                std::exit(1);
+            }
+            options.logLevel = value;
+        } else if (arg == "--timings") {
+            options.timings = true;
         } else if (arg == "--sync-inputs") {
             options.syncInputs = true;
         } else if (arg == "--payload-fresh") {
             options.freshPayload = true;
         } else if (arg == "--help" || arg == "-h") {
-            std::cout << "usage: pipeline_benchmark [--topology diamond|linear] [--baseline framework|raw] [--modules N] "
-                         "[--branches N] [--capacity N] [--batch N] [--payload none|1080p-rgb|1080p-yuv420|2k-rgb|2k-yuv420] "
-                         "[--duration S] [--repeat R] [--max-spread P] [--sync-inputs] [--payload-fresh] [--label TEXT]\n";
+            std::cout
+                << "usage: pipeline_benchmark [--topology diamond|linear|inject] [--baseline framework|raw|raw-alloc|raw-message]\n"
+                   "       [--modules N] [--branches N] [--capacity N] [--batch N] [--duration S] [--repeat R]\n"
+                   "       [--payload none|1080p-rgb|1080p-yuv420|2k-rgb|2k-yuv420] [--payload-fresh]\n"
+                   "       [--workload none|delay|compute|memory] [--delay-us N] [--compute-iters N] [--memory-bytes N]\n"
+                   "       [--cpus N] [--push-mode block|try] [--straggler-us N] [--sync-inputs] [--timings]\n"
+                   "       [--log-level trace|debug|info|warn|err|off] [--max-spread P] [--label TEXT]\n";
             std::exit(0);
+        } else {
+            std::cerr << "unknown argument '" << arg << "': try --help\n";
+            std::exit(1);
         }
     }
     if (options.durationSeconds < 1) {
@@ -283,6 +410,20 @@ struct Sample {
     /// CPU seconds / wall seconds: how many cores this configuration burns.
     double cores = 0.0;
     Coverage coverage;
+    /// Whole-process resident memory, sampled every 25 ms during the run, in MiB.
+    /// Edge memory is `capacity * frame * edges` on paper, but frames and the
+    /// fusion sink's messageCache are invisible to every counter, so this is the
+    /// only witness for them.
+    double rssStartMiB = 0.0;
+    double rssPeakMiB = 0.0;
+    double rssEndMiB = 0.0;
+    /// Deepest backlog any single edge reached during the run.
+    std::uint64_t edgeDepthMax = 0;
+    /// How long Stop() took: draining the queues and joining every worker.
+    double stopMs = 0.0;
+    /// inject only: Push/TryPush attempts and refusals (TryPush found the edge full).
+    std::uint64_t attempts = 0;
+    std::uint64_t refused = 0;
 };
 
 /// min / median / max of one metric over the measured runs.
@@ -364,20 +505,109 @@ Coverage CoverageOf(const nexusflow::PipelineSnapshot& midRun, const nexusflow::
     return coverage;
 }
 
+/// Samples the process's resident set while the pipeline runs. Only the driving
+/// thread calls this: in the active topologies the main thread has nothing to do
+/// but wait, and in injection mode it is the producer, so no sampling thread is
+/// needed. A 25 ms interval can miss a spike shorter than that, which is why the
+/// report calls this a sampled peak.
+void SampleResident(std::size_t* peak) {
+    const std::size_t resident = ResidentBytes();
+    if (resident > *peak) {
+        *peak = resident;
+    }
+}
+
+/// Feeds the passive source at whatever rate the pipeline accepts, for the run's
+/// duration, and counts attempts and refusals. This is the producer an external
+/// decoder or socket would be: it owns the pacing, the pipeline only consumes.
+void RunInjectionWindow(const Options& options, const PayloadSpec& spec, BuiltTopology& built, std::size_t* rssPeak,
+                        std::uint64_t* attempts, std::uint64_t* refused) {
+    const bool blocking = options.pushMode == "block";
+    const Clock::time_point started = Clock::now();
+    const Clock::time_point deadline = started + std::chrono::seconds(options.durationSeconds);
+    Clock::time_point nextSample = started + std::chrono::milliseconds(25);
+
+    // One frame reused by every pushed message, unless --payload-fresh asks for
+    // the decoder shape where each hand-off owns a fresh picture.
+    std::shared_ptr<const BenchmarkFrame> sharedFrame;
+    if (!spec.empty()) {
+        sharedFrame = MakeBenchmarkFrame(spec);
+    }
+
+    while (true) {
+        const Clock::time_point now = Clock::now();
+        if (now >= nextSample) {
+            SampleResident(rssPeak);
+            nextSample = now + std::chrono::milliseconds(25);
+        }
+        if (now >= deadline) {
+            break;
+        }
+
+        BenchmarkPayload payload;
+        if (options.observe) {
+            payload.creationTime = now;
+        }
+        if (!spec.empty()) {
+            payload.frame = options.freshPayload ? MakeBenchmarkFrame(spec) : sharedFrame;
+        }
+
+        const Message message = MakeMessage(payload);
+        ++(*attempts);
+        if (blocking) {
+            // Push() waits for room, so the producer's rate is the consumer's rate.
+            if (built.pipeline->Push("source", message) != PushResult::kOk) {
+                --(*attempts);
+                break;
+            }
+            continue;
+        }
+
+        bool timedOut = false;
+        while (true) {
+            const PushResult result = built.pipeline->TryPush("source", message);
+            if (result != PushResult::kQueueFull) {
+                if (result != PushResult::kOk) {
+                    --(*attempts);
+                }
+                break;
+            }
+            ++(*refused);
+            if (Clock::now() >= deadline) {
+                --(*attempts);
+                timedOut = true;
+                break;
+            }
+            std::this_thread::yield();
+        }
+        if (timedOut) {
+            break;
+        }
+    }
+}
+
 template <typename Factory>
 Sample RunRawChain(const Options& options, const TopologyShape& shape, const PayloadSpec& spec,
                    std::size_t capacity) {
     RawChain<Factory> chain(shape, capacity, Factory(spec, options.freshPayload, options.observe), options.observe);
 
+    const std::size_t rssStart = ResidentBytes();
+    std::size_t rssPeak = rssStart;
     const double cpuBefore = ProcessCpuSeconds();
     const Clock::time_point started = Clock::now();
     chain.Start();
-    std::this_thread::sleep_for(std::chrono::seconds(options.durationSeconds));
+    const Clock::time_point deadline = started + std::chrono::seconds(options.durationSeconds);
+    while (Clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        SampleResident(&rssPeak);
+    }
     const Clock::time_point finished = Clock::now();
     const Clock::time_point stopStarted = Clock::now();
     chain.Stop();
-    const std::uint64_t stopMs = static_cast<std::uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - stopStarted).count());
+    const std::size_t rssEnd = ResidentBytes();
+    const double stopMs =
+        static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - stopStarted).count()) /
+        1000.0;
     const double cpuAfter = ProcessCpuSeconds();
 
     const RawCounters counters = chain.TakeSnapshot();
@@ -396,6 +626,10 @@ Sample RunRawChain(const Options& options, const TopologyShape& shape, const Pay
     sample.latencyMinUs = static_cast<double>(latency.MinNs()) / 1000.0;
     sample.latencyMaxUs = static_cast<double>(latency.MaxNs()) / 1000.0;
     sample.cores = sample.wallSeconds > 0.0 ? sample.cpuSeconds / sample.wallSeconds : 0.0;
+    sample.rssStartMiB = static_cast<double>(rssStart) / (1024.0 * 1024.0);
+    sample.rssPeakMiB = static_cast<double>(rssPeak) / (1024.0 * 1024.0);
+    sample.rssEndMiB = static_cast<double>(rssEnd) / (1024.0 * 1024.0);
+    sample.stopMs = stopMs;
 
     // The raw baseline has no drop channel: a push either succeeds or the queue
     // was already closed, so the only bookkeeping is that every push was popped
@@ -405,7 +639,7 @@ Sample RunRawChain(const Options& options, const TopologyShape& shape, const Pay
     sample.coverage.residual = counters.residual;
     sample.coverage.sinkPopped = counters.sinkPopped;
     sample.coverage.processed = counters.popped;
-    sample.coverage.stopMs = stopMs;
+    sample.coverage.stopMs = static_cast<std::uint64_t>(stopMs);
     sample.coverage.ok = counters.pushed == counters.popped + counters.residual &&
                          counters.sinkPopped == counters.delivered;
     return sample;
@@ -426,10 +660,15 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
     if (IsRawBaseline(options)) {
         return RunOnceRaw(options, shape, spec, capacity);
     }
-    BuiltTopology built = shape.IsLinear()
-                              ? BuildLinear(shape, capacity, spec, options.freshPayload, options.batch, options.observe)
-                              : BuildDiamond(shape, capacity, spec, options.freshPayload, options.syncInputs,
-                                             options.batch, options.observe);
+    const bool injection = options.topology == "inject";
+    BuiltTopology built =
+        injection
+            ? BuildInjection(options.modules, capacity, options.batch, options.observe, options.workload)
+            : (shape.IsLinear()
+                   ? BuildLinear(shape, capacity, spec, options.freshPayload, options.batch, options.observe,
+                                 options.workload)
+                   : BuildDiamond(shape, capacity, spec, options.freshPayload, options.syncInputs, options.batch,
+                                  options.observe, options.workload, options.stragglerUs));
     if (built.pipeline == nullptr) {
         std::cerr << "failed to build the " << options.topology << " topology\n";
         std::exit(1);
@@ -439,13 +678,31 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
         std::exit(1);
     }
 
+    if (options.timings) {
+        // Before Start(): every worker reads the switch on its first message.
+        built.pipeline->GetContext()->EnableModuleTimings();
+    }
+
+    const std::size_t rssStart = ResidentBytes();
+    std::size_t rssPeak = rssStart;
+    std::uint64_t injectionAttempts = 0;
+    std::uint64_t injectionRefused = 0;
     const double cpuBefore = ProcessCpuSeconds();
     const Clock::time_point started = Clock::now();
     if (built.pipeline->Start() != ErrorCode::SUCCESS) {
         std::cerr << "pipeline Start() failed\n";
         std::exit(1);
     }
-    std::this_thread::sleep_for(std::chrono::seconds(options.durationSeconds));
+    if (injection) {
+        // The main thread is the producer here, so it cannot also just sleep.
+        RunInjectionWindow(options, spec, built, &rssPeak, &injectionAttempts, &injectionRefused);
+    } else {
+        const Clock::time_point deadline = started + std::chrono::seconds(options.durationSeconds);
+        while (Clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            SampleResident(&rssPeak);
+        }
+    }
     const Clock::time_point finished = Clock::now();
 
     // One snapshot while the pipeline still runs: this is the state a healthy
@@ -455,8 +712,12 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
 
     // Capture the counters after Stop(): the sink's histogram is written by its
     // worker thread, so reading it while the pipeline still runs would race.
+    const Clock::time_point stopStarted = Clock::now();
     built.pipeline->Stop();
+    const Clock::time_point stopped = Clock::now();
     const double cpuAfter = ProcessCpuSeconds();
+    const std::size_t rssEnd = ResidentBytes();
+    const nexusflow::PipelineSnapshot finalRun = built.pipeline->GetSnapshot();
 
     const std::uint64_t delivered = built.sink->Count();
     const LatencyHistogram& latency = built.sink->Latency();
@@ -473,6 +734,17 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
     sample.latencyMinUs = static_cast<double>(latency.MinNs()) / 1000.0;
     sample.latencyMaxUs = static_cast<double>(latency.MaxNs()) / 1000.0;
     sample.cores = sample.wallSeconds > 0.0 ? sample.cpuSeconds / sample.wallSeconds : 0.0;
+    sample.rssStartMiB = static_cast<double>(rssStart) / (1024.0 * 1024.0);
+    sample.rssPeakMiB = static_cast<double>(rssPeak) / (1024.0 * 1024.0);
+    sample.rssEndMiB = static_cast<double>(rssEnd) / (1024.0 * 1024.0);
+    sample.stopMs = std::chrono::duration<double, std::milli>(stopped - stopStarted).count();
+    for (const nexusflow::EdgeSnapshot& edge : finalRun.edges) {
+        if (static_cast<std::uint64_t>(edge.maxSize) > sample.edgeDepthMax) {
+            sample.edgeDepthMax = static_cast<std::uint64_t>(edge.maxSize);
+        }
+    }
+    sample.attempts = injectionAttempts;
+    sample.refused = injectionRefused;
     sample.coverage = CoverageOf(midRun, *built.pipeline, shape, options.syncInputs, delivered);
 
     built.pipeline->DeInit();
@@ -491,7 +763,11 @@ void PrintCsv(const Options& options, const TopologyShape& shape, std::size_t ca
               << ',' << repetition << ',' << sample.delivered << ',' << static_cast<std::uint64_t>(sample.throughput)
               << ',' << sample.cpuSeconds << ',' << sample.cores << ',' << sample.latencyAvgUs << ','
               << sample.latencyP50Us << ',' << sample.latencyP95Us << ',' << sample.latencyP99Us << ','
-              << sample.latencyMinUs << ',' << sample.latencyMaxUs << '\n';
+              << sample.latencyMinUs << ',' << sample.latencyMaxUs << ',' << options.cpus << ','
+              << (options.timings ? 1 : 0) << ',' << NameOf(options.workload.kind) << ','
+              << WorkloadParameter(options.workload) << ',' << options.pushMode << ',' << sample.attempts << ','
+              << sample.refused << ',' << sample.rssStartMiB << ',' << sample.rssPeakMiB << ',' << sample.rssEndMiB
+              << ',' << sample.edgeDepthMax << ',' << sample.stopMs << '\n';
 }
 
 /**
@@ -544,9 +820,22 @@ void PrintStat(const Options& options, const TopologyShape& shape, std::size_t c
 
 } // namespace
 
+/// Ask for the 1 ms Windows timer tick while the benchmark runs and restore it
+/// on exit. Windows may stop honouring this for `Sleep` after a few seconds, so
+/// the delay workload waits on a high-resolution waitable timer instead of
+/// relying on this guard; shorter waits elsewhere still benefit during the
+/// first seconds of a run. POSIX sleep resolution is already fine.
+struct TimerResolutionGuard {
+#if defined(_WIN32)
+    TimerResolutionGuard() { timeBeginPeriod(1); }
+    ~TimerResolutionGuard() { timeEndPeriod(1); }
+#endif
+};
+
 int main(int argc, char* argv[]) {
     const Options options = ParseOptions(argc, argv);
-    logger::InitializeGlobalLogger({logger::LogLevel::WARN});
+    logger::InitializeGlobalLogger({LogLevelFromName(options.logLevel)});
+    TimerResolutionGuard timerResolution;
 
     // --micro-observer: what the harness's own per-message observer costs. Run
     // separately, because inside a real pipeline the difference between
@@ -575,21 +864,34 @@ int main(int argc, char* argv[]) {
     // the diamond, and reject knobs that would change the shape behind the
     // caller's back: an impossible value must fail loudly, never be corrected
     // quietly -- a silently clamped point poisons a ladder (HARNESS.md §7).
+    const bool injection = options.topology == "inject";
     const bool linear = options.topology == "linear";
-    if (!linear && options.topology != "diamond") {
-        std::cerr << "unknown --topology '" << options.topology << "': expected linear or diamond\n";
+    if (!linear && !injection && options.topology != "diamond") {
+        std::cerr << "unknown --topology '" << options.topology << "': expected linear, diamond or inject\n";
+        return 1;
+    }
+    if (injection && options.baseline != "framework") {
+        std::cerr << "--topology inject needs --baseline framework: there is no raw pipeline to push into\n";
+        return 1;
+    }
+    if (injection && options.syncInputs) {
+        std::cerr << "--topology inject is a chain: it has no fusion path, drop --sync-inputs\n";
         return 1;
     }
     if (linear && options.modules < 2) {
         std::cerr << "--modules " << options.modules << ": a chain has at least 2 stages (source -> sink)\n";
         return 1;
     }
-    if (!linear && options.branches < 1) {
+    if (!linear && !injection && options.branches < 1) {
         std::cerr << "--branches " << options.branches << ": a fan-out has at least 1 branch\n";
         return 1;
     }
     if (linear && options.syncInputs) {
         std::cerr << "--sync-inputs only applies to --topology diamond: a chain has one input\n";
+        return 1;
+    }
+    if (IsRawBaseline(options) && !options.workload.empty()) {
+        std::cerr << "--workload only applies to the framework pipeline: a raw chain has no stages to run it\n";
         return 1;
     }
     if (options.capacity < 0) {
@@ -608,7 +910,20 @@ int main(int argc, char* argv[]) {
         std::cerr << "--baseline " << options.baseline << " has no fusion path: drop --sync-inputs\n";
         return 1;
     }
-    const TopologyShape shape = ShapeOf(linear, options.modules, options.branches);
+    TopologyShape shape;
+    if (injection) {
+        shape.modules = options.modules < 2 ? 2 : options.modules;
+        shape.branches = 0;
+        shape.edges = shape.modules - 1;
+    } else {
+        shape = ShapeOf(linear, options.modules, options.branches);
+    }
+
+    std::string pinError;
+    if (!PinToCpus(options.cpus, &pinError)) {
+        std::cerr << "pipeline_benchmark: " << pinError << "\n";
+        return 2;
+    }
 
     const PayloadSpec spec = SpecFor(options.payload);
     // Queue depth times payload size is the memory each edge holds: with 1080p
@@ -618,8 +933,13 @@ int main(int argc, char* argv[]) {
         options.capacity > 0 ? static_cast<std::size_t>(options.capacity) : (spec.empty() ? 64u : 4u);
 
     std::cout << "--- NexusFlow pipeline benchmark ---\n";
+    if (options.cpus > 0) {
+        std::cout << "affinity: first " << options.cpus << " of " << LogicalCpuCount() << " logical CPUs\n";
+    } else {
+        std::cout << "affinity: all " << LogicalCpuCount() << " logical CPUs\n";
+    }
     std::cout << "topology: " << options.topology << "  modules=" << shape.modules << "  edges=" << shape.edges;
-    if (!linear) {
+    if (shape.branches > 0) {
         std::cout << "  branches=" << shape.branches;
     }
     std::cout << "  sync_inputs=" << (options.syncInputs ? "yes" : "no") << "\n";
@@ -628,6 +948,19 @@ int main(int argc, char* argv[]) {
         std::cout << " (std::thread + SpscQueue)  batch=none  observe=" << (options.observe ? "full" : "none") << "\n";
     } else {
         std::cout << "  batch=" << options.batch << "  observe=" << (options.observe ? "full" : "none") << "\n";
+    }
+    if (injection) {
+        std::cout << "injection: " << options.pushMode << " push from the main thread\n";
+    }
+    if (!options.workload.empty()) {
+        std::cout << "workload: " << NameOf(options.workload.kind) << " (parameter "
+                  << WorkloadParameter(options.workload) << ") on every intermediate stage\n";
+    }
+    if (options.stragglerUs > 0) {
+        std::cout << "straggler: branch_0 runs the delay workload with " << options.stragglerUs << " us\n";
+    }
+    if (options.timings) {
+        std::cout << "module timings: on\n";
     }
     std::cout << "payload: " << NameOf(options.payload) << " (" << spec.bytes << " bytes/frame, "
               << (options.freshPayload ? "fresh per message" : "one buffer reused") << ")  capacity=" << capacity

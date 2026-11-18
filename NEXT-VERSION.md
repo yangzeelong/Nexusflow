@@ -16,13 +16,15 @@
 
 ## 1. 版本目标：性能 + 资源占用
 
-三条抓手，每条都要有前后数字（口径见 §5）：
+五条抓手（前三条是原计划，后两条来自本轮台式机基准），每条都要有前后数字（口径见 §5）：
 
 | # | 目标 | 现状 |
 | --- | --- | --- |
 | 1 | 线程数不再等于模块数 | 每模块一个 worker 线程：3 个模块 = 3 个线程，100 个模块 = 100 个线程 |
 | 2 | 降低每跳固定开销 | 约 **366 ns/跳**（3 段线性流水线、模块内无计算） |
 | 3 | 让"批处理"真的是批处理 | 融合 `ProcessBatch` 收到的 batch **恒为 1** |
+| 4 | 跨过 P 核线程数后不再断崖 | 台式机 16→18 模块 batch1 吞吐 −41%（8.755→12.622 µs/消息），18–28 段不可稳定测量（§3.4） |
+| 5 | 低速率/空闲路径不被 OS 定时器放大 | 框架自身 idle 等待仍是 `sleep_for(1ms)`/条件变量超时；只有 delay 负载改用高精度定时器绕过，16 模块 `stopMs` 15.6 ms（§3.4） |
 
 ---
 
@@ -56,7 +58,7 @@
 
 - **硬约束**：`AGENTS.md` §5 的前提是"每个计数器只有一个写线程"。L2 靠"模块固定宿主线程"保住这一点，plain `++` + `PublishCounters()` 不变。代价是 `WorkLoop()`（阻塞式 while）必须拆成非阻塞的 `Step()`，由宿主线程轮询自己那组模块——**延迟特征会变，必须用曲线说话**。
 - **第二个硬约束**：停机顺序是"生产者先关边，再 `actor->Stop()` → `join()`"。共享线程后 join 无法表达"单个模块排水完成" → 完成信号要改成 per-module 的完成标志（C++14 用 `atomic` + `condition_variable` 自写），`join` 只留给池析构。
-- **前置条件**：`pipeline_benchmark` 现在固定 3 个模块，测不出线程模型收益。先加 `--modules N` 拓扑参数化 + 扫 `--capacity` × 模块数拿曲线，再决定动不动。
+- **前置条件已满足**：`pipeline_benchmark` 已参数化（`--modules/--branches/--capacity/--batch/--observe`，规则见 `benchmarks/HARNESS.md`），台式机 2–40 模块阶梯已经扫出 16→18 的拐点（§3.4）；线程模型改动直接用这条阶梯量收益。
 
 验收：同等吞吐下线程数下降；`WorkerBehaviorTest` / `PipelineLifecycleTest` 全绿；`AGENTS.md` §5 同步更新。
 
@@ -86,11 +88,68 @@
 
 判断顺序：先动第 1 项（收益在 µs 级），再看第 3 项（收益在几十 ns 级）；Message 那 0.04–0.12 µs 的"重做容器"优先级最低。
 
+### 3.4 本轮基准暴露的框架问题（下版优化清单）
+
+> 数据：[`benchmarks/PERFORMANCE-desktop.md`](benchmarks/PERFORMANCE-desktop.md)（台式机 i7-14700KF，20 物理 / 28 逻辑核；114 条 `stat`、342 条 `cov` 全 ok；duration 5 s × 3，observe full；规则见 [`benchmarks/HARNESS.md`](benchmarks/HARNESS.md)）。这里列的是**框架问题**，不是测量误差；数字只用于同机前后对比。
+
+**P0：线程模型的断崖（§3.1 的直接动机，现在有曲线了）**
+
+| 证据 | 数字 |
+| --- | --- |
+| 拐点 | 16→18 模块 batch1：8.755→12.622 µs/消息（每模块 +1.93 µs，是拐点前 0.56 的 3.4 倍），吞吐 1.76M→1.04M（−41%） |
+| 拐点区不可测 | 18–28 模块多数 arms 的 spread 15–126%（P/E 线程落点每次不同） |
+| 远端点 | 32/40 模块：46.649/77.149 µs；0.33/0.23 M msg/s |
+| 归因 | 40 模块裸 `raw` 68.379 µs、框架 77.149 µs（框架增量仍约 0.23 µs/模块）；裸线程自身 16→40 模块涨 10.6× → 机器满了，但框架无法把一个慢 stage 摊开 |
+| 机器模型 | 8 个 P 核 × SMT = 16 个 P 逻辑线程；第 17 个模块线程起落到 12 个 E 核 |
+
+要做：§3.1 的 L2（池化 + 模块亲和）优先，再加 **stage→核摆放**（先填满 P 线程，超过才用 E 核，避免整条链被一个 E 核 stage 决定）；拓扑阶梯要能标出"第几个模块开始落到 E 核"（Windows 用 `GetLogicalProcessorInformationEx`）。
+
+验收（同机、同 commit、同 batch/observe）：24 模块吞吐 ≥ 16 模块的 70%（现在 16.447 µs vs 8.755，约 53%）；18–28 模块 spread ≤ 10%（先靠摆放稳定，再谈优化）；32/40 模块仍可重复测量，报告给出拐点后的斜率。
+
+**P0：低速率/空闲路径的 15.6 ms 定时器地板**
+
+- 已证实：Windows 11 在进程运行数秒后不再兑现 `timeBeginPeriod` 对 `sleep_for`/短超时等待的精度。独立探针里 `Sleep(2ms)` 从 2.35 ms 变成 14.75–15.49 ms，而高精度 waitable timer 稳定 2.33–2.38 ms；`NtQueryTimerResolution` 一直报 current=1.0 ms，说明是调度合并，不是请求丢失。
+- 现状：只有 delay 工作负载改用高精度定时器绕开了；框架自身仍在用普通等待：`src/core/Worker.cpp:98` 的 `IdleAfterEmptyOutput`（source 空闲 `sleep_for(1ms)` / `waitForRoom(1ms)`）、`include/nexusflow/common/SpscQueue.hpp` 的 `kParkTimeoutMs = 5`、`Worker.hpp` 的 batch timeout 100 ms。
+- 另一个未解释的跳变：16 模块 `stopMs` 15.6 ms，浅链只要 0.2–0.27 ms。
+- 要做：把所有 idle/超时等待换成高精度可等待定时器（Windows）或 `eventfd`（Linux），超时只做兜底、正常唤醒走事件；给 HARNESS 加**低速率阶梯**（10/100/1000 msg/s × 30 s），把 p99 与 15.6 ms 量化写进报告。
+- 验收：100 msg/s 持续 30 s，p99 < 2 ms；16 模块 `stopMs` ≤ 2 ms。
+
+**P1：每消息固定开销**
+
+- 2 模块 batch1：框架 0.876 µs，裸 `raw` 0.234 / `raw-alloc` 0.471 / `raw-message` 0.564 µs（约 1.6–3.7×）；batch4 压到 0.739 µs。
+- 3 模块 batch4、cap8：**0.931 µs/消息、3.156 M msg/s、约 2.9 核**。
+- 目标：3 模块 batch4 ≤ 0.75 µs（−20%），2 模块 batch1 ≤ 0.70 µs；先动 §3.3 第 1 项（调度链），再动分配。注意这是 CPU 时间不是延迟：真实 60 fps × 4 分支下 0.93 µs/消息约等于 0.02% 一个核。
+
+**P1：fan-out / fusion 的每帧成本**
+
+- 8 分支：4.950 M msg/s = 618 K 帧/s，每帧 14.877 µs；1 分支 1.14 µs/帧。
+- 8 分支融合：361 K 帧/s、26.749 µs/帧（spread 13.9%，标 unstable）。
+- 要做：广播路径去掉可以合并的 per-branch 检查；融合按 §3.2 批量。验收：fan8 ≤ 10 µs/帧，fusion8 ≥ 500 K 帧/s。
+
+**P1：批处理语义**
+
+- batch1 2.572M / batch4 3.156M（+23%）/ batch8 2.768M / batch16 2.026M（−36%）。
+- 融合 `ProcessBatch` 恒为 1（§3.2 已列）。
+- 验收：默认 batch 4 保持；加"融合 batch 大小 > 1"用例；batch16 相对 batch4 的跌幅压到 ≤15%。
+
+**P2：外部输入边界**
+
+- 本分支已加 `Pipeline::Push/TryPush`（passive source、单调用线程、fan-out 可能部分投递）：注入 block 2.803M、try 2.927M（39% 重试）。
+- 缺：多生产者输入、优先级/QoS、Push 的批量接口、按模块反压查询。先把"单生产者/单调用线程"写进文档；如做多生产者，先补 MPSC 或外部队列 + 单 pusher，再给前后数字。
+
+**P2：可观测性**
+
+- coverage/stat 已够用（342 条 cov ok、`pushed==popped+discarded+residual`）；RSS/stop 只在 harness 侧。可加进程级 RSS 到 snapshot 不是必须，优先级低。
+
+**测量配套**：HARNESS 的深度维度在混合核机器上要延长到 40（本机 16 之后还有 12 个 E 核）；增加低速率阶梯；拐点区复测 5 次；所有优化前后数字必须同机同 commit。
+
 ---
 
 ## 4. 性能现状（数字见 [`benchmarks/PERFORMANCE-laptop.md`](benchmarks/PERFORMANCE-laptop.md)，规则见 [`benchmarks/HARNESS.md`](benchmarks/HARNESS.md)）
 
 笔记本（i7-11800H，8 物理核）：3 模块线性、模块内无计算、capacity 8、batch 4（默认）——约 **2.47 M msg/s**、**1.20 µs CPU/消息**、**约 2.9 核**。同构的裸线程 + 裸 SpscQueue 基线是 **0.19 µs/消息**（零分配口径）、**0.32 µs**（每消息分配口径）。
+
+台式机（i7-14700KF，20 物理 / 28 逻辑核，Windows 11）：同构 3 模块、capacity 8、batch 4 —— **3.156 M msg/s**、**0.931 µs CPU/消息**、约 2.9 核；16 模块 batch1 1.76 M / 8.755 µs，batch4 2.24 M / 6.791 µs；2 模块裸基线 0.234–0.564 µs/消息。深度阶梯在 **16→18 模块**出现拐点（§3.4），两台机器分报告、不跨机比绝对值。
 
 判断：
 

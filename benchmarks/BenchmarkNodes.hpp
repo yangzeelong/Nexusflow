@@ -6,10 +6,23 @@
 #include <nexusflow/Message.hpp>
 #include <nexusflow/Module.hpp>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -232,7 +245,25 @@ inline std::size_t WorkloadParameter(const WorkloadSpec& spec) {
 class WorkloadModule : public nexusflow::Module {
 public:
     WorkloadModule(std::string name, WorkloadSpec spec)
-        : nexusflow::Module(std::move(name)), m_spec(spec), m_buffer(spec.memoryBytes, 0), m_scratch(spec.memoryBytes, 0) {}
+        : nexusflow::Module(std::move(name)),
+          m_spec(spec),
+          m_buffer(spec.memoryBytes, 0),
+          m_scratch(spec.memoryBytes, 0) {
+#if defined(_WIN32)
+        if (m_spec.kind == WorkloadKind::Delay) {
+            m_delayTimer =
+                CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+        }
+#endif
+    }
+
+    ~WorkloadModule() override {
+#if defined(_WIN32)
+        if (m_delayTimer != nullptr) {
+            CloseHandle(m_delayTimer);
+        }
+#endif
+    }
 
 protected:
     void Process(nexusflow::Message& message) override {
@@ -240,7 +271,7 @@ protected:
         case WorkloadKind::None:
             break;
         case WorkloadKind::Delay:
-            std::this_thread::sleep_for(std::chrono::microseconds(m_spec.delayUs));
+            WaitForDelay();
             break;
         case WorkloadKind::Compute:
             RunCompute();
@@ -253,6 +284,26 @@ protected:
     }
 
 private:
+    /// A plain sleep_for on Windows is coalesced to the 15.6 ms default tick
+    /// once the process has run for a few seconds: the OS stops honouring the
+    /// process-wide timeBeginPeriod request for Sleep even though
+    /// NtQueryTimerResolution still reports 1 ms. A high-resolution waitable
+    /// timer is not affected, so the delay workload waits on one and falls back
+    /// to sleep_for only when the timer cannot be created.
+    void WaitForDelay() {
+#if defined(_WIN32)
+        if (m_delayTimer != nullptr) {
+            LARGE_INTEGER due;
+            due.QuadPart = -static_cast<LONGLONG>(m_spec.delayUs) * 10;  // relative, 100 ns units
+            if (SetWaitableTimer(m_delayTimer, &due, 0, nullptr, nullptr, FALSE) != 0) {
+                WaitForSingleObject(m_delayTimer, INFINITE);
+                return;
+            }
+        }
+#endif
+        std::this_thread::sleep_for(std::chrono::microseconds(m_spec.delayUs));
+    }
+
     void RunCompute() {
         // The member write keeps the chain observable, so the compiler cannot
         // fold the loop away; the result itself is meaningless.
@@ -281,6 +332,9 @@ private:
     double m_computeGuard = 0.0;
     std::vector<std::uint8_t> m_buffer;
     std::vector<std::uint8_t> m_scratch;
+#if defined(_WIN32)
+    HANDLE m_delayTimer = nullptr;
+#endif
 };
 
 /**

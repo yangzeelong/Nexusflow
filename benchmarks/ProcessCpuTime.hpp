@@ -2,7 +2,12 @@
 #define NEXUSFLOW_BENCHMARKS_PROCESS_CPU_TIME_HPP
 
 #if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include <sys/resource.h>
