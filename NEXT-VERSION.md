@@ -73,37 +73,39 @@
 
 验收：用例断言融合模块收到的 `ProcessBatch` 大小 > 1；吞吐不低于基线。
 
-### 3.3 每跳固定开销
+### 3.3 每多一个模块的框架开销（原「每跳固定开销」）
 
-**本版已做**：每消息级日志降为 TRACE（`Module.cpp` 7 处 + `Worker.cpp:363`）；默认日志级别 DEBUG → INFO；逐跳计时链改为按需开启（`PipelineContext::EnableModuleTimings()`，可链式，默认关；单模块可用 `Module::SetModuleTimingsEnabled()`）。实测代价：开启时 capacity=8 中位约 1.33M、关闭后约 2.97M msg/s。
+**本版已做**：每消息级日志降为 TRACE（`Module.cpp` 7 处 + `Worker.cpp:363`）；默认日志级别 DEBUG → INFO；逐段计时链改为按需开启（`PipelineContext::EnableModuleTimings()`，可链式，默认关；单模块可用 `Module::SetModuleTimingsEnabled()`）。实测代价：开启时 capacity=8 中位约 1.33M、关闭后约 2.97M msg/s。
 
-剩下的大头（按预期收益排序，**先用 profiler 量**，别猜）：
+剩下的（**已用裸基线量过，不再靠估**；完整表见 [`benchmarks/PERFORMANCE-laptop.md`](benchmarks/PERFORMANCE-laptop.md) §2）:
 
-1. **计时读数按需**：`Module::ProcessTimed` 里的两次 `steady_clock::now()` 在计时链关着时无人消费，可以整个跳过。
-2. **`Dispatcher` 名字解析**：现在是按输出名字符串查下游；应在启动时解析成基底下标，热路径只做数组索引。
-3. **计数器发布降频**：`Worker` 每个循环迭代一次 `PublishCounters()`（release fence），可改成每 N 条或按时间发布。
-4. `std::map` 换扁平容器（`MessageMeta::moduleTimingMs`）：只在"必须默认开启计时链"时才值得做。
+1. **调度链是主体**：Module/Worker/Dispatcher 这一圈（取消息、虚调用、`ProcessTimed` 的两次读时钟、`pendingOutputs` + 两次 Message 拷贝、推队列、`PublishCounters`）每多一个模块约 **0.12–0.38 µs**（默认 batch 4）；Message 自身每多一个模块只有 **0.04–0.12 µs**，两者差 3–5 倍。
+2. **批处理已经吃掉约一半**：同拓扑 batch 1 → batch 4，每多一个模块的调度成本从 0.23–0.52 降到 0.12–0.38。所以以后比固定开销，必须先钉住 batch 口径。
+3. **每消息分配**约 0.06–0.18 µs，排第二，且不随模块数增长；要做就做小对象池/复用，别指望它救大局。
+4. 原列的四条——计时读数按需、名字解析成下标、计数发布降频、`std::map` 换扁平容器——依然成立；前三条正是上面第 1 项的组成部分，**现在有基线可以逐条验证它们各值多少**。
+
+判断顺序：先动第 1 项（收益在 µs 级），再看第 3 项（收益在几十 ns 级）；Message 那 0.04–0.12 µs 的"重做容器"优先级最低。
 
 ---
 
-## 4. 性能现状（数字与协议见 [`benchmarks/README.md`](benchmarks/README.md)）
+## 4. 性能现状（数字见 [`benchmarks/PERFORMANCE-laptop.md`](benchmarks/PERFORMANCE-laptop.md)，规则见 [`benchmarks/HARNESS.md`](benchmarks/HARNESS.md)）
 
-3 段线性流水线、模块内没有计算：capacity=8 中位约 **3.50M msg/s / 5.3 µs**，10 s 内耗 **38.86 s CPU ≈ 3.88 个核**，每消息约 **1.097 µs**、每跳约 **366 ns**，工作集 **5.1 MB**。
+笔记本（i7-11800H，8 物理核）：3 模块线性、模块内无计算、capacity 8、batch 4（默认）——约 **2.47 M msg/s**、**1.20 µs CPU/消息**、**约 2.9 核**。同构的裸线程 + 裸 SpscQueue 基线是 **0.19 µs/消息**（零分配口径）、**0.32 µs**（每消息分配口径）。
 
 判断：
 
-- **每跳 366 ns 基本全是框架开销**——这三个模块里没有计算，所以 366 ns/hop 就是排队 + 取时间 + 名字分发 + 计数 + COW 引用计数的总价。这个价码决定适用区间。
-- **线程数是资源占用的主要单点**（= 模块数），对应 §3.1。
-- **内存是加分项**：5.1 MB 定长、无按消息增长，`--capacity` 就是内存旋钮。
-- **定位**：适合"每帧几十 µs ~ 几 ms"的视觉/算法流水线（一帧计算完全摊得掉这 366 ns），**不适合当高频小消息的事件总线**；对外不要按低延迟消息框架的口径描述性能。
+- **饱和吞吐下框架开销是大头**：2 模块时框架 0.96 µs vs 裸实现 0.19 µs（约 5 倍）。但按真实帧率算无关紧要：60 fps × 4 分支约 960 消息/秒，1.2 µs/消息只有约 0.1% 的一个核。
+- **线程数才是资源占用的主要单点**（= 模块数），对应 §3.1。
+- **容量旋钮有上限**：capacity 8 之后吞吐不再涨，只买尾部延迟（p99 从 9 µs 涨到 161 µs）。
+- **定位不变**：适合"每帧几十 µs ~ 几 ms"的视觉/算法流水线，**不适合当高频小消息的事件总线**；对外不要按低延迟消息框架的口径描述性能。
 
-每跳 366 ns 的构成是**读代码估的量级，不是采样结果**：时钟 ×2 占 50–80 ns、按字符串名查下游 50–100 ns、SPSC push/pop + fence 40–60 ns、shared_ptr 原子引用计数 20–40 ns、pending 输出向量 20–40 ns、计数 fence 10–20 ns。**下版本第一件事应该是接真 profiler（ETW / VS 采样 / `perf`），而不是继续猜。**
+早期那份"每多一个模块 366 ns、构成靠读代码估"的结论已作废：现在有裸基线，框架开销能拆成「分配 / Message / 调度」三层，每层都在同机、同 commit、同批参数下量过（报告 §2）。要更细的归因，才轮到 profiler（ETW / VS 采样 / `perf`）。
 
 ---
 
 ## 5. 验收口径
 
-同拓扑、同机器、热身 1 次 + 3 次取中位数、前后对比，并把 **commit-id + 平台** 一起记进 `benchmarks/README.md`。没有前后数字的"性能优化"不算完成。
+同拓扑、同机器、同 batch、同观测模式；每档 3 次，报 `median [min .. max]`，从 `stat,` 行取数，覆盖率断言（`cov,`）必须 ok。数字连同 **commit + 机器名** 写进 `benchmarks/PERFORMANCE-<machine>.md`，**不许跨机器比绝对值**。没有前后数字的"性能优化"不算完成——完整规则见 [`benchmarks/HARNESS.md`](benchmarks/HARNESS.md)。
 
 ---
 
@@ -122,7 +124,7 @@
 
 ### 6.3 顺手可做（按价值排序）
 
-- **benchmark 拓扑参数化**（`--modules N`）：§3.1 和 §3.2 收益的前置。
+- ~~**benchmark 拓扑参数化**（`--modules N`）~~：已做——`--modules`/`--branches`/`--capacity`/`--batch`/`--observe` 阶梯加上三条裸基线（`--baseline raw|raw-alloc|raw-message`），规则见 `benchmarks/HARNESS.md`，§3.1 / §3.2 的收益可以直接量。
 - **CI 基准记录**：先只记录数字贴到 PR，不做门禁（托管 runner 噪声大，70% 阈值会假红）。
 - **`ToString()` 补 `AppendTo(std::string&)`**：现在 `GetSnapshot()` 与 `ToString()` 各拼一次字符串。
 - **`MetricSamples` 窗口容量可配**：现在 1024 是编译期常量，p99 可信度直接取决于它。

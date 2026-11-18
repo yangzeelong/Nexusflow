@@ -118,13 +118,18 @@ inline std::shared_ptr<const BenchmarkFrame> MakeBenchmarkFrame(PayloadSpec spec
  */
 class SourceModule : public nexusflow::Module {
 public:
-    SourceModule(std::string name, PayloadSpec spec, bool freshPerMessage)
-        : nexusflow::Module(std::move(name)), m_spec(spec), m_freshPerMessage(freshPerMessage) {}
+    SourceModule(std::string name, PayloadSpec spec, bool freshPerMessage, bool measureLatency = true)
+        : nexusflow::Module(std::move(name)), m_spec(spec), m_freshPerMessage(freshPerMessage),
+          m_measureLatency(measureLatency) {}
 
 protected:
     void Process(nexusflow::Message&) override {
         BenchmarkPayload payload;
-        payload.creationTime = Clock::now();
+        // `--observe none` drops this read: it is the harness's own cost, and the
+        // point of that mode is to measure what the harness costs.
+        if (m_measureLatency) {
+            payload.creationTime = Clock::now();
+        }
         if (!m_spec.empty()) {
             if (m_freshPerMessage) {
                 payload.frame = MakeFrame();
@@ -143,6 +148,7 @@ private:
 
     PayloadSpec m_spec;
     bool m_freshPerMessage = false;
+    bool m_measureLatency = true;
     std::shared_ptr<const BenchmarkFrame> m_sharedFrame;
 };
 
@@ -288,7 +294,8 @@ private:
  */
 class SinkModule : public nexusflow::Module {
 public:
-    explicit SinkModule(std::string name) : nexusflow::Module(std::move(name)) {}
+    SinkModule(std::string name, bool measureLatency = true)
+        : nexusflow::Module(std::move(name)), m_measureLatency(measureLatency) {}
 
     std::uint64_t Count() const { return m_count; }
     const LatencyHistogram& Latency() const { return m_latency; }
@@ -313,11 +320,18 @@ protected:
 
 private:
     void Record(const BenchmarkPayload& payload) {
+        // `--observe none`: the second clock read and the histogram sample are the
+        // harness's own cost, so they are skipped rather than counted as the
+        // pipeline's.
+        if (!m_measureLatency) {
+            return;
+        }
         const auto latency = Clock::now() - payload.creationTime;
         const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(latency).count();
         m_latency.Record(ns > 0 ? static_cast<std::uint64_t>(ns) : 0);
     }
 
+    bool m_measureLatency = true;
     std::uint64_t m_count = 0;
     LatencyHistogram m_latency;
 };
