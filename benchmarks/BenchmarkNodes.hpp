@@ -89,6 +89,19 @@ struct BenchmarkPayload {
     std::shared_ptr<const BenchmarkFrame> frame;  // null when --payload none
 };
 
+/// Allocates one frame of the requested size. Shared by the active source and by
+/// the external producer (--topology inject), so both spend the same allocation
+/// when --payload-fresh asks for a fresh picture per message.
+inline std::shared_ptr<const BenchmarkFrame> MakeBenchmarkFrame(PayloadSpec spec) {
+    auto frame = std::make_shared<BenchmarkFrame>();
+    frame->width = spec.width;
+    frame->height = spec.height;
+    frame->channels = spec.channels;
+    // The zero fill stands in for the decoder writing the picture.
+    frame->bytes = std::make_shared<const std::vector<std::uint8_t>>(spec.bytes, static_cast<std::uint8_t>(0));
+    return frame;
+}
+
 /**
  * @class SourceModule
  * @brief Generates one message per invocation, optionally with a frame.
@@ -126,19 +139,30 @@ protected:
     }
 
 private:
-    std::shared_ptr<const BenchmarkFrame> MakeFrame() {
-        auto frame = std::make_shared<BenchmarkFrame>();
-        frame->width = m_spec.width;
-        frame->height = m_spec.height;
-        frame->channels = m_spec.channels;
-        // The zero fill stands in for the decoder writing the picture.
-        frame->bytes = std::make_shared<const std::vector<std::uint8_t>>(m_spec.bytes, static_cast<std::uint8_t>(0));
-        return frame;
-    }
+    std::shared_ptr<const BenchmarkFrame> MakeFrame() { return MakeBenchmarkFrame(m_spec); }
 
     PayloadSpec m_spec;
     bool m_freshPerMessage = false;
     std::shared_ptr<const BenchmarkFrame> m_sharedFrame;
+};
+
+/**
+ * @class PassiveSourceModule
+ * @brief A source that never produces on its own: the caller is the producer.
+ *
+ * Pipeline::Push()/TryPush() writes straight into this module's output edges,
+ * which is the shape an external producer has (a decoder, a socket, a camera
+ * callback). Its worker still runs but finds nothing to do, so a run measures
+ * the injection path instead of a source loop.
+ */
+class PassiveSourceModule : public nexusflow::Module {
+public:
+    explicit PassiveSourceModule(std::string name) : nexusflow::Module(std::move(name)) {}
+
+    bool IsPassiveSource() const override { return true; }
+
+protected:
+    void Process(nexusflow::Message&) override {}
 };
 
 /// Forwards whatever it receives. The zero-work stage that isolates framework cost.

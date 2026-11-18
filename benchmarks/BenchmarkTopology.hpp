@@ -23,7 +23,9 @@ namespace nexusflow_bench {
  */
 struct BuiltTopology {
     std::unique_ptr<nexusflow::Pipeline> pipeline;
-    std::shared_ptr<SourceModule> source;
+    // SourceModule for the active topologies, PassiveSourceModule for inject;
+    // the harness only needs the base interface.
+    std::shared_ptr<nexusflow::Module> source;
     std::shared_ptr<SinkModule> sink;
     std::vector<std::shared_ptr<nexusflow::Module>> modules;
 };
@@ -85,7 +87,8 @@ inline BuiltTopology BuildLinear(int modules, std::size_t capacity, PayloadSpec 
  * fusion batching cost becomes measurable. Branches run `workload`.
  */
 inline BuiltTopology BuildDiamond(int branches, std::size_t capacity, PayloadSpec spec, bool freshPayload,
-                                  bool syncInputs, const WorkloadSpec& workload = WorkloadSpec{}) {
+                                  bool syncInputs, const WorkloadSpec& workload = WorkloadSpec{},
+                                  int stragglerUs = 0) {
     BuiltTopology built;
     const int count = branches < 2 ? 2 : branches;
 
@@ -98,7 +101,15 @@ inline BuiltTopology BuildDiamond(int branches, std::size_t capacity, PayloadSpe
     builder.AddModule(built.source);
     for (int i = 0; i < count; ++i) {
         const std::string name = "branch_" + std::to_string(i);
-        auto branch = MakeStageModule(name, workload);
+        // One deliberately slow branch keeps fused groups half-complete, which is
+        // the only way the sink's messageCache can grow. That growth is a memory
+        // question, not a throughput one: it shows up in RSS, not in a counter.
+        WorkloadSpec branchWorkload = workload;
+        if (i == 0 && stragglerUs > 0) {
+            branchWorkload.kind = WorkloadKind::Delay;
+            branchWorkload.delayUs = stragglerUs;
+        }
+        auto branch = MakeStageModule(name, branchWorkload);
         built.modules.push_back(branch);
         builder.AddModule(branch);
         builder.Connect("source", name);
@@ -111,6 +122,42 @@ inline BuiltTopology BuildDiamond(int branches, std::size_t capacity, PayloadSpe
         config.Add<bool>("syncInputs", true);
         builder.SetModuleConfig("sink", config);
     }
+
+    built.pipeline = builder.Build(static_cast<int>(capacity));
+    return built;
+}
+
+/**
+ * @brief Passive source -> (modules-2) stages -> sink, fed by Pipeline::Push().
+ *
+ * Same stage shape as BuildLinear, but the source never produces on its own: the
+ * harness pushes each message into it. This is the topology that answers "what
+ * does the injection path cost, and what does back-pressure do to the producer"
+ * instead of "how fast can a source loop broadcast".
+ */
+inline BuiltTopology BuildInjection(int modules, std::size_t capacity, const WorkloadSpec& workload = WorkloadSpec{}) {
+    BuiltTopology built;
+    const int stages = modules < 2 ? 2 : modules;
+
+    built.source = std::make_shared<PassiveSourceModule>("source");
+    built.modules.push_back(built.source);
+    built.sink = std::make_shared<SinkModule>("sink");
+    built.modules.push_back(built.sink);
+
+    nexusflow::PipelineBuilder builder;
+    builder.AddModule(built.source);
+    std::vector<std::string> names;
+    names.push_back("source");
+    for (int i = 0; i < stages - 2; ++i) {
+        const std::string name = "stage_" + std::to_string(i);
+        auto stage = MakeStageModule(name, workload);
+        built.modules.push_back(stage);
+        builder.AddModule(stage);
+        names.push_back(name);
+        builder.Connect(names[names.size() - 2], name);
+    }
+    builder.AddModule(built.sink);
+    builder.Connect(names.back(), "sink");
 
     built.pipeline = builder.Build(static_cast<int>(capacity));
     return built;

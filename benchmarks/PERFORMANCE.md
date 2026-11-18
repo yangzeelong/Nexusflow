@@ -61,6 +61,10 @@ drain 期的消息被计入分子却没计入分母）。
 | 1080p RGB 帧（每帧新建） | 905 帧/s，p50 2.70 ms | 单线程分配/page fault 主导 |
 | 负载档位（linear 3，capacity 4） | compute 500→5000 iters：619 K→20.8 K msg/s；memcpy 4 KiB→512 KiB：2.893 M→85.5 K msg/s；delay 2/5/10 ms：372/174/94 msg/s | 真实工作与框架开销分离 |
 | 队列容量 1 → 4 → 256 | 1.719 → 2.786 → 3.211 M msg/s | 4 起进入平台，尾部随容量线性变差 |
+| 外部注入（inject 3 段，capacity 8） | **3.235 M msg/s**（block）/ 3.463 M（try） | 与源模块驱动差 −4.4%；try 多 7% 但要 36.7% 重试 |
+| 观测开销（linear 3，capacity 8） | `--timings` **1.235 M msg/s**（−63.5%，2.74× 变慢） | 逐跳计时链不是免费的；`--log-level info` 在噪声内 |
+| 1080p 每帧新建的内存峰值 | **37.1 MiB RSS**（融合）/ 36.9 MiB（非融合） | 融合不多留 payload |
+| 融合半凑齐（straggler 2 ms / 10 ms） | RSS 只 +0.08–0.14 MiB，吞吐被背压拖到 352 / 94 帧/s | cache 由边背压兜住，量不到无界增长 |
 
 ---
 
@@ -188,9 +192,61 @@ drain 期的消息被计入分子却没计入分母）。
 单生产者语义（边是 SPSC）、fan-out 部分投递、`Stop()` 会 drain，见根 README 的
 "Feeding a Running Pipeline" 与 `tests/test/PipelinePushTest.cpp`（6 例）。
 
-本报告没有单独给注入吞吐建表：它的一次 `Push` 就是一次边队列 push + 下游调度，
-成本与被动 source 的 `Process()` 相同；注入路径的收益是把外部数据接进图，
-而不是更快地吞吐。
+拓扑 `--topology inject` 用 passive source 代替 `SourceModule`，主线程就是生产者；
+帧的 `creationTime` 在 `Push` 前打点，所以 p50 量的是"入队 → 走完下游 → sink"的整段时间。
+
+| 配置 | 吞吐 (msg/s) | p50 (µs) | 核 | µs/msg | 备注 |
+| --- | --- | --- | --- | --- | --- |
+| linear 3，cap 8（源模块驱动，基线） | 3,385,085 | 3.016 | 2.963 | 0.88 | §3.1 的同一档 |
+| **inject 3，cap 8，block** | 3,234,833 | 3.016 | 2.953 | 0.91 | 比源驱动 −4.4% |
+| inject 3，cap 8，try | 3,463,283 | 3.016 | 2.928 | 0.85 | 比 block +7.1%，36.7% 重试 |
+| linear 3，cap 4（源模块驱动） | 3,334,518 | 2.016 | 2.931 | 0.88 | 本机重测 |
+| **inject 3，cap 4，block** | 3,653,692 | 1.008 | 2.967 | 0.81 | 比源驱动 +9.6% |
+| inject 3，cap 1，try | 2,098,239 | 2.016 | 2.956 | 1.41 | 160% 重试，吞吐 −43% |
+| inject 3，cap 64，block | 3,246,617 | 20.125 | 2.967 | 0.91 | 尾延迟随容量线性变差 |
+| inject 16，cap 8，block | 2,274,987 | 40.250 | 15.710 | 6.90 | 460 ns/模块，与源驱动的 444 同量级 |
+| inject 3，cap 8，block + 1080p 复用 | 3,476,573 | 2.016 | 2.928 | 0.84 | 像素仍不拷 |
+
+**分析**
+
+- **注入不额外收费**：同容量下 block 比源模块驱动只低 4.4%（cap 8）——多花的只是一次名字
+  查表 + `IsPassiveSource()` 检查和一次直接 push，省掉的是源模块那条线程；cap 4 反而高
+  9.6%，因为连"源 → 第一跳"的那次队列 push 也省了（passive source 的 `Process()` 是空的）。
+- **阻塞 vs 自旋**：cap 8 下 try 比 block 快 7.1%，但有 36.7% 的 `kQueueFull` 重试；队列缩到
+  1 时自旋失控（160% 重试、吞吐 −43%）。背压的正确用法是 block，try 只适合"有别的活可干"
+  的生产者。
+- **深度**：16 段注入 6.90 µs/消息 = 460 ns/模块，和 §3.1 源驱动的 444 ns 同量级——深链成本
+  来自模块数，不是注入路径。
+- 注入的收益仍然是把外部数据接进图（相机/USB/网络）；但它**不比源模块慢**，这条腿可以当
+  正式入口用。
+
+---
+
+### 3.6 观测开销（`--timings` / `--log-level`）
+
+`--timings` 在 Start 前调用 `PipelineContext::EnableModuleTimings()`：逐跳链在每次经过时
+读一次、深拷贝一次。`--log-level` 设全局 logger 级别；TRACE 在 `Module::Send/Broadcast` 和
+`Worker::RunFusion` 的热路径上**逐条消息**打日志。
+
+| 配置（linear 3，cap 8，空载荷） | 吞吐 (msg/s) | 相对基线 | 核 | µs/msg | 每模块 (ns) |
+| --- | --- | --- | --- | --- | --- |
+| 默认（timings off，log warn） | 3,385,085 | 1.000 | 2.963 | 0.88 | 438 |
+| `--timings` | 1,235,210 | **0.365** | 2.937 | 2.38 | 1,189 |
+| `--log-level info` | 3,292,044 | 0.973 | 2.964 | 0.90 | 450 |
+| `--workload delay --delay-us 1000`，warn | 536 | — | 0.020 | 40.72 | — |
+| 同上 + `--log-level trace` | 535 | 0.998 | 0.050 | 93.958 | — |
+| `--workload delay --delay-us 200`，warn | 558 | — | 0.030 | 47.48 | — |
+| 同上 + `--log-level trace` | 537 | 0.963 | 0.040 | 69.49 | — |
+
+**分析**
+
+- `--timings` 的代价是 **2.74× 变慢**（3.385 → 1.235 M），不是文档里估的"约 2×"：每模块
+  438 → 1,189 ns（+171%），而核数几乎不动（2.963 → 2.937）——是每跳多了一遍读取和深拷贝，
+  不是抢 CPU。**默认必须关**，只在对单条链做诊断时开。
+- `--log-level info` 在噪声内（−2.7%）：INFO 没有逐消息日志，热路径上只有 TRACE。
+- TRACE 是 **~1 KB/消息**（5 s 的 672 msg/s 跑出 3.5 MB 日志）。delay 档位的墙钟吞吐由
+  sleep 主导（§3.4 的 1 ms 地板，±4% 不可分），所以这一档只看 µs/msg：trace 让每条消息
+  多花 **22–53 µs**。按 3.4 M msg/s 全速估算要写出 ~3 GB/s，实际不可用——只能配负载限速。
 
 ---
 
@@ -222,6 +278,39 @@ capacity=8、全空载荷。`sync=no` 是 sink 各读各的分支消息；`sync=
 - 8 分支时融合只比非融合慢 22%（505 K vs 649 K 帧/s），因为非融合 sink 的成本涨得更快；
   但融合的 p99 81.5 µs、每帧 CPU 19.04 µs 是同分支数下最差的一档。
 - **这是下版本 4.1 的靶子**：融合批处理 + 内层容器 + 错误语义。
+
+### 4.1 内存：RSS 峰值与融合半凑齐
+
+`Pipeline::GetSnapshot()` 看不到 payload 本身，也看不到 `Worker::RunFusion()` 里那个函数
+局部的 `messageCache`。所以这一节用进程 RSS（`GetProcessMemoryInfo`，见
+`benchmarks/ProcessMemory.hpp`）在运行期每 25 ms 采一次，报 start → peak（MiB）。
+
+| 配置（diamond 2 分支） | 吞吐 | 核 | RSS start → peak | stop (ms) | fusionExpired | 边深 |
+| --- | --- | --- | --- | --- | --- | --- |
+| cap 8，融合，空载荷 | 1,213,130 帧/s | 3.952 | 5.74 → 5.83 | 0.182 | 16 | 8 |
+| cap 8，融合，1080p 每帧新建 | 964 帧/s | 2.060 | 5.68 → 37.08 | 1.380 | 0 | 4 |
+| cap 8，非融合，1080p 每帧新建 | 1,916 帧/s | 1.245 | 5.65 → 36.95 | 0.663 | 0 | 4 |
+| cap 4，融合，1080p 每帧新建 | 965 帧/s | 2.040 | 5.69 → 36.45 | 1.241 | 4 | 4 |
+| cap 4，融合 + straggler 2 ms | 352 帧/s | 1.020 | 5.77 → 5.85 | 14.31 | 2 | 4 |
+| cap 4，融合 + straggler 10 ms | 94 帧/s | 1.020 | 5.75 → 5.84 | 69.90 | 2 | 4 |
+| cap 64，融合 + straggler 2 ms | 353 帧/s | 1.010 | 5.89 → 6.03 | 188.70 | 2 | 64 |
+
+**分析**
+
+- **1080p 每帧新建的峰值是 payload 工作集，不是框架**：37.1 MiB ≈ 6 张 1080p RGB 帧常驻
+  （capacity 8 × 2 条边 = 16 张是算术上界，实际边深只到 4）。
+- **融合不多留 payload**：37.08 vs 36.95 MiB，几乎相同。融合的代价在 CPU（2.06 vs 1.25 核，
+  +65%）和吞吐（964 vs 1,916 帧/s，−50%），不在内存。
+- **半凑齐的 cache 由背压兜住**：`--straggler-us` 让 branch_0 每帧睡 2 ms / 10 ms，整条链被
+  拖到 352 / 94 帧/s，但 RSS 只涨 0.08–0.14 MiB，cap 64 也一样。原因：source 的 `Broadcast`
+  是**阻塞 push**，branch_0 的边一满 source 就停，cache 里最多只有在途的几条半组。所以本框架
+  **量不到无界增长**——要复现它需要"不阻塞且会丢"的上游，而当前实现没有这条路径。
+- `fusionExpired` 在正常跑里也有值（cap 8 是 2–24，cap 4 是 2）：这是 `Stop()` drain 时残留
+  半组被 flush 的计数，不是 60 s 超时（10 s 的跑不可能触发）。
+- **stop 成本 ≈ 边深 × 支路延迟**：cap 64 + 2 ms → 188.7 ms（64 × 2 ms + join）；cap 4 → 14.3 ms。
+  队开大的隐性代价会在停机时一次付清。
+- 仍缺一项：cache 的**单独峰值**。要精确得在 `RunFusion()` 里加一个原子峰值计数器，属于框架
+  改动，留给下版本（和 snapshot 暴露一起做）。
 
 ---
 
@@ -284,11 +373,12 @@ capacity=8、全空载荷。`sync=no` 是 sink 各读各的分支消息；`sync=
 
 | 优先级 | 方向 | 依据 |
 | --- | --- | --- |
-| 1 | 削每模块固定成本（计时读数按需、名字→下标、计数发布降频） | 3 段 294–351 ns/模块；纯内存/原子操作是几十 ns 量级，这里有 **5–10× 空间** |
-| 2 | 融合路径重做（批处理、内层容器、错误语义） | 2 分支融合 1.046 M 帧/s vs 非融合 2.108 M；每帧 CPU 3.74 vs 1.86 µs；batch 恒为 1 |
-| 3 | 线程模型（线程数 ≠ 模块数，如线程池） | 16 段 15 核只换 2.11 M msg/s（141 K/核），3 段是 1.13 M/核：深链上每模块一线程是纯亏 |
+| 1 | 削每模块固定成本（计时读数按需、名字→下标、计数发布降频） | 3 段 438 ns/模块；`--timings` 一开就 1,189 ns（**2.74× 变慢**）——逐跳计时链本身就是最大的单点成本 |
+| 2 | 融合路径重做（批处理、内层容器、错误语义） | 2 分支融合 964 帧/s vs 非融合 1,916（1080p 每帧新建）；空载荷 1.21 M vs 2.11 M 帧/s；batch 恒为 1 |
+| 3 | 线程模型（线程数 ≠ 模块数，如线程池） | 16 段 15.71 核只换 2.11–2.27 M msg/s（~144 K/核），3 段是 1.13 M/核：深链上每模块一线程是纯亏 |
 | 4 | 扇出路径减少 sink 的串行处理 | 8 分支每帧 14.51 µs，帧率只有 2 分支的 30.8% |
-| 5 | 外部注入的工程化（背压策略、批量 push、超时/错误语义） | 本版已有 `Push`/`TryPush` + 6 单测；还缺注入吞吐/背压的基准与多生产者支持 |
+| 5 | 外部注入的工程化（多生产者、批量 push、超时/错误语义） | 注入 block 3.235 M（−4.4% vs 源驱动）、try cap1 有 160% 重试；单生产者背压已可用，缺的是多生产者 |
+| 6 | 融合 cache 的上界与可见性 | straggler 2–10 ms 下 RSS 只 +0.08–0.14 MiB（背压兜住），但 cache 峰值在 `GetSnapshot()` 里不可见；需原子峰值计数 + 上限 |
 
 ---
 
@@ -321,10 +411,27 @@ capacity=8、全空载荷。`sync=no` 是 sink 各读各的分支消息；`sync=
 
 # 可选：绑核（本报告未绑核；--cpus 0 是默认，表示不绑）
 .\build\benchmarks\Release\pipeline_benchmark.exe --topology linear --modules 3 --capacity 8 --cpus 8 --duration 10 --repeat 3
+
+# 外部注入（§3.5）：inject 用 passive source，主线程当生产者
+.\build\benchmarks\Release\pipeline_benchmark.exe --topology inject --modules 3 --capacity 8 --push-mode block --duration 10 --repeat 3
+.\build\benchmarks\Release\pipeline_benchmark.exe --topology inject --modules 3 --capacity 8 --push-mode try --duration 10 --repeat 3
+.\build\benchmarks\Release\pipeline_benchmark.exe --topology inject --modules 3 --capacity 1 --push-mode try --duration 10 --repeat 3
+
+# 观测开销（§3.6）
+.\build\benchmarks\Release\pipeline_benchmark.exe --topology linear --modules 3 --capacity 8 --timings --duration 10 --repeat 3
+.\build\benchmarks\Release\pipeline_benchmark.exe --topology linear --modules 3 --capacity 8 --log-level info --duration 10 --repeat 3
+.\build\benchmarks\Release\pipeline_benchmark.exe --topology linear --modules 3 --capacity 8 --workload delay --delay-us 1000 --log-level trace --duration 5 --repeat 2
+
+# 内存 / 融合半凑齐（§4.1）：straggler 只作用于 branch_0
+.\build\benchmarks\Release\pipeline_benchmark.exe --topology diamond --branches 2 --capacity 8 --sync-inputs --payload 1080p-rgb --payload-fresh --duration 10 --repeat 3
+.\build\benchmarks\Release\pipeline_benchmark.exe --topology diamond --branches 2 --capacity 4 --sync-inputs --straggler-us 2000 --duration 10 --repeat 3
+.\build\benchmarks\Release\pipeline_benchmark.exe --topology diamond --branches 2 --capacity 64 --sync-inputs --straggler-us 2000 --duration 10 --repeat 3
+
 ```
 
-CSV 一行一次运行（25 列；`workload`/`work_param` 是本次新增，`cpus` 也是）：
+CSV 一行一次运行（37 列：前 25 列吞吐/延迟/CPU，后 12 列观测与内存）：
 
+`csv,<label>,<platform>,<topology>,<modules>,<branches>,<capacity>,<payload>,<workload>,<work_param>,<fresh>,<sync>,<cpus>,<duration>,<rep>,<delivered>,<throughput>,<cpu_s>,<cores>,<avg>,<p50>,<p95>,<p99>,<min>,<max>,<timings>,<log_level>,<straggler_us>,<push_mode>,<rssStartMiB>,<rssPeakMiB>,<rssEndMiB>,<stop_ms>,<edge_depth_max>,<fusion_expired>,<attempts>,<refused>`
 `csv,<label>,<platform>,<topology>,<modules>,<branches>,<capacity>,<payload>,<workload>,<work_param>,<fresh>,<sync>,<cpus>,<duration>,<rep>,<delivered>,<throughput>,<cpu_s>,<cores>,<avg>,<p50>,<p95>,<p99>,<min>,<max>`
 
 > 重测时把整批输出另存为新文件；本文件只保留本机 2026-11-17/18 这一份快照。
