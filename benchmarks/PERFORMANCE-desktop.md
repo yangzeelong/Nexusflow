@@ -11,7 +11,7 @@
 | 内存 | 32 GiB |
 | 系统 | Windows 11（build 26200） |
 | 工具链 | Visual Studio 17 2022（v143），Release / x64，MSVC 19.40 |
-| 代码 | 合并提交 `b4afac5` + 未提交的台式机基准工具改动（dirty） |
+| 代码 | commit `31b4420`（v1.0.0） |
 | 测量日期 | 2026-11-18 |
 | 矩阵口径 | `--topology linear`、`--capacity 8`、空载荷（容量/载荷/扇出等维度按小节注明） |
 | 次数 | 每档 1 次预热丢弃 + 3 次（深度 18/20/24 拐点区复测用 5 次）；报中位数与 `[最小 .. 最大]` |
@@ -292,4 +292,4 @@ delay 档的「比上一档多花」会出现负数：等待本身不烧 CPU，C
 
 ## 13. 工作区
 
-本文件对应的基准工具改动尚未提交（`git status`）：`benchmarks/BenchmarkNodes.hpp`、`benchmarks/BenchmarkTopology.hpp`、`benchmarks/ProcessCpuTime.hpp`、`benchmarks/README.md`、`benchmarks/pipeline_benchmark.cpp`，以及本文件（新增）；`docs/` 是本地笔记，不入库。
+本文件对应的基准工具改动已随 `31b4420`（v1.0.0）提交；报告中的数字都来自该提交构建的 `pipeline_benchmark`。`benchmarks/` 之外的 `docs/` 是本地笔记，不在仓库内。

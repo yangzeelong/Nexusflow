@@ -150,7 +150,7 @@ cmake --build build --config Release --target pipeline_benchmark --parallel 16
 
 ---
 
-## 1.0.0 定版修复（本轮已完成，改动未提交）
+## 1.0.0 定版修复（已完成，随 v1.0.0 发布）
 
 - **构建导出**：`cmake/3rdparty/yaml-cpp.cmake` 的 pin 由 0.7.0 → 0.8.0。0.7.0 用
   `cmake_dependent_option(YAML_CPP_INSTALL ... "CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR" OFF)`，
