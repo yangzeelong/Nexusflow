@@ -25,7 +25,7 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | `include/nexusflow/common/` | 公开的 header-only 容器/工具：`Any`、`ConcurrentQueue`、`Optional`、`ViewPtr`（`Nexusflow::nexusflow_common` INTERFACE target） |
 | `tests/test/` | gtest 用例（`nexusflow_tests`，当前 161 个，见 §3）；**全部用例都在这一层**，没有第二处 test 目录 |
 | `examples/` | 3 个纯框架示例：`1-how-to-use`、`2-linear-vision-pipline`、`3-joined-vision-pipline` |
-| `benchmarks/` | 两个基准目标：Google Benchmark 用例（`nexusflow_benchmarks`）与端到端吞吐（`pipeline_benchmark`，`--capacity`）；**全部基准源码都在这一层** |
+| `benchmarks/` | 两个基准目标：Google Benchmark 用例（`nexusflow_benchmarks`）与端到端吞吐（`pipeline_benchmark`，`--capacity`）；**全部基准源码都在这一层**；测量规则见 [`benchmarks/HARNESS.md`](benchmarks/HARNESS.md) |
 | `cmake/` | `include.cmake`（第三方依赖 include）、`Summary.cmake`、`3rdparty/*.cmake`（FetchContent 定义） |
 | `extensions/` | 可选扩展；机制与新增扩展见 [`extensions/README.md`](extensions/README.md) |
 | `tools/` | 仓库级脚本（`clang-format-all.sh`） |
