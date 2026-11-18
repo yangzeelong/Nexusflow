@@ -4,6 +4,8 @@
 
 `benchmarks/` 里放两个基准目标，**源码都在这一层**（不再有子目录）：
 
+> **测量规则**（阶梯、拐点、归因、观测开销、两机分报告）见 [`HARNESS.md`](HARNESS.md)。本文件只讲怎么跑。
+
 | 文件 | 目标 | 说明 |
 | --- | --- | --- |
 | `BenchmarkMessage.cpp` + `benchmark_main.cpp` | `nexusflow_benchmarks` | Google Benchmark 微基准：消息创建/广播（拷贝）/数据访问两种实现对比 |
@@ -20,22 +22,55 @@ cmake --build build --config Release --target nexusflow_benchmarks --parallel 16
 cmake --build build --config Release --target pipeline_benchmark --parallel 16
 .\build\benchmarks\Release\pipeline_benchmark.exe --duration 5 --repeat 3
 .\build\benchmarks\Release\pipeline_benchmark.exe --topology linear --modules 3 --capacity 8
+.\build\benchmarks\Release\pipeline_benchmark.exe --topology linear --modules 2 --capacity 8   # 对照档：source→sink
 .\build\benchmarks\Release\pipeline_benchmark.exe --topology diamond --branches 2 --sync-inputs
 .\build\benchmarks\Release\pipeline_benchmark.exe --payload 1080p-rgb          # 复用一块帧缓冲
 .\build\benchmarks\Release\pipeline_benchmark.exe --payload 1080p-rgb --payload-fresh   # 每帧新建
 ```
 
 每次运行会打印一行
-`csv,<label>,<platform>,<topology>,<modules>,<branches>,<capacity>,<payload>,<fresh>,<sync>,<duration>,<rep>,<delivered>,<throughput>,<cpu_s>,<cores>,<avg>,<p50>,<p95>,<p99>,<min>,<max>`，
+`csv,<label>,<platform>,<baseline>,<batch>,<observe>,<topology>,<modules>,<branches>,<capacity>,<payload>,<fresh>,<sync>,<duration>,<rep>,<delivered>,<throughput>,<cpu_s>,<cores>,<avg>,<p50>,<p95>,<p99>,<min>,<max>`，
 批量跑时 `grep '^csv,'` 收集成表。`min`/`max` 是单次样本的极值（`max` 通常是调度离群点，别当稳态读）。
+`modules` / `branches` 是**实际建出来的拓扑**，不是命令行回显：`diamond --branches 2` 记 `modules=4, branches=2`，`linear --modules 2` 记 `modules=2, branches=0`。
+
+`--baseline raw|raw-alloc|raw-message` 跑**裸线程 + 裸 SpscQueue** 的同构基线（[`RawPipeline.hpp`](RawPipeline.hpp)），用来把"框架成本"和"机器成本"分开：同拓扑、同容量、同阻塞语义，一个 stage 一个线程。三档口径，用于三层拆分：
+
+- `raw`：消息是普通结构体，**不分配**——任何框架成本的下界；
+- `raw-alloc`：每条消息 `make_shared` 一个 payload 包装（同框架 `MakeMessage()` 的分配量）；
+- `raw-message`：消息直接用框架的 `nexusflow::Message`（`MakeMessage` 建、`BorrowPtr` 读时间戳），**队列与消息层和框架完全同构**。
+
+于是：`raw→raw-alloc` = 每消息分配成本；`raw-alloc→raw-message` = Message 自身（元数据/类型擦除/COW）；`raw-message→框架` = Module/Worker/Dispatcher 调度成本。
+三者都不分批，所以和它们对比时框架侧用 `--batch 1`。
+
+`--batch N` 设每个非 source 模块的 `maxBatchSize`（默认 4，保持历史口径）；深度阶梯的对照口径用 `--batch 1`。
+
+`--observe none` 关掉 harness 自己的观测（source 的时钟读、sink 的时钟读 + 直方图采样），用来量观测开销；`--micro-observer N` 单独跑 N 次"两次时钟读 + 一次直方图采样"并退出，直接给 ns/消息。
+
+除了每次运行一行的 `csv,`，还有两种行：
+
+- 每个配置一行 **`stat,`**（阶梯表就是用它拼的）：
+  `stat,<label>,<platform>,<baseline>,<batch>,<observe>,<topology>,<modules>,<branches>,<edges>,<capacity>,<payload>,<fresh>,<sync>,<reps>,<tp_med>,<tp_min>,<tp_max>,<tp_spread_pct>,<cores_med>,<cores_min>,<cores_max>,<p50_med>,<p95_med>,<p99_med>,<cpu_per_msg_med>,<unstable>`。
+  中位数 + 三次重复的范围 + 波动百分比；`unstable=1` 表示吞吐波动超过 `--max-spread`（默认 10%），这一档别直接读，先重跑。
+- 每次运行一行 **`cov,`**（覆盖率断言）：
+  `cov,<label>,<baseline>,<modules>,<branches>,<capacity>,<rep>,<pushed>,<popped>,<discarded>,<residual>,<sink_popped>,<delivered>,<processed>,<dropped>,<failed>,<fusion_expired>,<dropped_mid_run>,<fusion_expired_mid_run>,<stop_ms>,<ok>`。
+  判据：**跑动中** `dropped`/`failed`/`fusion_expired` 必须为 0；`pushed == popped + discarded + residual`；sink 收到的条数与 `delivered` 对得上（融合路径按 `branches` 折算）。
+  不满足就打印 `COVERAGE MISMATCH` 并让退出码为 1。停机尾部为关队列而丢掉的那几条只报不判错（`dropped`/`failure` 列照实给）。
 
 `--payload` 档位：`none` / `1080p-rgb`（5.937 MiB）/ `1080p-yuv420`（2.969 MiB）/ `2k-rgb`（QHD 2560×1440，10.547 MiB）/ `2k-yuv420`（5.273 MiB）。
 `--capacity` 在载荷模式下默认 4，因为 `capacity × payload` 就是每条边占的内存（1080p RGB × 64 ≈ 380 MiB/边）。
 
+**参数下限与报错**（不再静默纠正，猜错就退出 1）：
+`--topology linear` 的 `--modules` 最小 **2**（source→sink，1 条边，是深度阶梯的对照档）；`--topology diamond` 的 `--branches` 最小 **1**；
+`--sync-inputs` 只能配 diamond；数字参数不是整数、`--payload` 未知档位、`--label` 含逗号，一律报错退出。
+
 ### 结果
 
-**完整矩阵**（拓扑 / 容量 / 载荷 / 融合维度，带分析与优化方向）在 [`PERFORMANCE.md`](PERFORMANCE.md)。
-下面两张表是 1.0.0 收尾时的最小基线，保留作对照。
+报告按机器分文件，索引见 [`PERFORMANCE.md`](PERFORMANCE.md)：
+
+- 笔记本（i7-11800H，8C16T）：[`PERFORMANCE-laptop.md`](PERFORMANCE-laptop.md)
+- 台式机（i7-14700KF）：`PERFORMANCE-desktop.md`（待测）
+
+下面两张表是 1.0.0 收尾时的最小基线，**用旧工具测的、不满足现行规则**（无区间、无覆盖率断言、无裸基线），只作历史对照，不许跨机器或跨 commit 比较。
 
 #### 本机 Windows / MSVC 实测（2026-11-17，旧工具：diamond 2 分支、仅 avg 延迟）
 
@@ -53,14 +88,14 @@ cmake --build build --config Release --target pipeline_benchmark --parallel 16
 
 | 指标 | 值 |
 | --- | --- |
-| 拓扑 | 3 段线性（source → passthrough → sink），**模块内无计算** |
+| 拓扑 | 线性 3 模块（source → passthrough → sink），**模块内无计算** |
 | CPU | 10.0101 s 墙钟内 **38.86 s** CPU ≈ **3.883 个核**（16 逻辑核机器） |
 | 每消息 CPU | 38.86 s ÷ 35,435,513 条 ≈ **1.097 µs** |
-| 每跳 CPU | ≈ **366 ns**（3 跳） |
+| 每多一个模块的 CPU | ≈ **366 ns**（3 个模块） |
 | 常驻内存 | 工作集 **5.1 MB**，10 s 内不增长 |
 | 进程线程数 | **8**（其中 3 个是模块 worker） |
 
-**改动说明**：本次收尾改了三处——每消息级日志 DEBUG→TRACE、默认日志级别 DEBUG→INFO、逐跳 timing 链改为按需开启
+**改动说明**：本次收尾改了三处——每消息级日志 DEBUG→TRACE、默认日志级别 DEBUG→INFO、逐模块计时链改为按需开启
 （`PipelineContext::EnableModuleTimings()`，默认关）。前两项不影响本基准（基准运行在 INFO，且日志不在热路径）；
 第三项是本轮吞吐变化的主因：**开启时 capacity=8 中位约 1.33M msg/s，关闭后约 2.97M msg/s（约 2.2×）**。
 （另一次 A/B 的关闭组测到 3.58M，本机同条件波动约 ±15%，比较时请同批测量。）

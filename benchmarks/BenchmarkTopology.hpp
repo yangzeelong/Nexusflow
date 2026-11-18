@@ -16,6 +16,44 @@
 namespace nexusflow_bench {
 
 /**
+ * @brief The pipeline's real shape, as it will be built.
+ *
+ * `modules` counts every stage including source and sink. The CSV reports this
+ * instead of echoing the command line: echoing made every diamond run claim
+ * `modules=3` (it has branches+2 stages) and every linear run claim
+ * `branches=2` (it has none).
+ */
+struct TopologyShape {
+    int modules = 0;   ///< stages including source and sink
+    int branches = 0;  ///< fan-out width; 0 for a straight chain
+    int edges = 0;     ///< queues in the graph
+
+    bool IsLinear() const { return branches == 0; }
+};
+
+/**
+ * @brief Resolves requested numbers into the shape that will actually be built.
+ *
+ * A chain may be 2 stages (source -> sink, one edge): that is the cheapest legal
+ * pipeline and the only point that measures the two endpoints on their own, so
+ * it is the bottom of the depth ladder (see HARNESS.md §2). A fan-out needs at
+ * least one branch, which is the "edge but no fan-out" control.
+ */
+inline TopologyShape ShapeOf(bool linear, int modules, int branches) {
+    TopologyShape shape;
+    if (linear) {
+        shape.modules = modules < 2 ? 2 : modules;
+        shape.branches = 0;
+        shape.edges = shape.modules - 1;
+        return shape;
+    }
+    shape.branches = branches < 1 ? 1 : branches;
+    shape.modules = shape.branches + 2;
+    shape.edges = shape.branches * 2;
+    return shape;
+}
+
+/**
  * @brief A built pipeline plus the modules a caller needs to read afterwards.
  *
  * The modules are kept here on purpose: the sink owns the histogram, and a
@@ -26,48 +64,61 @@ struct BuiltTopology {
     std::shared_ptr<SourceModule> source;
     std::shared_ptr<SinkModule> sink;
     std::vector<std::shared_ptr<nexusflow::Module>> modules;
-    std::size_t moduleCount = 0;
+    TopologyShape shape;
 };
 
 /**
- * @brief Source -> (modules-2) pass-through stages -> sink.
+ * @brief Source -> (shape.modules-2) pass-through stages -> sink.
  *
- * `modules` counts the stages including source and sink, so modules=3 is
- * source -> one pass-through -> sink. This is the topology whose per-stage cost
- * a thread model has to beat.
+ * `shape.modules` counts the stages including source and sink, so modules=2 is
+ * source -> sink and modules=3 is source -> one pass-through -> sink. This is
+ * the topology whose per-stage cost a thread model has to beat.
+ *
+ * `batchSize` > 0 sets the worker's `maxBatchSize` on every module but the source
+ * (a source has no input queue, so a batch means nothing there). The raw baseline
+ * has no batching, so a comparison against it must use `batchSize == 1`.
  */
-inline BuiltTopology BuildLinear(int modules, std::size_t capacity, PayloadSpec spec, bool freshPayload) {
+inline BuiltTopology BuildLinear(const TopologyShape& shape, std::size_t capacity, PayloadSpec spec,
+                                 bool freshPayload, int batchSize = 0, bool measureLatency = true) {
     BuiltTopology built;
-    const int stages = modules < 3 ? 3 : modules;
+    built.shape = shape;
 
-    built.source = std::make_shared<SourceModule>("source", spec, freshPayload);
-    built.modules.push_back(built.source);
-    built.sink = std::make_shared<SinkModule>("sink");
-    built.modules.push_back(built.sink);
+    built.source = std::make_shared<SourceModule>("source", spec, freshPayload, measureLatency);
+    built.sink = std::make_shared<SinkModule>("sink", measureLatency);
 
     nexusflow::PipelineBuilder builder;
     builder.AddModule(built.source);
-    std::vector<std::string> names;
-    names.push_back("source");
-    for (int i = 0; i < stages - 2; ++i) {
+    built.modules.push_back(built.source);
+
+    std::string previous = "source";
+    for (int i = 0; i < shape.modules - 2; ++i) {
         const std::string name = "stage_" + std::to_string(i);
         auto stage = std::make_shared<PassThroughModule>(name);
         built.modules.push_back(stage);
         builder.AddModule(stage);
-        names.push_back(name);
-        builder.Connect(names[names.size() - 2], name);
+        builder.Connect(previous, name);
+        previous = name;
     }
+
     builder.AddModule(built.sink);
-    builder.Connect(names.back(), "sink");
-    names.push_back("sink");
+    built.modules.push_back(built.sink);
+    builder.Connect(previous, "sink");
+
+    if (batchSize > 0) {
+        nexusflow::Config config;
+        config.Add<int>("maxBatchSize", batchSize);
+        for (int i = 0; i < shape.modules - 2; ++i) {
+            builder.SetModuleConfig("stage_" + std::to_string(i), config);
+        }
+        builder.SetModuleConfig("sink", config);
+    }
 
     built.pipeline = builder.Build(static_cast<int>(capacity));
-    built.moduleCount = names.size();
     return built;
 }
 
 /**
- * @brief Source -> N branches -> sink, the fan-out/fan-in shape.
+ * @brief Source -> shape.branches branches -> sink, the fan-out/fan-in shape.
  *
  * Without `syncInputs` the sink simply reads whatever arrives from any branch,
  * which is the shape the original harness measured. With `syncInputs` the
@@ -75,19 +126,19 @@ inline BuiltTopology BuildLinear(int modules, std::size_t capacity, PayloadSpec 
  * one message id and hands over a map of Messages, which is the only way the
  * fusion batching cost becomes measurable.
  */
-inline BuiltTopology BuildDiamond(int branches, std::size_t capacity, PayloadSpec spec, bool freshPayload,
-                                  bool syncInputs) {
+inline BuiltTopology BuildDiamond(const TopologyShape& shape, std::size_t capacity, PayloadSpec spec,
+                                  bool freshPayload, bool syncInputs, int batchSize = 0, bool measureLatency = true) {
     BuiltTopology built;
-    const int count = branches < 2 ? 2 : branches;
+    built.shape = shape;
 
-    built.source = std::make_shared<SourceModule>("source", spec, freshPayload);
-    built.sink = std::make_shared<SinkModule>("sink");
-    built.modules.push_back(built.source);
-    built.modules.push_back(built.sink);
+    built.source = std::make_shared<SourceModule>("source", spec, freshPayload, measureLatency);
+    built.sink = std::make_shared<SinkModule>("sink", measureLatency);
 
     nexusflow::PipelineBuilder builder;
     builder.AddModule(built.source);
-    for (int i = 0; i < count; ++i) {
+    built.modules.push_back(built.source);
+
+    for (int i = 0; i < shape.branches; ++i) {
         const std::string name = "branch_" + std::to_string(i);
         auto branch = std::make_shared<PassThroughModule>(name);
         built.modules.push_back(branch);
@@ -95,16 +146,31 @@ inline BuiltTopology BuildDiamond(int branches, std::size_t capacity, PayloadSpe
         builder.Connect("source", name);
         builder.Connect(name, "sink");
     }
-    builder.AddModule(built.sink);
 
-    if (syncInputs) {
-        nexusflow::Config config;
-        config.Add<bool>("syncInputs", true);
-        builder.SetModuleConfig("sink", config);
+    builder.AddModule(built.sink);
+    built.modules.push_back(built.sink);
+
+    if (batchSize > 0) {
+        nexusflow::Config branchConfig;
+        branchConfig.Add<int>("maxBatchSize", batchSize);
+        for (int i = 0; i < shape.branches; ++i) {
+            builder.SetModuleConfig("branch_" + std::to_string(i), branchConfig);
+        }
+    }
+    if (batchSize > 0 || syncInputs) {
+        // Only the sink may fuse: a branch has one input, so `syncInputs` there
+        // would turn it into a fusion worker waiting for inputs that never come.
+        nexusflow::Config sinkConfig;
+        if (batchSize > 0) {
+            sinkConfig.Add<int>("maxBatchSize", batchSize);
+        }
+        if (syncInputs) {
+            sinkConfig.Add<bool>("syncInputs", true);
+        }
+        builder.SetModuleConfig("sink", sinkConfig);
     }
 
     built.pipeline = builder.Build(static_cast<int>(capacity));
-    built.moduleCount = built.modules.size();
     return built;
 }
 
