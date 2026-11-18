@@ -351,7 +351,13 @@ Coverage CoverageOf(const nexusflow::PipelineSnapshot& midRun, const nexusflow::
     if (messagesPerFrame == 1) {
         sinkMatches = coverage.sinkPopped == delivered;
     } else {
-        sinkMatches = coverage.sinkPopped >= delivered && coverage.sinkPopped <= delivered * messagesPerFrame;
+        // Fusion: a frame normally costs `branches` pops, an incomplete group at
+        // shutdown costs fewer, and the messages a half-finished group left in
+        // the worker cache were popped but never delivered -- those have to show
+        // up as drops at stop, so the excess is only trusted up to that count.
+        const std::uint64_t expected = delivered * messagesPerFrame;
+        const std::uint64_t extra = coverage.sinkPopped > expected ? coverage.sinkPopped - expected : 0;
+        sinkMatches = coverage.sinkPopped >= delivered && extra <= coverage.dropped;
     }
     coverage.ok = coverage.midDropped == 0 && coverage.midFailed == 0 && coverage.midFusionExpired == 0 &&
                   coverage.pushed == coverage.popped + coverage.discarded + coverage.residual && sinkMatches;
