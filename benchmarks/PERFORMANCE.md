@@ -6,7 +6,7 @@
 | 文件 | 机器 | 状态 |
 | --- | --- | --- |
 | [PERFORMANCE-laptop.md](PERFORMANCE-laptop.md) | i7-11800H（8 物理核 / 16 逻辑核） | 2026-11-18，新工具口径（区间 + 覆盖率断言 + 三条裸基线） |
-| [PERFORMANCE-desktop.md](PERFORMANCE-desktop.md) | i7-14700KF（20 物理核 / 28 逻辑核） | 2026-11-18，新工具口径，commit `b4afac5` + 未提交的 harness 扩展（5 s × 3，含 workload / inject / observe） |
+| [PERFORMANCE-desktop.md](PERFORMANCE-desktop.md) | i7-14700KF（20 物理核 / 28 逻辑核） | 2026-11-18，新工具口径，commit `31b4420`（v1.0.0；5 s × 3，含 workload / inject / observe） |
 
 ## 跨机器只比趋势
 
