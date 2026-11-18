@@ -4,8 +4,9 @@
 > 长期路线图见 [`TODO.md`](TODO.md)；基准数字、测量协议与环境见 [`benchmarks/README.md`](benchmarks/README.md)；
 > 硬规则、构建命令、用例基线见 [`AGENTS.md`](AGENTS.md)。本文件不重复它们。
 >
-> **起点**：1.0.0 收尾已完成（每消息日志降为 TRACE、默认日志级别 INFO、逐跳计时链改为按需开启、CI 立起来）。
-> 下面的工作项都从"收尾之后"起算。
+> **起点**：**v1.0.0 已于 2026-11-19 发布**（tag [`v1.0.0`](https://github.com/yangzeelong/Nexusflow/releases/tag/v1.0.0)；
+> 含每消息日志 TRACE、默认 INFO、逐跳计时按需开启、CI、双平台 167 用例与两台机器的性能报告）。
+> 下面的工作项都从 v1.0.0 之后起算；v1.0.0 的完整变更见 [`CHANGELOG.md`](CHANGELOG.md)。
 >
 > **有效期**：只到本版发布为止。发版后**重写本文件**（清空重填），不要在旧内容上叠加——
 > "做完了什么"进 `TODO.md` 的已完成历史，基准数字进 `benchmarks/README.md`。
