@@ -1,6 +1,7 @@
 # NexusFlow: A High-Performance, Modern C++ Dataflow Pipeline Framework
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/your_username/nexusflow)
+[![CI](https://github.com/yangzeelong/Nexusflow/actions/workflows/ci.yml/badge.svg)](https://github.com/yangzeelong/Nexusflow/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/yangzeelong/Nexusflow?sort=semver)](https://github.com/yangzeelong/Nexusflow/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![C++_Version](https://img.shields.io/badge/C++-14%2B-blue.svg)]()
 
@@ -15,6 +16,7 @@ The core idea of the framework is to decompose complex processing workflows into
 | [`AGENTS.md`](AGENTS.md) | Rules for anyone (human or agent) changing this repo: build, tests, counter conventions, hard rules. |
 | [`TODO.md`](TODO.md) | Long-term roadmap: finished work, open items, known pitfalls. |
 | [`NEXT-VERSION.md`](NEXT-VERSION.md) | The next release's work order: items, decisions to settle first, acceptance criteria. |
+| [`CHANGELOG.md`](CHANGELOG.md) | What each release changed. v1.0.0 is the first stable release. |
 | [`benchmarks/README.md`](benchmarks/README.md) | Benchmark numbers, measurement protocol, and the machine they were taken on. |
 | [`extensions/README.md`](extensions/README.md) | Extension layout and how to add a new one. |
 
