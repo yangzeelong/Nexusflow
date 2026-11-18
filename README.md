@@ -297,6 +297,59 @@ producers-first, everything downstream of it waits for that drain too. A large `
 means the stage was still busy when its turn came, usually finishing the batch it had
 already pulled.
 
+## Feeding a Running Pipeline
+
+A graph normally feeds itself: every source produces from its own `Process()`. For external
+data (a decoder, a socket, a test driver) the source can instead be *passive*: override
+`Module::IsPassiveSource()` to return `true`, leave `Process()` empty, and call
+`Pipeline::Push()` / `TryPush()` on the running pipeline.
+
+```cpp
+class InletModule : public nexusflow::Module {
+public:
+    InletModule() : Module("inlet") {}
+    bool IsPassiveSource() const override { return true; }
+    void Process(nexusflow::Message&) override {}   // never produces on its own
+};
+
+// ... build the pipeline with InletModule connected downstream, then Init() and Start()
+nexusflow::Message msg = nexusflow::MakeMessage(frame, "inlet");  // payload is a shared_ptr
+const auto result = pipeline->Push("inlet", msg);   // blocks while an output edge is full
+if (result != nexusflow::PushResult::kOk) {
+    LOG_WARN("inlet push rejected: {}", static_cast<int>(result));
+}
+```
+
+`Push()` writes straight into the passive source's output edges; from there the message
+travels the graph like any other message, so the sink histograms and counters work
+unchanged. `TryPush()` never blocks and reports `kQueueFull` instead, which is what a
+non-blocking producer loop wants.
+
+| `PushResult` | Meaning |
+| --- | --- |
+| `kOk` | every output edge accepted the message |
+| `kNotRunning` | `Start()` has not been called (or the pipeline is not initialized) |
+| `kUnknownModule` | no module with that name |
+| `kNotSource` | the named module has inputs, so it is not a boundary source |
+| `kNotPassiveSource` | the source produces on its own; use a passive source instead |
+| `kQueueFull` | `TryPush()` only: an output edge is full right now |
+| `kClosed` | an output edge was shut down, i.e. `Stop()`/`Cancel()` is in progress |
+
+Rules of the road:
+
+- **One producer thread** may call `Push`/`TryPush` at a time. The edges are single-producer
+  queues, so a second caller would be a second producer; serialize it externally.
+- A fan-out passive source has several output edges. If a blocking `Push` fails (only
+  possible when the pipeline stops mid-call), some edges may already hold the message; the
+  return code says so, and the caller should treat that frame as partially delivered. A
+  stopping pipeline reporting `kClosed` is the common case.
+- `Stop()` drains what was pushed, exactly like a self-feeding source: after `Stop()` returns,
+  every accepted message has been processed. `Cancel()` discards it.
+- The framework does not rewrite the message timestamp; the caller decides what the
+  sink's latency histogram measures.
+
+The behavior is covered by `tests/test/PipelinePushTest.cpp`.
+
 ## Pipeline Context
 
 Each pipeline owns one context object that its modules can reach through

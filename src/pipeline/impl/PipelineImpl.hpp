@@ -55,9 +55,18 @@ public:
     // the caller to hit Init/Start/Stop/DeInit in exactly the right order.
     bool graphReady = false;
     bool initialized = false;
-    bool started = false;
+    // Atomic because Push()/TryPush() may be called from a producer thread while
+    // the control thread is in Stop()/Cancel(); push only needs a stale-is-fine
+    // read of "is the pipeline running".
+    std::atomic<bool> started{false};
 
     ErrorCode Init();
+
+    /**
+     * @brief Implements Pipeline::Push()/TryPush().
+     * @param blocking true to wait for room on a full edge, false to fail fast.
+     */
+    PushResult PushToSource(const std::string& sourceName, const Message& msg, bool blocking);
 
     std::unordered_map<ActorName, std::shared_ptr<ActorNode>> actorModuleMap;
 

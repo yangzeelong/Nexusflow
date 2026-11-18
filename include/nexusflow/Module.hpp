@@ -77,6 +77,21 @@ public:
      */
     void DiscardPendingOutputs();
 
+    /**
+     * @brief Whether this module is a passive source: a boundary module whose
+     *        messages are supplied from outside the graph by Pipeline::Push().
+     * @details A passive source has no input edge and never broadcasts on its
+     * own; its worker therefore only idles. Pipeline::Push() accepts no other
+     * module, because an externally written edge would otherwise have two
+     * producers and break the single-producer contract of the edge queues.
+     *
+     * A module that owns its own wait (a decoder blocking on the next frame)
+     * is *not* passive: it produces from its own Process(), and should call
+     * NoteBlockedWait() instead.
+     * @return false by default.
+     */
+    virtual bool IsPassiveSource() const { return false; }
+
     // --- Processing ---
 
     /**

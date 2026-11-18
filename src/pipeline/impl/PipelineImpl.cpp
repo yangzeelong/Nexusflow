@@ -120,4 +120,38 @@ ErrorCode Pipeline::Impl::Init() {
     return ErrorCode::SUCCESS;
 }
 
+PushResult Pipeline::Impl::PushToSource(const std::string& sourceName, const Message& msg, bool blocking) {
+    if (!started) {
+        return PushResult::kNotRunning;
+    }
+    // During Stop()/Cancel() the teardown already owns the edges: a push here
+    // could land in a queue whose consumer has left its loop.
+    if (drainInProgress.load(std::memory_order_relaxed)) {
+        return PushResult::kClosed;
+    }
+
+    const auto actorIt = actorModuleMap.find(sourceName);
+    if (actorIt == actorModuleMap.end() || !actorIt->second) {
+        return PushResult::kUnknownModule;
+    }
+    auto& actor = actorIt->second;
+    if (!actor->IsSource()) {
+        return PushResult::kNotSource;
+    }
+    if (!actor->GetModule() || !actor->GetModule()->IsPassiveSource()) {
+        return PushResult::kNotPassiveSource;
+    }
+
+    // Same edges Module::Broadcast() writes from inside Process(): the caller is
+    // the only producer of a passive source, so the SPSC contract still holds.
+    const auto outputQueues = actor->GetOutputQueues();
+    for (const auto& queue : outputQueues) {
+        const bool pushed = blocking ? queue->push(msg) : queue->tryPush(msg);
+        if (!pushed) {
+            return queue->isShutdown() ? PushResult::kClosed : PushResult::kQueueFull;
+        }
+    }
+    return PushResult::kOk;
+}
+
 } // namespace nexusflow
