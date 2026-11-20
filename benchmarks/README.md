@@ -38,10 +38,11 @@ cmake --build build --config Release --target pipeline_benchmark --parallel 16
 ```
 
 每次运行会打印一行
-`csv,<label>,<platform>,<baseline>,<batch>,<observe>,<topology>,<modules>,<branches>,<capacity>,<payload>,<fresh>,<sync>,<duration>,<rep>,<delivered>,<throughput>,<cpu_s>,<cores>,<avg>,<p50>,<p95>,<p99>,<min>,<max>,<cpus>,<timings>,<workload>,<work_param>,<push_mode>,<attempts>,<refused>,<rss_start>,<rss_peak>,<rss_end>,<edge_depth_max>,<stop_ms>`，
+`csv,<label>,<platform>,<baseline>,<batch>,<observe>,<topology>,<modules>,<branches>,<capacity>,<payload>,<fresh>,<sync>,<duration>,<rep>,<delivered>,<throughput>,<cpu_s>,<cores>,<avg>,<p50>,<p95>,<p99>,<min>,<max>,<cpus>,<timings>,<workload>,<work_param>,<push_mode>,<attempts>,<refused>,<rss_start>,<rss_peak>,<rss_end>,<edge_depth_max>,<stop_ms>,<cycles_per_msg>`，
 批量跑时 `grep '^csv,'` 收集成表。`min`/`max` 是单次样本的极值（`max` 通常是调度离群点，别当稳态读）。
 `modules` / `branches` 是**实际建出来的拓扑**，不是命令行回显：`diamond --branches 2` 记 `modules=4, branches=2`，`linear --modules 2` 记 `modules=2, branches=0`。
 后 12 列是本分支扩展：`cpus`（绑核数，0=不绑）、`timings`（逐跳计时 0/1）、`workload`/`work_param`（负载类型与参数）、`push_mode`（`block`/`try`）、`attempts`/`refused`（注入尝试/队列满拒绝次数）、`rss_start`/`rss_peak`/`rss_end`（MiB）、`edge_depth_max`（最深积压）、`stop_ms`（Stop 排水+join 耗时）。
+第 37 列 `cycles_per_msg` 是补充指标：`cpu/msg × TSC`，TSC 频率由 `tsc` 行给出（三窗校准）；ARM 上恒为 0，不伪造。口径见 `HARNESS.md` §4。
 
 `--baseline raw|raw-alloc|raw-message` 跑**裸线程 + 裸 SpscQueue** 的同构基线（[`RawPipeline.hpp`](RawPipeline.hpp)），用来把"框架成本"和"机器成本"分开：同拓扑、同容量、同阻塞语义，一个 stage 一个线程。三档口径，用于三层拆分：
 

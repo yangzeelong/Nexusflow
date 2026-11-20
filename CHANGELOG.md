@@ -7,6 +7,20 @@
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-20
+
+补测量口径与 cycles/消息指标，不改库代码。
+
+### Added
+
+- 基准新增 `cycles_per_msg` 列（`benchmarks/TscClock.hpp`，TSC 三窗校准）：
+  `cpu/msg × TSC 频率`，去掉主频差异；非 x86 上该列为 0，不伪造。
+- `benchmarks/HARNESS.md §4` 重写指标口径：交付吞吐 / CPU 归一吞吐 /
+  每消息 CPU / 每消息周期 四条定义、三条恒等式，以及"Google Benchmark 的
+  `items_per_second` 是 CPU 口径"这一常见坑。
+- `benchmarks/PERFORMANCE-desktop.md §1.2` 记录 3/4/16 模块的 cycles/消息
+  （2,954 / 4,152 / 23,257），给出浅链每跳约 1,477–1,550 cycles 的读法。
+
 ## [1.0.0] - 2026-11-19
 
 首个稳定版本。
@@ -72,5 +86,6 @@
   见 `benchmarks/PERFORMANCE-desktop.md` §7。
 - 三维以上（深度、扇出、容量、batch、payload）的完整矩阵与 soak 测试尚未进入 CI。
 
-[Unreleased]: https://github.com/yangzeelong/Nexusflow/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/yangzeelong/Nexusflow/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/yangzeelong/Nexusflow/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/yangzeelong/Nexusflow/releases/tag/v1.0.0

@@ -58,13 +58,31 @@
    三个口味：`raw`（普通结构体、零分配，下界）、`raw-alloc`（每消息 `make_shared` 一个 payload 包装）、`raw-message`（直接用框架的 `Message`，队列与消息层同构）。三层拆分：`raw→raw-alloc` = 分配，`raw-alloc→raw-message` = Message 自身，`raw-message→框架` = Module/Worker/Dispatcher 调度。三者都不分批，对比时框架侧用 `--batch 1`。
 2. **无观测重跑**：同一配置加 `--observe none`，差值就是观测开销。本机实测这个差值落在批次噪声以下（测不出来），所以另有微基准 `--micro-observer N`，直接给「两次时钟读 + 一次直方图采样」的 ns/消息（本机约 40 ns）。
 
-## 4. 三个数字，别混用
+## 4. 四个数字，别混用
 
-| 数字 | 从哪来 | 说明 |
-| --- | --- | --- |
-| 吞吐 / CPU每消息 | 进程 CPU ÷ sink 收到的条数 | 回答"多快、吃几个核" |
-| 延迟 p50/p99 | source 造消息 → sink 处理 | **含 sink 攒批等待**，不是纯处理时延 |
-| 观测开销 | 关掉观测的同一配置 | 回答"这些数字里有多少是测量本身" |
+同一个 run 给出四个量，都在 `csv,` 行里（`throughput` / `cpu_s` / `cores` / `cycles_per_msg`）。口径先定义清楚，
+跨机器、跨框架才谈得上比较：
+
+| 数字 | 公式 | 单位 | 回答什么 | 边界 |
+| --- | --- | --- | --- | --- |
+| 交付吞吐 | `delivered / wall`，wall = `Start()` 后到 `Stop()` 前的 `steady_clock` | msg/s | 这台机器每秒真正交出多少帧 | 不含启动与停机；跨 CPU 频率不可比 |
+| CPU 归一吞吐 | `delivered / cpu_seconds` | msg/s·core | 单核能压出多少条 | **不是交付吞吐**：CPU 含自旋、轮询、丢帧重试，核多时数字好看而墙钟不涨 |
+| 每消息 CPU | `cpu_seconds / delivered` | µs/msg | 一条消息摊多少 CPU | 多线程自旋会让它虚高，且不区分交付与丢弃 |
+| 每消息周期 | `cpu_seconds / delivered × TSC` | cycles/msg | 同上的"无主频"表述 | 仅在 x86 启用；TSC 由三个 20 ms 窗口校准，取最大 |
+
+三条恒等式用来交叉验算，避免口径串味：
+
+- `cores = cpu_seconds / wall`，因此 `throughput = cores × 1e6 / cpu_per_msg`；
+- `cycles_per_msg = cpu_per_msg × tsc_ghz × 1000`；
+- 两条同时不成立时，多半是采样窗口错位：吞吐取 Stop 之前，CPU 取 Stop 之后。
+
+一句话规则：**说"有多快"只用墙钟吞吐；跨机器比"cycles/消息"；跨框架比"每交付一条的 CPU"。**
+
+常见坑：Google Benchmark 的 `items_per_second` 是 `items / cpu_time`，属 CPU 归一口径。
+直接拿它和墙钟吞吐对比会差出数倍，必须先换算到同一口径（本文件用"每交付一条"）。
+
+另外两个不在上表里的数字：**延迟 p50/p99** 是 source 造消息 → sink 处理（含 sink 攒批等待，
+不是纯处理时延）；**观测开销** 是关掉观测的同一配置之差，回答"这些数字里有多少是测量本身"。
 
 ## 5. 两台机器
 
