@@ -3,6 +3,7 @@
 
 #include "base/Define.hpp"
 #include <nexusflow/common/ViewPtr.hpp>
+#include "nexusflow/QueueFullPolicy.hpp"
 #include "nexusflow/Config.hpp"
 #include "nexusflow/Message.hpp"
 #include "nexusflow/Logging.hpp"
@@ -67,6 +68,14 @@ public:
      * @param name The name of the output queue.
      * @param queue The output queue to add.
      */
+    /// Sets what Broadcast does when an output queue is full. Default kBlock.
+    void SetQueueFullPolicy(QueueFullPolicy policy) { m_policy = policy; }
+
+    /// Messages the drop policy discarded before they reached any queue.
+    std::uint64_t PolicyDroppedCount() const {
+        return m_policyDroppedCount.load(std::memory_order_relaxed);
+    }
+
     void AddSubscriber(const std::string& name, ViewPtr<MessageQueue> queue) {
         if (m_subscriberMap.find(name) != m_subscriberMap.end()) {
             LOG_ERROR("Output queue with name {} already exists", name);
@@ -137,6 +146,17 @@ private:
      * worker thread had to be abandoned. While the pipeline shuts down the push
      * therefore fails fast instead, and the message is counted as dropped.
      */
+    /// True when every output queue has room for one more message.
+    bool OutputsHaveRoom() const {
+        for (const auto& pair : m_subscriberMap) {
+            ViewPtr<MessageQueue> queue = pair.second;
+            if (queue->capacity() > 0 && queue->getSize() >= queue->capacity()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     bool PushTo(ViewPtr<MessageQueue> queue, const Message& msg) {
         if (ShuttingDown()) {
             return queue->tryPush(msg);
@@ -169,6 +189,9 @@ private:
     /// Only the owning module's worker thread writes this (Broadcast and SendTo
     /// run there), so the add is relaxed; DroppedCount() fences before it loads.
     std::atomic<std::uint64_t> m_droppedCount{0};
+    /// Messages dropped by m_policy before any push; see PolicyDroppedCount().
+    std::atomic<std::uint64_t> m_policyDroppedCount{0};
+    QueueFullPolicy m_policy{QueueFullPolicy::kBlock};
     std::atomic<bool>* m_shuttingDown = nullptr;
 };
 

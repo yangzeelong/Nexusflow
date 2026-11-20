@@ -7,6 +7,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增可选的队列满策略 `QueueFullPolicy::kDrop`（`PipelineContext::WithQueueFullPolicy`）：
+  输出队列满时丢弃整条消息而不是阻塞（拒收发生在模块发送路径，队列里的旧消息不会被驱逐），丢弃数计入 `ModuleSnapshot::droppedTotal`；默认仍是 `kBlock`。
+  基准侧新增 `--queue-full block|drop`，`cov,` 行在 drop 下把策略丢弃记为预期结果。
+
 ### Changed
 
 - **breaking（未发版）**：框架里“汇合”这套概念统一改名为 join，与公开头文件注释和示例目录一致：

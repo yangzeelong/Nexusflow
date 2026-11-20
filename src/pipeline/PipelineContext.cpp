@@ -97,6 +97,15 @@ PipelineContext& PipelineContext::WithThreadPoolSize(std::size_t threadCount) {
     return *this;
 }
 
+PipelineContext& PipelineContext::WithQueueFullPolicy(QueueFullPolicy policy) {
+    m_queueFullPolicy.store(static_cast<int>(policy), std::memory_order_relaxed);
+    return *this;
+}
+
+QueueFullPolicy PipelineContext::GetQueueFullPolicy() const {
+    return static_cast<QueueFullPolicy>(m_queueFullPolicy.load(std::memory_order_relaxed));
+}
+
 std::size_t PipelineContext::GetThreadPoolSize() const {
     return m_threadPoolSize.load(std::memory_order_relaxed);
 }
