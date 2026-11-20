@@ -542,6 +542,18 @@ ErrorCode Pipeline::Cancel() {
     return ErrorCode::SUCCESS;
 }
 
+ThreadPoolSnapshot Pipeline::GetThreadPoolStats() const {
+    ThreadPoolSnapshot snapshot;
+    if (m_pImpl && m_pImpl->threadPool) {
+        const core::ThreadPoolStats stats = m_pImpl->threadPool->Snapshot();
+        snapshot.rounds = stats.rounds;
+        snapshot.turns = stats.turns;
+        snapshot.blockedRounds = stats.blockedRounds;
+        snapshot.idleRounds = stats.idleRounds;
+    }
+    return snapshot;
+}
+
 PipelineSnapshot Pipeline::GetSnapshot() const {
     PipelineSnapshot metrics;
     if (!m_pImpl) {

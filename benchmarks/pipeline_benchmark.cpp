@@ -465,6 +465,11 @@ struct Sample {
     /// inject only: Push/TryPush attempts and refusals (TryPush found the edge full).
     std::uint64_t attempts = 0;
     std::uint64_t refused = 0;
+    /// Pool counters; all zero when the run did not use a pool.
+    std::uint64_t poolRounds = 0;
+    std::uint64_t poolTurns = 0;
+    std::uint64_t poolBlocked = 0;
+    std::uint64_t poolIdle = 0;
 };
 
 /// min / median / max of one metric over the measured runs.
@@ -771,6 +776,8 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
     // saturated run has to be in (nothing dropped, nothing cancelled). It costs
     // one pass over the counters per run, not per message.
     const nexusflow::PipelineSnapshot midRun = built.pipeline->GetSnapshot();
+    // Stop() drops the pool, so snapshot its counters while it still exists.
+    const nexusflow::ThreadPoolSnapshot poolStats = built.pipeline->GetThreadPoolStats();
 
     // Capture the counters after Stop(): the sink's histogram is written by its
     // worker thread, so reading it while the pipeline still runs would race.
@@ -810,6 +817,10 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
     }
     sample.attempts = injectionAttempts;
     sample.refused = injectionRefused;
+    sample.poolRounds = poolStats.rounds;
+    sample.poolTurns = poolStats.turns;
+    sample.poolBlocked = poolStats.blockedRounds;
+    sample.poolIdle = poolStats.idleRounds;
     sample.coverage = CoverageOf(midRun, *built.pipeline, shape, options.syncInputs,
                                  options.queueFullPolicy == "drop", delivered);
 
@@ -1060,6 +1071,10 @@ int main(int argc, char* argv[]) {
         samples.push_back(sample);
         PrintCsv(options, shape, capacity, repetition, sample);
         PrintCoverage(options, shape, capacity, repetition, sample);
+        if (options.poolSize > 0) {
+            std::cout << "poolstats," << options.label << ',' << repetition << ',' << sample.poolRounds << ','
+                      << sample.poolTurns << ',' << sample.poolBlocked << ',' << sample.poolIdle << '\n';
+        }
         coverageOk = coverageOk && sample.coverage.ok;
     }
 

@@ -114,6 +114,9 @@ public:
      */
     PipelineSnapshot GetSnapshot() const;
 
+    /// Pool counters of the current run; all zero without WithThreadPoolSize().
+    ThreadPoolSnapshot GetThreadPoolStats() const;
+
     /**
      * @brief Clears the per-edge water marks (EdgeSnapshot::maxSize).
      * @details The cumulative counters keep growing: they are what two snapshots
