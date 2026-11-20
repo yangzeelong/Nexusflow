@@ -95,6 +95,36 @@ public:
 
     void WorkLoop();
 
+    /**
+     * @brief One non-blocking unit of work, used when a shared pool hosts
+     *        this worker (see PipelineContext::WithThreadPoolSize()).
+     * @details A pooled thread cannot afford the blocking waits of
+     * WorkLoop(): a stage pulls only what is already queued, and a source
+     * gets exactly one invocation. Returns false when there was nothing to
+     * do, so the caller can move on to the next module it hosts.
+     *
+     * Fusion workers are not stepped: RunFusion() waits for a whole group
+     * and keeps a dedicated thread. StepOnce() reports false for them.
+     */
+    bool StepOnce();
+
+    /// True when every output edge still has room for one more message.
+    /// Pooled workers use it to apply backpressure without blocking.
+    bool OutputsHaveRoom() const;
+
+    /// Free slots in the tightest bounded output edge.
+    /// SIZE_MAX when every output edge is unbounded (or there is none).
+    std::size_t OutputRoom() const;
+
+    /// True when this worker fuses several inputs into one message, i.e. when
+    /// it cannot share a thread with other modules.
+    bool HasFusionInputs() const { return m_syncInputs; }
+
+    /// Marks the loop of the current run as finished without running it.
+    /// Used by ModuleActor when a pool never started (a failed Start()
+    /// rollback), where nothing else would publish the exit.
+    void MarkExited();
+
     /// Whether this worker is a source (has no input queue to pull from).
     bool IsSource() const { return m_inputQueueMap.empty(); }
 
@@ -291,6 +321,10 @@ private:
      * out the whole timeout.
      */
     std::vector<Message> PullBatchMessage(std::size_t maxBatchSize, std::chrono::milliseconds batchTimeout);
+
+    /// Greedy, non-blocking form of PullBatchMessage(): only what is queued
+    /// right now, never a wait.
+    std::vector<Message> PullBatchNow(std::size_t maxBatchSize);
 
 private:
     std::shared_ptr<Module> m_modulePtr = nullptr;

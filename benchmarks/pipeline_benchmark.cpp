@@ -92,6 +92,9 @@ struct Options {
     int stragglerUs = 0;
     /// Enable the module per-hop timing chain (`PipelineContext::EnableModuleTimings`).
     bool timings = false;
+    /// 0 = one thread per module (the framework default). Greater than zero
+    /// hosts every non-fusion module on a shared pool of this many threads.
+    int poolSize = 0;
     std::string logLevel = "warn";
 };
 
@@ -340,6 +343,12 @@ Options ParseOptions(int argc, char* argv[]) {
                 std::exit(1);
             }
             options.logLevel = value;
+        } else if (TakeValue(arg, "--pool-size", argc, argv, i, value)) {
+            options.poolSize = NumberOrExit("--pool-size", value);
+            if (options.poolSize < 0) {
+                std::cerr << "--pool-size expects a non-negative number\n";
+                std::exit(1);
+            }
         } else if (arg == "--timings") {
             options.timings = true;
         } else if (arg == "--sync-inputs") {
@@ -352,7 +361,7 @@ Options ParseOptions(int argc, char* argv[]) {
                    "       [--modules N] [--branches N] [--capacity N] [--batch N] [--duration S] [--repeat R]\n"
                    "       [--payload none|1080p-rgb|1080p-yuv420|2k-rgb|2k-yuv420] [--payload-fresh]\n"
                    "       [--workload none|delay|compute|memory] [--delay-us N] [--compute-iters N] [--memory-bytes N]\n"
-                   "       [--cpus N] [--push-mode block|try] [--straggler-us N] [--sync-inputs] [--timings]\n"
+                   "       [--cpus N] [--pool-size N] [--push-mode block|try] [--straggler-us N] [--sync-inputs] [--timings]\n"
                    "       [--log-level trace|debug|info|warn|err|off] [--max-spread P] [--label TEXT]\n";
             std::exit(0);
         } else {
@@ -678,6 +687,12 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
         std::exit(1);
     }
 
+    if (options.poolSize > 0) {
+        // Start() creates the pool from this context value; Init() does not
+        // look at it, so setting it here is early enough.
+        built.pipeline->GetContext()->WithThreadPoolSize(static_cast<std::size_t>(options.poolSize));
+    }
+
     if (options.timings) {
         // Before Start(): every worker reads the switch on its first message.
         built.pipeline->GetContext()->EnableModuleTimings();
@@ -767,7 +782,7 @@ void PrintCsv(const Options& options, const TopologyShape& shape, std::size_t ca
               << (options.timings ? 1 : 0) << ',' << NameOf(options.workload.kind) << ','
               << WorkloadParameter(options.workload) << ',' << options.pushMode << ',' << sample.attempts << ','
               << sample.refused << ',' << sample.rssStartMiB << ',' << sample.rssPeakMiB << ',' << sample.rssEndMiB
-              << ',' << sample.edgeDepthMax << ',' << sample.stopMs << '\n';
+              << ',' << sample.edgeDepthMax << ',' << sample.stopMs << ',' << options.poolSize << '\n';
 }
 
 /**
@@ -961,6 +976,9 @@ int main(int argc, char* argv[]) {
     }
     if (options.timings) {
         std::cout << "module timings: on\n";
+    }
+    if (options.poolSize > 0) {
+        std::cout << "thread pool: " << options.poolSize << " threads for all non-fusion modules\n";
     }
     std::cout << "payload: " << NameOf(options.payload) << " (" << spec.bytes << " bytes/frame, "
               << (options.freshPayload ? "fresh per message" : "one buffer reused") << ")  capacity=" << capacity

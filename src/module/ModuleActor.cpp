@@ -40,7 +40,7 @@ ErrorCode ModuleActor::Init() { return m_module->Init(); }
 ErrorCode ModuleActor::DeInit() { return m_module->DeInit(); }
 
 ErrorCode ModuleActor::Start() {
-    if (m_workThread.joinable()) {
+    if (m_workThread.joinable() || m_poolStarted) {
         LOG_WARN("ModuleActor '{}' is already started.", GetModuleName());
         return ErrorCode::FAILED_ALREADY_START;
     }
@@ -64,6 +64,13 @@ ErrorCode ModuleActor::Start() {
     }
     // A drain from a previous Stop() must not leak into this run.
     m_worker->ClearDrain();
+    // Sharing a thread only works for a worker that returns after one unit of
+    // work. A fusion worker waits for a whole group, so it keeps its own thread.
+    if (m_pool && m_worker && !m_worker->HasFusionInputs()) {
+        m_pool->AddWorker(m_worker);
+        m_poolStarted = true;
+        return ErrorCode::SUCCESS;
+    }
     m_workThread = std::thread([this]() { m_worker->WorkLoop(); });
 
     return ErrorCode::SUCCESS;
@@ -71,6 +78,22 @@ ErrorCode ModuleActor::Start() {
 
 ErrorCode ModuleActor::Stop() {
     m_worker->Stop();
+    if (m_poolStarted) {
+        if (m_pool && m_pool->IsStarted()) {
+            // The pool thread finishes the step it is in and then publishes the
+            // exit; until then this worker still touches its queues.
+            while (m_worker->IsRunning()) {
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+            }
+        } else {
+            // The pool never started (a failed Start() rollback), so nothing
+            // else will ever publish the exit; do it here, or the next Start()
+            // refuses to run.
+            m_worker->MarkExited();
+        }
+        m_poolStarted = false;
+        return ErrorCode::SUCCESS;
+    }
     if (!m_workThread.joinable()) {
         LOG_TRACE("ModuleActor '{}' is already stopped.", GetModuleName());
         return ErrorCode::FAILED_ALREADY_STOP;

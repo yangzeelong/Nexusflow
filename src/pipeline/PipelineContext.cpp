@@ -92,4 +92,13 @@ bool PipelineContext::ModuleTimingsEnabled() const {
     return m_moduleTimingsEnabled.load(std::memory_order_relaxed);
 }
 
+PipelineContext& PipelineContext::WithThreadPoolSize(std::size_t threadCount) {
+    m_threadPoolSize.store(threadCount, std::memory_order_relaxed);
+    return *this;
+}
+
+std::size_t PipelineContext::GetThreadPoolSize() const {
+    return m_threadPoolSize.load(std::memory_order_relaxed);
+}
+
 } // namespace nexusflow

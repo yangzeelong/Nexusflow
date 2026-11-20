@@ -12,6 +12,8 @@
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
+#include <thread>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
@@ -136,11 +138,17 @@ private:
      * therefore fails fast instead, and the message is counted as dropped.
      */
     bool PushTo(ViewPtr<MessageQueue> queue, const Message& msg) {
-        return ShuttingDown() ? queue->tryPush(msg) : queue->push(msg);
+        if (ShuttingDown()) {
+            return queue->tryPush(msg);
+        }
+        return queue->push(msg);
     }
 
     bool PushTo(ViewPtr<MessageQueue> queue, Message&& msg) {
-        return ShuttingDown() ? queue->tryPush(std::move(msg)) : queue->push(std::move(msg));
+        if (ShuttingDown()) {
+            return queue->tryPush(std::move(msg));
+        }
+        return queue->push(std::move(msg));
     }
 
     void RecordDroppedPush(const std::string& outputName) {
