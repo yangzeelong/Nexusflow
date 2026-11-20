@@ -11,17 +11,19 @@
 namespace nexusflow {
 namespace core {
 
-ThreadPool::ThreadPool(std::size_t threadCount)
-    : m_threadCount(threadCount == 0 ? 1 : threadCount), m_workers(m_threadCount == 0 ? 1 : threadCount) {}
+ThreadPool::ThreadPool(std::size_t threadCount, ThreadPoolMapping mapping)
+    : m_threadCount(threadCount == 0 ? 1 : threadCount),
+      m_mapping(mapping),
+      m_workers(threadCount == 0 ? 1 : threadCount) {}
 
 ThreadPool::~ThreadPool() { StopAndJoin(); }
 
 namespace {
 
-/// How many StepOnce() calls one slot gives a single worker before it
-/// moves on. Large enough to drain any queue the pipeline can hold.
-constexpr int kDrainLimit = 4096;
-
+/// StepOnce() calls one worker may run before its slot moves on. Small on
+/// purpose: with several modules per thread the budget bounds how long a hot
+/// module keeps the others of its slot waiting.
+constexpr int kTurnBudget = 16;
 
 /// Spins the core without giving it away: see the blocked branch in Loop().
 void Pause() {
@@ -40,15 +42,25 @@ void ThreadPool::AddWorker(const std::shared_ptr<Worker>& worker) {
     if (!worker) {
         return;
     }
-    const std::size_t slot = m_workersSeen % m_threadCount;
-    ++m_workersSeen;
-    m_workers[slot].push_back(worker);
+    m_registered.push_back(worker);
 }
 
 void ThreadPool::Start() {
     if (m_started.load(std::memory_order_acquire)) {
         return;
     }
+    // Slots are assigned here because the contiguous mapping needs the final
+    // module count, which is only known once every actor has registered.
+    const std::size_t total = m_registered.size();
+    for (std::size_t i = 0; i < total; ++i) {
+        std::size_t slot = i;
+        if (total > m_threadCount) {
+            slot = m_mapping == ThreadPoolMapping::kRoundRobin ? i % m_threadCount
+                                                               : (i * m_threadCount) / total;
+        }
+        m_workers[slot].push_back(m_registered[i]);
+    }
+    m_registered.clear();
     m_stop.store(false, std::memory_order_relaxed);
     for (std::size_t i = 0; i < m_threadCount; ++i) {
         m_threads.emplace_back([this, i]() { Loop(i); });
@@ -68,32 +80,37 @@ void ThreadPool::StopAndJoin() {
     for (auto& slot : m_workers) {
         slot.clear();
     }
-    m_workersSeen = 0;
+    m_registered.clear();
+}
+
+ThreadPoolStats ThreadPool::Snapshot() const {
+    ThreadPoolStats stats;
+    stats.rounds = m_rounds.load(std::memory_order_relaxed);
+    stats.turns = m_turns.load(std::memory_order_relaxed);
+    stats.blockedRounds = m_blockedRounds.load(std::memory_order_relaxed);
+    stats.idleRounds = m_idleRounds.load(std::memory_order_relaxed);
+    return stats;
 }
 
 void ThreadPool::Loop(std::size_t index) {
     std::vector<std::shared_ptr<Worker>>& mine = m_workers[index];
     unsigned spins = 0;
     while (!m_stop.load(std::memory_order_relaxed)) {
+        m_rounds.fetch_add(1, std::memory_order_relaxed);
         bool didWork = false;
         bool blocked = false;
-        for (auto& worker : mine) {
-            // Work-conserving: drain this worker before moving on, otherwise a
-            // deep chain pays one full slot round of latency per hop and the
-            // pipeline collapses to a fraction of its per-module throughput.
-            // StepOnce() breaks on a full edge, so this cannot spin forever on
-            // a blocked producer; kDrainLimit only guards against a module that
-            // reports work without ever emptying.
-            for (int drained = 0; drained < kDrainLimit; ++drained) {
+        // Downstream first: a stage that shares this thread with the one feeding
+        // it must hand its output on before upstream fills the edge again.
+        for (auto it = mine.rbegin(); it != mine.rend(); ++it) {
+            const std::shared_ptr<Worker>& worker = *it;
+            for (int turn = 0; turn < kTurnBudget; ++turn) {
                 if (!worker->StepOnce()) {
                     break;
                 }
                 didWork = true;
+                m_turns.fetch_add(1, std::memory_order_relaxed);
             }
             if (!worker->OutputsHaveRoom()) {
-                // Backpressure rather than idleness: the consumer of a full edge
-                // is still running (possibly in this very slot), so the round
-                // must not fall through to the millisecond-scale sleep.
                 blocked = true;
             }
         }
@@ -102,6 +119,7 @@ void ThreadPool::Loop(std::size_t index) {
             continue;
         }
         if (blocked) {
+            m_blockedRounds.fetch_add(1, std::memory_order_relaxed);
             spins = 0;
             // Pause, do not yield(): a blocked slot unblocks within a few
             // hundred cycles once the consumer drains one slot, while a
@@ -109,6 +127,7 @@ void ThreadPool::Loop(std::size_t index) {
             Pause();
             continue;
         }
+        m_idleRounds.fetch_add(1, std::memory_order_relaxed);
         // Nothing on this slot had work. Re-checking costs nanoseconds; a
         // syscall costs microseconds, so spin first and only then yield/sleep.
         if (spins < 64) {

@@ -96,6 +96,8 @@ struct Options {
     /// 0 = one thread per module (the framework default). Greater than zero
     /// hosts every non-join module on a shared pool of this many threads.
     int poolSize = 0;
+    /// How the pool packs modules into its threads; see ThreadPoolMapping.
+    std::string poolMap = "contiguous";
     /// What a module does when an output edge is full: `none` (block, the
     /// framework default) or `drop` (drop the message, see QueueFullPolicy).
     std::string queueFullPolicy = "block";
@@ -353,6 +355,12 @@ Options ParseOptions(int argc, char* argv[]) {
                 std::cerr << "--pool-size expects a non-negative number\n";
                 std::exit(1);
             }
+        } else if (TakeValue(arg, "--pool-map", argc, argv, i, value)) {
+            if (value != "contiguous" && value != "round-robin") {
+                std::cerr << "unknown --pool-map '" << value << "': expected contiguous or round-robin\n";
+                std::exit(1);
+            }
+            options.poolMap = value;
         } else if (TakeValue(arg, "--queue-full", argc, argv, i, value)) {
             if (value != "block" && value != "drop") {
                 std::cerr << "--queue-full expects block or drop\n";
@@ -371,7 +379,8 @@ Options ParseOptions(int argc, char* argv[]) {
                    "       [--modules N] [--branches N] [--capacity N] [--batch N] [--duration S] [--repeat R]\n"
                    "       [--payload none|1080p-rgb|1080p-yuv420|2k-rgb|2k-yuv420] [--payload-fresh]\n"
                    "       [--workload none|delay|compute|memory] [--delay-us N] [--compute-iters N] [--memory-bytes N]\n"
-                   "       [--cpus N] [--pool-size N] [--queue-full block|drop] [--push-mode block|try]\n"
+                   "       [--cpus N] [--pool-size N] [--pool-map contiguous|round-robin]\n"
+                   "       [--queue-full block|drop] [--push-mode block|try]\n"
                    "       [--straggler-us N] [--sync-inputs] [--timings]\n"
                    "       [--log-level trace|debug|info|warn|err|off] [--max-spread P] [--label TEXT]\n";
             std::exit(0);
@@ -721,6 +730,9 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
         // Start() creates the pool from this context value; Init() does not
         // look at it, so setting it here is early enough.
         built.pipeline->GetContext()->WithThreadPoolSize(static_cast<std::size_t>(options.poolSize));
+        built.pipeline->GetContext()->WithThreadPoolMapping(
+            options.poolMap == "round-robin" ? nexusflow::ThreadPoolMapping::kRoundRobin
+                                             : nexusflow::ThreadPoolMapping::kContiguous);
     }
 
     if (options.queueFullPolicy == "drop") {
@@ -1026,7 +1038,8 @@ int main(int argc, char* argv[]) {
         std::cout << "queue full policy: drop on full output queues\n";
     }
     if (options.poolSize > 0) {
-        std::cout << "thread pool: " << options.poolSize << " threads for all non-join modules\n";
+        std::cout << "thread pool: " << options.poolSize << " threads (" << options.poolMap
+                  << " map) for all non-join modules\n";
     }
     std::cout << "payload: " << NameOf(options.payload) << " (" << spec.bytes << " bytes/frame, "
               << (options.freshPayload ? "fresh per message" : "one buffer reused") << ")  capacity=" << capacity

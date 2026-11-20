@@ -110,4 +110,13 @@ std::size_t PipelineContext::GetThreadPoolSize() const {
     return m_threadPoolSize.load(std::memory_order_relaxed);
 }
 
+PipelineContext& PipelineContext::WithThreadPoolMapping(ThreadPoolMapping mapping) {
+    m_threadPoolMapping.store(static_cast<int>(mapping), std::memory_order_relaxed);
+    return *this;
+}
+
+ThreadPoolMapping PipelineContext::GetThreadPoolMapping() const {
+    return static_cast<ThreadPoolMapping>(m_threadPoolMapping.load(std::memory_order_relaxed));
+}
+
 } // namespace nexusflow
