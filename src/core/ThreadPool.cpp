@@ -26,6 +26,12 @@ namespace {
 /// module keeps the others of its slot waiting.
 constexpr int kTurnBudget = 16;
 
+/// Idle backoff before Loop() parks a slot. Counted in spin rounds on purpose:
+/// a sub-millisecond sleep is a whole-tick park on Windows, so the ladder must
+/// not try to express "10 us of patience" with sleep_for.
+constexpr unsigned kIdlePauseRounds = 4096;
+constexpr unsigned kIdleYieldRounds = 4096;
+
 /// Spins the core without giving it away: see the blocked branch in Loop().
 void Pause() {
 #if defined(_MSC_VER)
@@ -152,16 +158,24 @@ void ThreadPool::Loop(std::size_t index) {
             continue;
         }
         m_idleRounds.fetch_add(1, std::memory_order_relaxed);
-        // Nothing on this slot had work. Re-checking costs nanoseconds; a
-        // syscall costs microseconds, so spin first and only then yield/sleep.
-        if (spins < 64) {
+        // Nothing on this slot had work. Re-checking costs nanoseconds, so spin
+        // first, and only park once the slot has been idle for a while: a parked
+        // slot is not woken by the queue pushes, it re-checks on the next tick,
+        // so parking during a burst gap turns that gap into a millisecond stall.
+        //
+        // The ladder counts spin rounds, never microseconds: Windows rounds a
+        // sub-millisecond sleep up to the system tick, so the old
+        // sleep_for(10 us)/sleep_for(50 us) steps were 1.9 ms parks with
+        // timeBeginPeriod(1) in effect and 15.6 ms without it (measured), which
+        // cost ~35% of the pooled throughput on a 4-module linear pipeline.
+        if (spins < kIdlePauseRounds) {
+            ++spins;
+            Pause();
+        } else if (spins < kIdlePauseRounds + kIdleYieldRounds) {
             ++spins;
             std::this_thread::yield();
-        } else if (spins < 256) {
-            ++spins;
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
         } else {
-            std::this_thread::sleep_for(std::chrono::microseconds(50));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
     // A worker whose actor is stopped by the pipeline is normally stepped one
