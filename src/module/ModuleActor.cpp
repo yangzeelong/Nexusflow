@@ -65,8 +65,8 @@ ErrorCode ModuleActor::Start() {
     // A drain from a previous Stop() must not leak into this run.
     m_worker->ClearDrain();
     // Sharing a thread only works for a worker that returns after one unit of
-    // work. A fusion worker waits for a whole group, so it keeps its own thread.
-    if (m_pool && m_worker && !m_worker->HasFusionInputs()) {
+    // work. A join worker waits for a whole group, so it keeps its own thread.
+    if (m_pool && m_worker && !m_worker->HasJoinInputs()) {
         m_pool->AddWorker(m_worker);
         m_poolStarted = true;
         return ErrorCode::SUCCESS;

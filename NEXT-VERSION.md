@@ -63,13 +63,13 @@
 
 验收：同等吞吐下线程数下降；`WorkerBehaviorTest` / `PipelineLifecycleTest` 全绿；`AGENTS.md` §5 同步更新。
 
-### 3.2 融合批处理 —— [`src/core/Worker.cpp:316`](src/core/Worker.cpp#L316) `Worker::RunFusion()`
+### 3.2 融合批处理 —— [`src/core/Worker.cpp:316`](src/core/Worker.cpp#L316) `Worker::RunJoin()`
 
-现状（已读代码确认）：`messageCache` 是 `unordered_map<uint64_t, unordered_map<std::string, Message>>`，凑齐一组**立刻**处理且一组只装一条 —— `fusedMessageVec.clear(); push_back(MakeMessage(...)); ProcessBatch(...)`。**两处**要改：正常路径 [`377-380`](src/core/Worker.cpp#L377-L380) 与排水路径 [`415-420`](src/core/Worker.cpp#L415-L420)。函数开头第 317 行就是这条 TODO。
+现状（已读代码确认）：`messageCache` 是 `unordered_map<uint64_t, unordered_map<std::string, Message>>`，凑齐一组**立刻**处理且一组只装一条 —— `joinedMessageVec.clear(); push_back(MakeMessage(...)); ProcessBatch(...)`。**两处**要改：正常路径 [`377-380`](src/core/Worker.cpp#L377-L380) 与排水路径 [`415-420`](src/core/Worker.cpp#L415-L420)。函数开头第 317 行就是这条 TODO。
 
 要做：
 
-- 一次迭代把所有凑齐的组攒进同一个 `fusedMessageVec`，最后只调一次 `ProcessBatch`；
+- 一次迭代把所有凑齐的组攒进同一个 `joinedMessageVec`，最后只调一次 `ProcessBatch`；
 - 内层 `unordered_map<std::string, Message>` 换成小 `vector`（输入数已知 = `expectedInputCount`），输入边 → 下标在启动时预建，省掉每消息的哈希与字符串比较；
 - **错误语义要钉死**：现在每组各自 try/catch、按组计 `AddProcessed/AddFailed`；改成批调用后一个组抛异常会中断整批 → 取"整批一个 try/catch，异常时剩余条数计 `AddFailed(n)`"，并用用例写清；
 - **必须测内存**：半凑齐状态下 `messageCache` 的峰值（`GetSnapshot()` 看不到，用进程 RSS 或临时统计，不要入库）。
@@ -121,11 +121,11 @@
 - 3 模块 batch4、cap8：**0.931 µs/消息、3.156 M msg/s、约 2.9 核**。
 - 目标：3 模块 batch4 ≤ 0.75 µs（−20%），2 模块 batch1 ≤ 0.70 µs；先动 §3.3 第 1 项（调度链），再动分配。注意这是 CPU 时间不是延迟：真实 60 fps × 4 分支下 0.93 µs/消息约等于 0.02% 一个核。
 
-**P1：fan-out / fusion 的每帧成本**
+**P1：fan-out / join 的每帧成本**
 
 - 8 分支：4.950 M msg/s = 618 K 帧/s，每帧 14.877 µs；1 分支 1.14 µs/帧。
 - 8 分支融合：361 K 帧/s、26.749 µs/帧（spread 13.9%，标 unstable）。
-- 要做：广播路径去掉可以合并的 per-branch 检查；融合按 §3.2 批量。验收：fan8 ≤ 10 µs/帧，fusion8 ≥ 500 K 帧/s。
+- 要做：广播路径去掉可以合并的 per-branch 检查；融合按 §3.2 批量。验收：fan8 ≤ 10 µs/帧，join8 ≥ 500 K 帧/s。
 
 **P1：批处理语义**
 
@@ -180,7 +180,7 @@
 ### 6.2 风险
 
 - **只有 §3.1 可能把框架改坏**：§5 的单写者计数器前提、停机里"生产者先关边再 join"的顺序，都绑在"每模块一个线程"上。动它要单独分支 + 测量数据 + 文档同步。
-- **§3.2 动的是没有专门用例的代码**：`RunFusion()` 现在没有"融合 batch 大小 > 1"的用例，先补一个再改实现。
+- **§3.2 动的是没有专门用例的代码**：`RunJoin()` 现在没有"融合 batch 大小 > 1"的用例，先补一个再改实现。
 
 ### 6.3 顺手可做（按价值排序）
 

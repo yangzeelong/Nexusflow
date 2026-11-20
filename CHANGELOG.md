@@ -7,6 +7,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **breaking（未发版）**：框架里“汇合”这套概念统一改名为 join，与公开头文件注释和示例目录一致：
+  `Worker::RunJoin()`、`Worker::HasJoinInputs()`、`ModuleSnapshot::joinExpiredTotal`、
+  `Worker::AddJoinExpired()`、`Worker::m_joinTimeout`；旧名 `fusion*` 全部移除。
+  配置键优先读 `joinTimeoutMs`，同时兼容旧拼写 `fusionTimeoutMs`（保留一个版本）。
+
 ## [1.0.1] - 2026-11-20
 
 补测量口径与 cycles/消息指标，不改库代码。

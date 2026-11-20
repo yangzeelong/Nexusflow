@@ -65,20 +65,20 @@ protected:
     }
 };
 
-// Fused sink: RunFusion() hands it a single batch element whose payload is the
-// map of input edge -> Message for one fused group.
-class PoolFusedSinkModule : public Module {
+// Joined sink: RunJoin() hands it a single batch element whose payload is the
+// map of input edge -> Message for one joined group.
+class PoolJoinedSinkModule : public Module {
 public:
-    explicit PoolFusedSinkModule(const std::string& name) : Module(name) {}
+    explicit PoolJoinedSinkModule(const std::string& name) : Module(name) {}
 
-    std::atomic<std::uint64_t> fusedBatches{0};
+    std::atomic<std::uint64_t> joinedBatches{0};
 
 protected:
     void Process(Message&) override {}
 
     void ProcessBatch(std::vector<Message>& inputBatchMessages) override {
         if (inputBatchMessages.size() == 1) {
-            fusedBatches.fetch_add(1, std::memory_order_relaxed);
+            joinedBatches.fetch_add(1, std::memory_order_relaxed);
         }
     }
 };
@@ -147,11 +147,11 @@ TEST(ThreadPoolTest, PipelineCanRestartAfterPooledStop) {
     EXPECT_GT(sink->received.load(std::memory_order_relaxed), receivedAfterFirstRun);
 }
 
-TEST(ThreadPoolTest, FusionModuleKeepsItsOwnThread) {
+TEST(ThreadPoolTest, JoinModuleKeepsItsOwnThread) {
     auto source = std::make_shared<PoolSourceModule>("source");
     auto branchA = std::make_shared<PoolStageModule>("branch_a");
     auto branchB = std::make_shared<PoolStageModule>("branch_b");
-    auto sink = std::make_shared<PoolFusedSinkModule>("fused_sink");
+    auto sink = std::make_shared<PoolJoinedSinkModule>("joined_sink");
 
     Config sinkConfig;
     sinkConfig.Add<bool>("syncInputs", true);
@@ -165,15 +165,15 @@ TEST(ThreadPoolTest, FusionModuleKeepsItsOwnThread) {
         .Connect(source->GetModuleName(), branchB->GetModuleName())
         .Connect(branchA->GetModuleName(), sink->GetModuleName())
         .Connect(branchB->GetModuleName(), sink->GetModuleName())
-        .SetModuleConfig("fused_sink", sinkConfig)
+        .SetModuleConfig("joined_sink", sinkConfig)
         .Build(kCapacity);
     ASSERT_NE(pipeline, nullptr);
-    // The fusion worker blocks until a whole group arrives, so it must not be
+    // The join worker blocks until a whole group arrives, so it must not be
     // hosted by a shared slot; the pool only takes the other three modules.
     pipeline->GetContext()->WithThreadPoolSize(2);
     ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
     ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
     std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
     EXPECT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
-    EXPECT_GT(sink->fusedBatches.load(std::memory_order_relaxed), 0u);
+    EXPECT_GT(sink->joinedBatches.load(std::memory_order_relaxed), 0u);
 }

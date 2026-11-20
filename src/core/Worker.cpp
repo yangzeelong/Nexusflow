@@ -161,11 +161,17 @@ void Worker::LoadConfig() {
     }
     m_batchTimeout = std::chrono::milliseconds(batchTimeoutMs);
 
-    int fusionTimeoutMs = m_configPtr->GetValueOrDefault<int>("fusionTimeoutMs", static_cast<int>(m_fusionTimeout.count()));
-    if (fusionTimeoutMs < 0) {
-        fusionTimeoutMs = 0;
+    int joinTimeoutMs = m_configPtr->GetValueOrDefault<int>("joinTimeoutMs", -1);
+    if (joinTimeoutMs < 0) {
+        // v1.0 compatibility: this key was named "fusionTimeoutMs" before the
+        // fusion -> join rename. Keep reading the old spelling for one release.
+        joinTimeoutMs = m_configPtr->GetValueOrDefault<int>(
+            "fusionTimeoutMs", static_cast<int>(m_joinTimeout.count()));
     }
-    m_fusionTimeout = std::chrono::milliseconds(fusionTimeoutMs);
+    if (joinTimeoutMs < 0) {
+        joinTimeoutMs = 0;
+    }
+    m_joinTimeout = std::chrono::milliseconds(joinTimeoutMs);
 
     int sourceIdleMs = m_configPtr->GetValueOrDefault<int>("sourceIdleMs", m_sourceIdleMs);
     if (sourceIdleMs < 0) {
@@ -211,7 +217,7 @@ void Worker::WorkLoop() {
 
     if (m_syncInputs) {
         assert(!isSourceModule);
-        RunFusion(); // Run the fusion module.
+        RunJoin(); // Run the join module.
     } else {
         // Per-module timing splits each loop iteration into the time spent
         // waiting for work and the time spent processing it. The difference
@@ -317,7 +323,7 @@ void Worker::WorkLoop() {
     LOG_DEBUG("Worker for module '{}' finished.", m_modulePtr->GetModuleName());
 }
 
-void Worker::RunFusion() {
+void Worker::RunJoin() {
     // TODO: 如何优化呢，现在只有单Batch, 并且需要测试下内存占用.
 
     // Key: message id, value: map of source module name and message.
@@ -329,17 +335,17 @@ void Worker::RunFusion() {
     std::unordered_map<uint64_t, uint64_t> cacheArrivalMs;
     const std::size_t expectedInputCount = m_inputQueueMap.size(); // Expected number of inputs.
 
-    // Partial fused messages are dropped after this many milliseconds.
-    const uint64_t timeoutMs = static_cast<uint64_t>(m_fusionTimeout.count());
+    // Partial joined messages are dropped after this many milliseconds.
+    const uint64_t timeoutMs = static_cast<uint64_t>(m_joinTimeout.count());
 
     // One message id is in flight per input at most, so the cache stays close to
     // this size; reserving keeps the per-message inserts off the rehash path.
     messageCache.reserve(std::max<std::size_t>(expectedInputCount, 8));
     cacheArrivalMs.reserve(std::max<std::size_t>(expectedInputCount, 8));
 
-    // Reused across iterations: a fresh vector per fused message meant one heap
-    // allocation per fused batch.
-    std::vector<Message> fusedMessageVec;
+    // Reused across iterations: a fresh vector per joined message meant one heap
+    // allocation per joined batch.
+    std::vector<Message> joinedMessageVec;
 
     while (!m_stopFlag.load()) {
         uint64_t currentTimeMs =
@@ -360,7 +366,7 @@ void Worker::RunFusion() {
                 // it -- so two inputs carrying the same message id both landed
                 // under "" and the group could only ever hold one entry. It never
                 // reached expectedInputCount, so every such group was dropped
-                // silently at the fusion timeout (60 s by default).
+                // silently at the join timeout (60 s by default).
                 const std::string& inputEdge = queuePair.first;
                 cacheArrivalMs.emplace(messageId, currentTimeMs); // Keeps the first-seen time.
                 messageCache[messageId][inputEdge] = message;
@@ -377,17 +383,17 @@ void Worker::RunFusion() {
             LOG_TRACE("Number of inputs received: {}, Expected inputs: {}, module name: {}", messageMap.size(), expectedInputCount,
                       m_modulePtr->GetModuleName());
             if (messageMap.size() == expectedInputCount) {
-                // Construct a fused message and concat to batchMessage.
-                fusedMessageVec.clear();
-                fusedMessageVec.push_back(MakeMessage(std::move(messageMap)));
+                // Construct a joined message and concat to batchMessage.
+                joinedMessageVec.clear();
+                joinedMessageVec.push_back(MakeMessage(std::move(messageMap)));
                 try {
-                    m_modulePtr->ProcessBatch(fusedMessageVec); // process the fused message
-                    AddProcessed(fusedMessageVec.size());
+                    m_modulePtr->ProcessBatch(joinedMessageVec); // process the joined message
+                    AddProcessed(joinedMessageVec.size());
                 } catch (const std::exception& e) {
-                    LOG_ERROR("Module '{}' threw while processing a fused batch: {}", m_modulePtr->GetModuleName(), e.what());
+                    LOG_ERROR("Module '{}' threw while processing a joined batch: {}", m_modulePtr->GetModuleName(), e.what());
                     AddFailed();
                 } catch (...) {
-                    LOG_ERROR("Module '{}' threw an unknown exception while processing a fused batch.",
+                    LOG_ERROR("Module '{}' threw an unknown exception while processing a joined batch.",
                               m_modulePtr->GetModuleName());
                     AddFailed();
                 }
@@ -395,10 +401,10 @@ void Worker::RunFusion() {
                 it = messageCache.erase(it); // remove the message from cache
             } else {
                 const auto arrivalIt = cacheArrivalMs.find(messageId);
-                const bool fusionTimedOut = arrivalIt != cacheArrivalMs.end() && currentTimeMs - arrivalIt->second >= timeoutMs;
+                const bool joinTimedOut = arrivalIt != cacheArrivalMs.end() && currentTimeMs - arrivalIt->second >= timeoutMs;
                 // A drain only means "stop waiting for inputs that cannot arrive".
                 // As long as this stage reads from an open input it keeps converting
-                // them, so the decision to forward an incomplete fusion group belongs
+                // them, so the decision to forward an incomplete join group belongs
                 // to the iteration that sees every input closed, not to every
                 // iteration while draining. Deciding earlier counts the missing side
                 // as dropped on each pass and leaves the producer's messages unread
@@ -411,35 +417,35 @@ void Worker::RunFusion() {
                     }
                 }
                 const bool drainGaveUp = m_drainRequested.load() && !nextIterationPlanned;
-                const bool timedOut = fusionTimedOut || drainGaveUp;
+                const bool timedOut = joinTimedOut || drainGaveUp;
                 if (timedOut) {
-                    if (drainGaveUp && !fusionTimedOut) {
+                    if (drainGaveUp && !joinTimedOut) {
                         LOG_DEBUG("Drain requested; forwarding incomplete message {} without waiting for the missing inputs",
                                   messageId);
-                        fusedMessageVec.clear();
-                        fusedMessageVec.push_back(MakeMessage(std::move(messageMap)));
+                        joinedMessageVec.clear();
+                        joinedMessageVec.push_back(MakeMessage(std::move(messageMap)));
                         const std::size_t missing =
                             expectedInputCount > messageMap.size() ? expectedInputCount - messageMap.size() : 0;
                         try {
-                            m_modulePtr->ProcessBatch(fusedMessageVec);
-                            AddProcessed(fusedMessageVec.size());
+                            m_modulePtr->ProcessBatch(joinedMessageVec);
+                            AddProcessed(joinedMessageVec.size());
                         } catch (const std::exception& e) {
-                            LOG_ERROR("Module '{}' threw while processing a partially fused batch: {}",
+                            LOG_ERROR("Module '{}' threw while processing a partially joined batch: {}",
                                       m_modulePtr->GetModuleName(), e.what());
                             AddFailed();
                         } catch (...) {
-                            LOG_ERROR("Module '{}' threw an unknown exception while processing a partially fused batch.",
+                            LOG_ERROR("Module '{}' threw an unknown exception while processing a partially joined batch.",
                                       m_modulePtr->GetModuleName());
                             AddFailed();
                         }
                         AddDropped(missing);
-                        AddFusionExpired(missing);
+                        AddJoinExpired(missing);
                     } else {
                         LOG_WARN("Timeout for message with ID: {}, will be removed from cache", messageId);
-                        // Every partial in the cache is one fused message that will
+                        // Every partial in the cache is one joined message that will
                         // never reach the module, so it counts as dropped output.
                         AddDropped(messageMap.size());
-                        AddFusionExpired(messageMap.size());
+                        AddJoinExpired(messageMap.size());
                     }
                     cacheArrivalMs.erase(arrivalIt);
                     it = messageCache.erase(it);
@@ -460,7 +466,7 @@ void Worker::RunFusion() {
         }
 #endif
 
-        // One iteration is one snapshot boundary. RunFusion() reaches here
+        // One iteration is one snapshot boundary. RunJoin() reaches here
         // once per pass whatever happened inside it, including the paths that
         // only drop or only forward, so readers see every recorded number.
         PublishCounters();
@@ -510,7 +516,7 @@ bool Worker::StepOnce() {
     if (!m_modulePtr) {
         return false;
     }
-    // A fusion worker parks on inputs that may never arrive, so it never runs
+    // A join worker parks on inputs that may never arrive, so it never runs
     // on a shared thread; ModuleActor keeps it on its own.
     if (m_syncInputs) {
         return false;

@@ -57,7 +57,7 @@ struct EdgeSnapshot {
  * processedTotal + droppedTotal + failedTotal accounts for everything the module
  * was handed: each message ends up in exactly one of the three. droppedTotal
  * covers messages the module could not hand downstream (a full or closed queue)
- * plus fused groups that expired; fusionExpiredTotal is the part of that which
+ * plus joined groups that expired; joinExpiredTotal is the part of that which
  * expired.
  *
  * The two `*Ms` fields answer "where did the stop go": they are the timing of the
@@ -69,11 +69,11 @@ struct ModuleSnapshot {
     std::string name;
     /// Messages the module finished processing.
     std::uint64_t processedTotal = 0;
-    /// Messages lost downstream: push refused, or a fused group expired.
+    /// Messages lost downstream: push refused, or a joined group expired.
     std::uint64_t droppedTotal = 0;
-    /// Subset of droppedTotal: fused groups dropped because an input arrived
-    /// after the fusion timeout.
-    std::uint64_t fusionExpiredTotal = 0;
+    /// Subset of droppedTotal: joined groups dropped because an input arrived
+    /// after the join timeout.
+    std::uint64_t joinExpiredTotal = 0;
     /// Invocations that threw. Counted per invocation, not per message.
     std::uint64_t failedTotal = 0;
     /// How long the most recent Stop() waited for this module's inputs to empty.

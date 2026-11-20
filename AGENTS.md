@@ -148,7 +148,7 @@ from 28 suites，PASSED 171**（MSVC 19.40）。
 
 | 后缀/形式 | 含义 | 例子 |
 | --- | --- | --- |
-| `*Total` | **累计计数**："发生了几次"，只增不减；两次快照相减才有意义 | `pushedTotal`、`poppedTotal`、`discardedTotal`、`processedTotal`、`droppedTotal`、`fusionExpiredTotal`、`failedTotal` |
+| `*Total` | **累计计数**："发生了几次"，只增不减；两次快照相减才有意义 | `pushedTotal`、`poppedTotal`、`discardedTotal`、`processedTotal`、`droppedTotal`、`joinExpiredTotal`、`failedTotal` |
 | `*Ms` | 毫秒值；**不要**在毫秒值上用 `*Total`——"total 多少毫秒"在 `items` 旁边读起来像计数 | `sumMs`（样本耗时之和）、`avgMs`、`p95Ms`、`p99Ms`、`minMs`、`maxMs`、`windowSpanMs`、`drainInputsMs`、`exitLoopMs`、`stopPipelineMs` |
 | 无后缀名词 | 此刻的瞬时值（gauge） | `size`、`capacity` |
 | `max*` | 自上次 `ResetMetrics()` 以来的极值（water mark） | `maxSize` |

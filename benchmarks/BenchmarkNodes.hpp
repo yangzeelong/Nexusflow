@@ -342,8 +342,8 @@ private:
  * @brief Terminal stage: records end-to-end latency and counts what it received.
  *
  * Handles both shapes a sink can be handed:
- *  - a plain BenchmarkPayload, when the sink reads its inputs without fusion;
- *  - a fused map of Messages, when the pipeline runs it with `syncInputs`, which
+ *  - a plain BenchmarkPayload, when the sink reads its inputs without join;
+ *  - a joined map of Messages, when the pipeline runs it with `syncInputs`, which
  *    is what turns several branches back into one logical frame.
  */
 class SinkModule : public nexusflow::Module {
@@ -361,9 +361,9 @@ protected:
             Record(*payload);
             return;
         }
-        // Fused shape: the framework hands over every input for one message id.
-        if (const auto* fused = message.BorrowPtr<std::unordered_map<std::string, nexusflow::Message>>()) {
-            for (const auto& entry : *fused) {
+        // Joined shape: the framework hands over every input for one message id.
+        if (const auto* joined = message.BorrowPtr<std::unordered_map<std::string, nexusflow::Message>>()) {
+            for (const auto& entry : *joined) {
                 if (const BenchmarkPayload* payload = entry.second.BorrowPtr<BenchmarkPayload>()) {
                     Record(*payload);
                     return;
