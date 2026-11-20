@@ -442,3 +442,75 @@ DropHead/DropTail 的本质区别：那边是队列内部 evict，这里是入�
 要继续做，正确的方向不是“丢得更多”，而是 ① 给丢弃加节流（丢完一条就退避一个 tick，别空转），
 ② 把策略下沉到**单边**（非 join 的扇出允许部分投递），③ 或者干脆用 `--push-mode try` 从源头
 限速。三者都还没做。
+
+## 16. 归因案例：热路径上的两次时钟读取（2026-11-20）
+
+### 16.1 问题：p0 与 p4 的差距到底是谁的
+
+在 `L4cap16`（linear 4 模块、capacity 16）上，MSVC 实测 `pool=0` 3.287 M msg/s、`pool=4` 1.946 M msg/s，差 40.8%。此前只有"池化开销"这一句猜测，没有任何可观察证据。
+
+### 16.2 方法：能看栈的采样
+
+- Windows 的 xperf/wpr 采样导不出可用调用栈（ETL 407 MB、命令行没有符号化导出），改在 WSL2 上做。
+- **必须带帧指针重编**：`-DCMAKE_CXX_FLAGS_RELEASE="-O2 -g -fno-omit-frame-pointer"`。不带时栈只有 2–3 层、满屏 `[unknown]`，只能看到"哪个函数占得多"，看不到"谁调用它"。
+- 采样：`perf record -e cpu-clock -F 1999 -g --call-graph fp`，每配置 5 s、约 7.85 万样本；`perf script` 导出后用脚本画火焰图（自底向上，宽度 = 样本占比）。
+- 两个被剖的进程：`L4cap16 pool=0`（1.185 µs/msg）与 `pool=4`（1.323 µs/msg）。
+
+### 16.3 发现：两边都在付同一笔钱
+
+self time（占本进程样本）：
+
+| 符号 | p0 | p4 | 归属 |
+|---|---|---|---|
+| `SpscQueue::PutIfSpace` | 21.98% | 19.72% | 入队交接，两个模型都付 |
+| `__vdso_clock_gettime` | **14.74%** | **9.55%** | 纯浪费，见 16.4 |
+| `SpscQueue::waitAndPopFor` | 12.64% | — | p0 的空等（1 ms 超时） |
+| `Worker::PullBatchMessage` / `PullBatchNow` | 11.48% | 15.19% | 取批 |
+| `ThreadPool::Loop` | — | 10.31% | 池调度器自身 |
+| `Worker::StepOnce` | — | 6.50% | 单步派发 |
+| `Module::Broadcast` | 6.20% | 5.24% | 发送路径 |
+| `Worker::OutputRoom` | — | 2.49% | 每步扫输出边 |
+| `__schedule` | — | 2.68% | 线程被换出 |
+
+换算成绝对成本：
+
+- 池化只有的部分（`Loop`+`StepOnce`+`OutputRoom`+`__schedule`）= 22.0% × 1.323 µs ≈ **0.29 µs/消息**；
+- p0 只有的部分（`PullBatchMessage`+`waitAndPopFor`+`WorkLoop`）= 27.7% × 1.185 µs ≈ **0.33 µs/消息**。
+
+**两者基本抵消**。所以"22% 正好解释 p4 慢出的 0.14 µs"是错的——0.29 ≠ 0.14；真实差距来自批填充方式、跨线程调度与缓存效应，不能记在"池化开销"这一个科目上。
+
+### 16.4 修复：关掉计时就别读钟
+
+`Module::ProcessTimed`（`src/module/Module.cpp`）每条消息无条件读两次 `steady_clock::now()`（`started` 与 `elapsed`），即使 `EnableModuleTimings` 从未开启。改为只在 `CapturesModuleTimings()` 为真时读钟，否则 `elapsedMs = 0`（TRACE 日志保留）。
+
+### 16.5 结果（MSVC，5 s × 3 中位；WSL2 复核 5 s × 1）
+
+| 配置 | 修复前 | 修复后 | Δ | µs/msg 前 → 后 | p50 前 → 后 |
+|---|---|---|---|---|---|
+| `L4cap16-p0` | 3.287 M | 3.698 M | **+12.5%** | 1.184 → 1.064 | 3.02 → 2.02 µs |
+| `L4cap16-p4` | 1.946 M | 2.052 M | +5.5% | 1.852 → 1.655 | 9.06 → 8.06 µs |
+| `L16cap8-p0` | 2.223 M | 2.484 M | +11.7% | 6.823 → 6.364 | 39.25 → 34.25 µs |
+| `L16cap8-p4` | 0.952 M | 1.352 M | **+42.0%** | 3.709 → 2.716 | 52.25 → 36.25 µs |
+
+WSL2 复核：`L4cap16-p0` 3.292 → 3.563 M（+8.2%）、`p4` 2.970 → 3.258 M（+9.7%）。
+
+7 次重复复核（同机、交替顺序）：`L4cap16-p4` 2.123 → 2.241 M（+5.6%）、`L16cap8-p4` 0.853 → 1.202 M（+40.9%）。前者区间仍有重叠（2.025–2.288 vs 1.892–2.309），但 µs/消息 1.660 → 1.545、p50 10.06 → 8.06 一致，判为真实收益。
+
+p4 的相对收益更大，因为它每消息的固定成本占比更高。同一份时钟开销删掉后，绝对吞吐都涨了，但 p4/p0 的比值从 59.2%（1.946/3.287）变成 55.5%（2.052/3.698）——单线程/模块模型吃得更多，池化的**相对**代价反而略微变大。
+
+### 16.6 剩下的与教训
+
+- 修复后 profile 里 `clock_gettime` 从 14.74%→8.04%（p0）、9.55%→3.07%（p4）；剩下的来自 `SpscQueue::waitAndPopFor` 的 1 ms 超时等待，下一个候选是"有消息就取、没消息才看钟"或复用一个时间戳。
+- 教训一：**注释里的成本假设会过期**。`Module::ProcessTimed` 原注释断言"复制 timing map 是热路径最大开销"，采样显示关掉计时的路径根本不做这次复制，而钟照读。
+- 教训二：没有帧指针的采样只能看顶层 self，看不到调用链，很容易把"某个叶函数占 20%"误读成"这个函数该优化"，而真正该删的是一次没人要的 API 调用。
+
+### 16.7 复现
+
+```bash
+cmake -S . -B build-perf -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_CXX_FLAGS_RELEASE="-O2 -g -fno-omit-frame-pointer"
+cmake --build build-perf --target pipeline_benchmark -j
+perf record -e cpu-clock -F 1999 -g --call-graph fp -o p0.data -- \
+  ./build-perf/benchmarks/pipeline_benchmark --topology linear --modules 4 --capacity 16 --duration 5
+perf script -i p0.data > p0.txt
+```
