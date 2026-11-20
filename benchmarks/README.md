@@ -9,7 +9,7 @@
 | 文件 | 目标 | 说明 |
 | --- | --- | --- |
 | `BenchmarkMessage.cpp` + `benchmark_main.cpp` | `nexusflow_benchmarks` | Google Benchmark 微基准：消息创建/广播（拷贝）/数据访问两种实现对比 |
-| `pipeline_benchmark.cpp` | `pipeline_benchmark` | 端到端吞吐与延迟扫描：`--topology diamond|linear|inject`、`--baseline`、`--batch`、`--observe`、`--modules`、`--branches`、`--capacity`、`--payload`、`--payload-fresh`、`--sync-inputs`、`--workload`、`--cpus`、`--push-mode`、`--straggler-us`、`--pool-size`、`--drop-policy`、`--timings`、`--duration`、`--repeat`；自己带 `main()`。结果见 [`PERFORMANCE.md`](PERFORMANCE.md) |
+| `pipeline_benchmark.cpp` | `pipeline_benchmark` | 端到端吞吐与延迟扫描：`--topology diamond|linear|inject`、`--baseline`、`--batch`、`--observe`、`--modules`、`--branches`、`--capacity`、`--payload`、`--payload-fresh`、`--sync-inputs`、`--workload`、`--cpus`、`--push-mode`、`--straggler-us`、`--pool-size`、`--queue-full`、`--timings`、`--duration`、`--repeat`；自己带 `main()`。结果见 [`PERFORMANCE.md`](PERFORMANCE.md) |
 | `LatencyHistogram.hpp` / `ProcessCpuTime.hpp` / `ProcessMemory.hpp` | — | 对数桶直方图（P50/P99）、CPU 时间与常驻内存采集 |
 | `BenchmarkNodes.hpp` / `BenchmarkTopology.hpp` | — | 基准用的模块与拓扑构造器（线性 / 扇出扇入 / 外部注入）；`WorkloadModule` 提供 delay / compute / memory 三种负载 |
 | `RawPipeline.hpp` | — | 裸线程 + 裸 `SpscQueue` 的同构基线，用于把框架成本拆成三层 |
@@ -62,7 +62,7 @@ cmake --build build --config Release --target pipeline_benchmark --parallel 16
 
 `--pool-size N` 走 v1.1 的线程池模型（`PipelineContext::WithThreadPoolSize`）：非融合模块固定绑定到 N 个共享线程，融合模块仍独占线程。池模式用精确配额背压（`OutputRoom()`），不丢帧，`cov` 应为 `ok`；代价是浅队列深链上吞吐下降，实测见 [`PERFORMANCE-desktop.md`](PERFORMANCE-desktop.md) §14。
 
-`--drop-policy none|newest` 选择输出边满时的行为：`none`（默认）阻塞等待，慢下游给上游施加背压；`newest` 丢掉这条消息并计数（`BackpressurePolicy::kDropNewest`），只在允许丢帧的流水线上有意义。策略是**全有或全无**：一条消息要么进所有输出边、要么一条都不进，否则 join 组会永远凑不齐。实测见 [`PERFORMANCE-desktop.md`](PERFORMANCE-desktop.md) §15：它买到的是活性，不是吞吐。
+`--queue-full block|drop` 选择输出队列满时的行为：`block`（默认）阻塞等待，慢下游给上游施加背压；`drop` 丢掉这条消息并计数（`QueueFullPolicy::kDrop`），只在允许丢帧的流水线上有意义。丢弃发生在模块的发送路径（`Dispatcher::Broadcast`），不是队列内部：队列里的旧消息一条都不会被赶走，**被拒收的是正要入队的新消息**。策略是**全有或全无**：一条消息要么进所有输出队列、要么一条都不进，否则 join 组会永远凑不齐。实测见 [`PERFORMANCE-desktop.md`](PERFORMANCE-desktop.md) §15：它买到的是活性，不是吞吐。
 
 `--workload none|delay|compute|memory` 给每个中间 stage 加负载：`--delay-us`（等待；Windows 上用高精度 waitable timer，因为系统的 `Sleep` 在进程跑几秒后会被合并到 15.6 ms tick，`sleep_for` 不再可信；这个维度用 ≥2 ms 档）、`--compute-iters`（sin/cos 串行链）、`--memory-bytes`（每消息两次半区 memcpy）。`work_param` 记录实际参数。
 

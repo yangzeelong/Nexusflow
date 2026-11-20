@@ -97,13 +97,13 @@ PipelineContext& PipelineContext::WithThreadPoolSize(std::size_t threadCount) {
     return *this;
 }
 
-PipelineContext& PipelineContext::WithBackpressurePolicy(BackpressurePolicy policy) {
-    m_backpressurePolicy.store(static_cast<int>(policy), std::memory_order_relaxed);
+PipelineContext& PipelineContext::WithQueueFullPolicy(QueueFullPolicy policy) {
+    m_queueFullPolicy.store(static_cast<int>(policy), std::memory_order_relaxed);
     return *this;
 }
 
-BackpressurePolicy PipelineContext::GetBackpressurePolicy() const {
-    return static_cast<BackpressurePolicy>(m_backpressurePolicy.load(std::memory_order_relaxed));
+QueueFullPolicy PipelineContext::GetQueueFullPolicy() const {
+    return static_cast<QueueFullPolicy>(m_queueFullPolicy.load(std::memory_order_relaxed));
 }
 
 std::size_t PipelineContext::GetThreadPoolSize() const {

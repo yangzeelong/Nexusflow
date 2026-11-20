@@ -9,9 +9,9 @@
 
 ### Added
 
-- 新增可选的背压策略 `BackpressurePolicy::kDropNewest`（`PipelineContext::WithBackpressurePolicy`）：
-  输出边满时丢弃整条消息而不是阻塞，丢弃数计入 `ModuleSnapshot::droppedTotal`；默认仍是 `kNone`。
-  基准侧新增 `--drop-policy none|newest`，`cov,` 行在 newest 下把策略丢弃记为预期结果。
+- 新增可选的队列满策略 `QueueFullPolicy::kDrop`（`PipelineContext::WithQueueFullPolicy`）：
+  输出队列满时丢弃整条消息而不是阻塞（拒收发生在模块发送路径，队列里的旧消息不会被驱逐），丢弃数计入 `ModuleSnapshot::droppedTotal`；默认仍是 `kBlock`。
+  基准侧新增 `--queue-full block|drop`，`cov,` 行在 drop 下把策略丢弃记为预期结果。
 
 ### Changed
 

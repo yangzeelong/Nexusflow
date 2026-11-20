@@ -97,8 +97,8 @@ struct Options {
     /// hosts every non-join module on a shared pool of this many threads.
     int poolSize = 0;
     /// What a module does when an output edge is full: `none` (block, the
-    /// framework default) or `newest` (drop the message, see BackpressurePolicy).
-    std::string dropPolicy = "none";
+    /// framework default) or `drop` (drop the message, see QueueFullPolicy).
+    std::string queueFullPolicy = "block";
     std::string logLevel = "warn";
 };
 
@@ -353,12 +353,12 @@ Options ParseOptions(int argc, char* argv[]) {
                 std::cerr << "--pool-size expects a non-negative number\n";
                 std::exit(1);
             }
-        } else if (TakeValue(arg, "--drop-policy", argc, argv, i, value)) {
-            if (value != "none" && value != "newest") {
-                std::cerr << "--drop-policy expects none or newest\n";
+        } else if (TakeValue(arg, "--queue-full", argc, argv, i, value)) {
+            if (value != "block" && value != "drop") {
+                std::cerr << "--queue-full expects block or drop\n";
                 std::exit(1);
             }
-            options.dropPolicy = value;
+            options.queueFullPolicy = value;
         } else if (arg == "--timings") {
             options.timings = true;
         } else if (arg == "--sync-inputs") {
@@ -371,7 +371,7 @@ Options ParseOptions(int argc, char* argv[]) {
                    "       [--modules N] [--branches N] [--capacity N] [--batch N] [--duration S] [--repeat R]\n"
                    "       [--payload none|1080p-rgb|1080p-yuv420|2k-rgb|2k-yuv420] [--payload-fresh]\n"
                    "       [--workload none|delay|compute|memory] [--delay-us N] [--compute-iters N] [--memory-bytes N]\n"
-                   "       [--cpus N] [--pool-size N] [--drop-policy none|newest] [--push-mode block|try]\n"
+                   "       [--cpus N] [--pool-size N] [--queue-full block|drop] [--push-mode block|try]\n"
                    "       [--straggler-us N] [--sync-inputs] [--timings]\n"
                    "       [--log-level trace|debug|info|warn|err|off] [--max-spread P] [--label TEXT]\n";
             std::exit(0);
@@ -723,9 +723,9 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
         built.pipeline->GetContext()->WithThreadPoolSize(static_cast<std::size_t>(options.poolSize));
     }
 
-    if (options.dropPolicy == "newest") {
+    if (options.queueFullPolicy == "drop") {
         // Modules read the policy in ModuleActor::Start(), so set it before Start().
-        built.pipeline->GetContext()->WithBackpressurePolicy(BackpressurePolicy::kDropNewest);
+        built.pipeline->GetContext()->WithQueueFullPolicy(QueueFullPolicy::kDrop);
     }
 
     if (options.timings) {
@@ -799,7 +799,7 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
     sample.attempts = injectionAttempts;
     sample.refused = injectionRefused;
     sample.coverage = CoverageOf(midRun, *built.pipeline, shape, options.syncInputs,
-                                 options.dropPolicy == "newest", delivered);
+                                 options.queueFullPolicy == "drop", delivered);
 
     built.pipeline->DeInit();
     return sample;
@@ -1022,8 +1022,8 @@ int main(int argc, char* argv[]) {
     if (options.timings) {
         std::cout << "module timings: on\n";
     }
-    if (options.dropPolicy != "none") {
-        std::cout << "backpressure: drop-newest on full output edges\n";
+    if (options.queueFullPolicy != "block") {
+        std::cout << "queue full policy: drop on full output queues\n";
     }
     if (options.poolSize > 0) {
         std::cout << "thread pool: " << options.poolSize << " threads for all non-join modules\n";

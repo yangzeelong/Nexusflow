@@ -1,5 +1,6 @@
 #include "ModuleActor.hpp"
 #include <nexusflow/PipelineContext.hpp>
+#include <nexusflow/QueueFullPolicy.hpp>
 #include "nexusflow/ErrorCode.hpp"
 #include <memory>
 
@@ -69,8 +70,8 @@ ErrorCode ModuleActor::Start() {
     // module; the dispatcher is the place where a blocked push would happen.
     if (m_dispatcher) {
         const auto context = m_module ? m_module->GetContext() : nullptr;
-        m_dispatcher->SetBackpressurePolicy(context ? context->GetBackpressurePolicy()
-                                                    : BackpressurePolicy::kNone);
+        m_dispatcher->SetQueueFullPolicy(context ? context->GetQueueFullPolicy()
+                                                : QueueFullPolicy::kBlock);
     }
     // Sharing a thread only works for a worker that returns after one unit of
     // work. A join worker waits for a whole group, so it keeps its own thread.

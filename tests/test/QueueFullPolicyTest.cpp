@@ -1,4 +1,4 @@
-#include <nexusflow/BackpressurePolicy.hpp>
+#include <nexusflow/QueueFullPolicy.hpp>
 #include <nexusflow/Config.hpp>
 #include <nexusflow/Message.hpp>
 #include <nexusflow/Module.hpp>
@@ -20,7 +20,7 @@ using namespace nexusflow;
 constexpr int kRunMs = 200;
 constexpr int kCapacity = 1;
 
-/// Emits one message per Process() call, as fast as the downstream edges accept.
+/// Emits one message per Process() call, as fast as the downstream queues accept.
 class TickingSource : public Module {
 public:
     explicit TickingSource(const std::string& name) : Module(name) {}
@@ -68,7 +68,7 @@ std::shared_ptr<Pipeline> BuildSlowPair(std::shared_ptr<TickingSource>* source, 
         .Build(kCapacity);
 }
 
-TEST(BackpressureDropTest, DefaultPolicyBlocksInsteadOfDropping) {
+TEST(QueueFullPolicyTest, DefaultPolicyBlocksInsteadOfDropping) {
     std::shared_ptr<TickingSource> source;
     std::shared_ptr<SlowSink> sink;
     auto pipeline = BuildSlowPair(&source, &sink);
@@ -83,12 +83,12 @@ TEST(BackpressureDropTest, DefaultPolicyBlocksInsteadOfDropping) {
     EXPECT_GT(sink->received.load(), 0u);
 }
 
-TEST(BackpressureDropTest, DropNewestCountsDropsAndKeepsProducing) {
+TEST(QueueFullPolicyTest, DropNewestCountsDropsAndKeepsProducing) {
     std::shared_ptr<TickingSource> source;
     std::shared_ptr<SlowSink> sink;
     auto pipeline = BuildSlowPair(&source, &sink);
     ASSERT_EQ(ErrorCode::SUCCESS, pipeline->Init());
-    pipeline->GetContext()->WithBackpressurePolicy(BackpressurePolicy::kDropNewest);
+    pipeline->GetContext()->WithQueueFullPolicy(QueueFullPolicy::kDrop);
     ASSERT_EQ(ErrorCode::SUCCESS, pipeline->Start());
     std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
     ASSERT_EQ(ErrorCode::SUCCESS, pipeline->Stop());

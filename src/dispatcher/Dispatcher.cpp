@@ -11,7 +11,7 @@ Dispatcher::Dispatcher(const ViewPtr<Config>& configView) { m_configView = confi
 Dispatcher::~Dispatcher() = default;
 
 void Dispatcher::Broadcast(const Message& message) {
-    if (m_policy == BackpressurePolicy::kDropNewest && !OutputsHaveRoom()) {
+    if (m_policy == QueueFullPolicy::kDrop && !OutputsHaveRoom()) {
         m_policyDroppedCount.fetch_add(1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
         return;
@@ -28,7 +28,7 @@ void Dispatcher::Broadcast(const Message& message) {
 }
 
 void Dispatcher::Broadcast(Message&& message) {
-    if (m_policy == BackpressurePolicy::kDropNewest && !OutputsHaveRoom()) {
+    if (m_policy == QueueFullPolicy::kDrop && !OutputsHaveRoom()) {
         m_policyDroppedCount.fetch_add(1, std::memory_order_relaxed);
         std::atomic_thread_fence(std::memory_order_release);
         return;

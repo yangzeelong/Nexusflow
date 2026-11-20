@@ -1,7 +1,7 @@
 #ifndef NEXUSFLOW_PIPELINE_CONTEXT_HPP
 #define NEXUSFLOW_PIPELINE_CONTEXT_HPP
 
-#include <nexusflow/BackpressurePolicy.hpp>
+#include <nexusflow/QueueFullPolicy.hpp>
 #include <nexusflow/Logging.hpp>
 #include <nexusflow/MetricsCollector.hpp>
 
@@ -161,9 +161,9 @@ public:
     /// 0 means one thread per module.
     std::size_t GetThreadPoolSize() const;
 
-    /** Selects what modules do when an output edge is full (default kNone). */
-    PipelineContext& WithBackpressurePolicy(BackpressurePolicy policy);
-    BackpressurePolicy GetBackpressurePolicy() const;
+    /** Selects what modules do when an output queue is full (default kBlock). */
+    PipelineContext& WithQueueFullPolicy(QueueFullPolicy policy);
+    QueueFullPolicy GetQueueFullPolicy() const;
 
 private:
     std::string m_name;
@@ -186,7 +186,7 @@ private:
     /// 0 means one thread per module; see WithThreadPoolSize().
     std::atomic<std::size_t> m_threadPoolSize{0};
     /// Stored as int because every trivially copyable enum works that way.
-    std::atomic<int> m_backpressurePolicy{static_cast<int>(BackpressurePolicy::kNone)};
+    std::atomic<int> m_queueFullPolicy{static_cast<int>(QueueFullPolicy::kBlock)};
 };
 
 } // namespace nexusflow
