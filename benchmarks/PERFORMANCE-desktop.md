@@ -514,3 +514,44 @@ perf record -e cpu-clock -F 1999 -g --call-graph fp -o p0.data -- \
   ./build-perf/benchmarks/pipeline_benchmark --topology linear --modules 4 --capacity 16 --duration 5
 perf script -i p0.data > p0.txt
 ```
+
+### 16.8 又试了两条，都没留住
+
+以后再有"热路径上还有钟"的直觉，先看这一节。
+
+**第一条：`waitAndPopFor()` 的 deadline 读钟时机。** 原来的代码在自旋**之前**就
+`const auto deadline = steady_clock::now() + timeout;`，即使自旋 20 µs 内就拿到了消息，
+这次读钟也白付。改成自旋失败、确定要停车时才读，语义上只多一件事：一旦真的停车，
+最多多等一个自旋预算（`kSpinBudgetMicros = 20` µs）。
+
+| 配置（5 s × 3 中位） | Windows 改前 | 改后 | 变化 | WSL2 改前 | 改后 | 变化 |
+| --- | --- | --- | --- | --- | --- | --- |
+| L4cap16 p0 | 3.524 M | 3.464 M | −1.7% | 3.676 M | 3.605 M | −2.0% |
+| L4cap16 p4 | 2.241 M | 2.269 M | +1.2% | 3.355 M | 3.273 M | −2.4% |
+| L16cap8 p0 | 2.463 M | 2.415 M | −2.0% | 1.475 M | 1.428 M | −3.2% |
+| L16cap8 p4 | 1.104 M | 1.091 M | −1.1% | 1.896 M | 1.875 M | −1.1% |
+
+两个平台、四个配置，符号在零附近抖，没有一处收益超过本机的重复误差。
+
+**第二条：`PullBatchMessage()` 的 Phase 2 每轮读钟。** 那里的
+`steady_clock::now()` 只是判断 batch timeout（默认 100 ms），却跑在"队列恰好空一下"
+的每一轮上。改成每 4 轮采样一次，最坏多等 4 个 1 ms 的停车。
+
+| 配置（5 s × 3 中位） | Windows 改前 | 改后 | 变化 | WSL2 改前 | 改后 | 变化 |
+| --- | --- | --- | --- | --- | --- | --- |
+| L4cap16 p0 | 3.420 M | 3.473 M | +1.5% | 3.426 M | 3.482 M | +1.6% |
+| L4cap16 p4 | 2.225 M | 2.080 M | −6.5% | 3.211 M | 2.899 M | −9.7% |
+| L16cap8 p0 | 2.146 M | 1.860 M | −13.3% | 0.33 M（不稳） | 1.50 M | — |
+| L16cap8 p4 | 1.283 M | 1.258 M | −1.9% | 1.654 M | 1.829 M | +10.6% |
+
+这一轮里 L16cap8 在 WSL2 上的基线自己就散成 0.33–1.48 M（16 模块在 WSL 上历来不稳，
+§14.3 已记过），Windows 的 −13.3% 与 WSL2 的 +10.6% 方向相反，只能判**噪声**。
+
+**为什么两条都没换来吞吐：** 改后再采一次 profile（WSL2，p0，5 s，7.8 万样本）：
+`clock_gettime` 合计 8.04% → 7.53%，而 `PullBatchMessage` 那一档仍是 2.55%——因为真正的
+读钟点是 `waitAndPopFor()` 的 deadline，它属于第一条、已被回退。剩下的钟里约 3 个百分点
+是 **harness 自己**：`SourceModule` 每条消息写 `creationTime`、`SinkModule` 每条消息读钟
+算时延，都挂在 `Module::ProcessTimed` 的 `Process` 之下。要让这部分归零，只能把"测时延"
+本身变成可选（`--no-latency`），那是测量成本，不是框架成本。
+
+两条改动都已回退；真正留下的是 16.4 的那一处（关掉计时就不读钟）。
