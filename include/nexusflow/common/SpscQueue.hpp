@@ -135,6 +135,13 @@ public:
         if (m_producerWaiting.load(std::memory_order_relaxed) && m_shutdown.load(std::memory_order_relaxed)) {
             return false;
         }
+        // Local edge: the consumer is this very thread, so there is nobody to
+        // wake and nobody to wait for. A full local queue is a caller bug (the
+        // pool checks the room first); report it as a refused push rather than
+        // parking a thread whose consumer can never run.
+        if (m_localMode) {
+            return PutIfSpace(item);
+        }
         if (PutIfSpace(item)) {
             WakeConsumer();
             return true;
@@ -186,6 +193,17 @@ public:
     }
 
     /**
+     * @brief Marks both ends as running on the same thread (pooled modules).
+     * @details Only the pool may call this, before any worker thread starts, and
+     * only for an edge whose producer and consumer it is about to place on one
+     * slot. A same-thread edge needs no publication barrier and no wake-up: the
+     * seq_cst stores in PutIfSpace()/PopIfAvailable() cost a locked instruction
+     * each on x86, which was ¾? 21% of the pooled profile. Must never be enabled
+     * for an edge that can be touched by two threads.
+     */
+    void SetLocalMode(bool enabled) { m_localMode = enabled; }
+
+    /**
      * @brief Tries to push an item, waiting up to the given timeout.
      * @return false when the queue stayed full or has been shut down.
      */
@@ -199,6 +217,13 @@ public:
         }
         if (m_producerWaiting.load(std::memory_order_relaxed) && m_shutdown.load(std::memory_order_relaxed)) {
             return false;
+        }
+        // Local edge: the consumer is this very thread, so there is nobody to
+        // wake and nobody to wait for. A full local queue is a caller bug (the
+        // pool checks the room first); report it as a refused push rather than
+        // parking a thread whose consumer can never run.
+        if (m_localMode) {
+            return PutIfSpace(item);
         }
         if (PutIfSpace(item)) {
             WakeConsumer();
@@ -396,7 +421,9 @@ public:
         if (!PopIfAvailable(itemRef)) {
             return false;
         }
-        WakeProducer();
+        if (!m_localMode) {
+            WakeProducer();
+        }
         return true;
     }
 
@@ -792,7 +819,7 @@ private:
         // StoreLoad barrier before WakeConsumer() reads the waiter flag (the
         // index line is already owned here, so the locked store is cheap), see
         // the class comment.
-        m_tail.store(tail + 1, std::memory_order_seq_cst);
+        m_tail.store(tail + 1, m_localMode ? std::memory_order_relaxed : std::memory_order_seq_cst);
         if (size + 1 > m_highWaterMark.load(std::memory_order_relaxed)) {
             m_highWaterMark.store(size + 1, std::memory_order_relaxed);
         }
@@ -814,7 +841,7 @@ private:
         // The slot is free again: publish the new head so the producer may reuse
         // it. seq_cst for the same reason as the tail in PutIfSpace(): the store
         // is also the StoreLoad barrier before WakeProducer() reads its flag.
-        m_head.store(head + 1, std::memory_order_seq_cst);
+        m_head.store(head + 1, m_localMode ? std::memory_order_relaxed : std::memory_order_seq_cst);
         return true;
     }
 
@@ -852,6 +879,9 @@ private:
     // Producer-owned hot line: tail moves on every push, the high-water mark is
     // only ever written by the producer (read by observers via GetStats()).
     std::atomic<std::size_t> m_tail{0};
+
+    /// Set before any worker thread starts; read on both hot paths.
+    bool m_localMode = false;
     std::atomic<std::size_t> m_highWaterMark{0};
     char m_producerLine[kCacheLineSize - 2 * sizeof(std::atomic<std::size_t>)];
 

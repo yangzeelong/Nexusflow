@@ -1,6 +1,7 @@
 #include "core/ThreadPool.hpp"
 
 #include <chrono>
+#include <unordered_map>
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -61,6 +62,27 @@ void ThreadPool::Start() {
         m_workers[slot].push_back(m_registered[i]);
     }
     m_registered.clear();
+    // An edge whose producer and consumer live on the same slot never crosses a
+    // thread, so its queue can drop the publication barriers: plain stores are
+    // enough when the only reader is the thread that wrote them.
+    std::unordered_map<const MessageQueue*, std::size_t> consumerSlot;
+    for (std::size_t slot = 0; slot < m_threadCount; ++slot) {
+        for (auto& worker : m_workers[slot]) {
+            for (auto& queue : worker->InputQueues()) {
+                consumerSlot[queue.operator->()] = slot;
+            }
+        }
+    }
+    for (std::size_t slot = 0; slot < m_threadCount; ++slot) {
+        for (auto& worker : m_workers[slot]) {
+            for (auto& queue : worker->OutputQueues()) {
+                const auto it = consumerSlot.find(queue.operator->());
+                if (it != consumerSlot.end() && it->second == slot) {
+                    queue->SetLocalMode(true);
+                }
+            }
+        }
+    }
     m_stop.store(false, std::memory_order_relaxed);
     for (std::size_t i = 0; i < m_threadCount; ++i) {
         m_threads.emplace_back([this, i]() { Loop(i); });
@@ -110,7 +132,7 @@ void ThreadPool::Loop(std::size_t index) {
                 didWork = true;
                 m_turns.fetch_add(1, std::memory_order_relaxed);
             }
-            if (!worker->OutputsHaveRoom()) {
+            if (worker->BlockedOnOutputs()) {
                 blocked = true;
             }
         }
