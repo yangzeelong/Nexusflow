@@ -44,8 +44,11 @@ public:
     /// plus whatever the worker itself dropped (e.g. join timeouts).
     std::uint64_t DroppedCount() const {
         const std::uint64_t dispatcherDrops = m_dispatcher ? m_dispatcher->DroppedCount() : 0;
+        // Work discarded by the drop policy never reached a queue, but it is
+        // lost work all the same and belongs in the same total.
+        const std::uint64_t policyDrops = m_dispatcher ? m_dispatcher->PolicyDroppedCount() : 0;
         const std::uint64_t workerDrops = m_worker ? m_worker->DroppedCount() : 0;
-        return dispatcherDrops + workerDrops;
+        return dispatcherDrops + policyDrops + workerDrops;
     }
 
     /// Subset of DroppedCount() that expired in the join group instead of

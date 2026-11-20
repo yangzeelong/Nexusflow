@@ -11,6 +11,11 @@ Dispatcher::Dispatcher(const ViewPtr<Config>& configView) { m_configView = confi
 Dispatcher::~Dispatcher() = default;
 
 void Dispatcher::Broadcast(const Message& message) {
+    if (m_policy == BackpressurePolicy::kDropNewest && !OutputsHaveRoom()) {
+        m_policyDroppedCount.fetch_add(1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        return;
+    }
     for (auto& pair : m_subscriberMap) {
         auto& subscriber = pair.second;
         // Apply backpressure instead of silently dropping frames when a
@@ -23,6 +28,11 @@ void Dispatcher::Broadcast(const Message& message) {
 }
 
 void Dispatcher::Broadcast(Message&& message) {
+    if (m_policy == BackpressurePolicy::kDropNewest && !OutputsHaveRoom()) {
+        m_policyDroppedCount.fetch_add(1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        return;
+    }
     auto first = m_subscriberMap.begin();
     if (first == m_subscriberMap.end()) {
         return;

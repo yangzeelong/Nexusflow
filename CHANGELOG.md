@@ -7,6 +7,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增可选的背压策略 `BackpressurePolicy::kDropNewest`（`PipelineContext::WithBackpressurePolicy`）：
+  输出边满时丢弃整条消息而不是阻塞，丢弃数计入 `ModuleSnapshot::droppedTotal`；默认仍是 `kNone`。
+  基准侧新增 `--drop-policy none|newest`，`cov,` 行在 newest 下把策略丢弃记为预期结果。
+
 ### Changed
 
 - **breaking（未发版）**：框架里“汇合”这套概念统一改名为 join，与公开头文件注释和示例目录一致：

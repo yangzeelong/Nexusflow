@@ -96,6 +96,9 @@ struct Options {
     /// 0 = one thread per module (the framework default). Greater than zero
     /// hosts every non-join module on a shared pool of this many threads.
     int poolSize = 0;
+    /// What a module does when an output edge is full: `none` (block, the
+    /// framework default) or `newest` (drop the message, see BackpressurePolicy).
+    std::string dropPolicy = "none";
     std::string logLevel = "warn";
 };
 
@@ -350,6 +353,12 @@ Options ParseOptions(int argc, char* argv[]) {
                 std::cerr << "--pool-size expects a non-negative number\n";
                 std::exit(1);
             }
+        } else if (TakeValue(arg, "--drop-policy", argc, argv, i, value)) {
+            if (value != "none" && value != "newest") {
+                std::cerr << "--drop-policy expects none or newest\n";
+                std::exit(1);
+            }
+            options.dropPolicy = value;
         } else if (arg == "--timings") {
             options.timings = true;
         } else if (arg == "--sync-inputs") {
@@ -362,7 +371,8 @@ Options ParseOptions(int argc, char* argv[]) {
                    "       [--modules N] [--branches N] [--capacity N] [--batch N] [--duration S] [--repeat R]\n"
                    "       [--payload none|1080p-rgb|1080p-yuv420|2k-rgb|2k-yuv420] [--payload-fresh]\n"
                    "       [--workload none|delay|compute|memory] [--delay-us N] [--compute-iters N] [--memory-bytes N]\n"
-                   "       [--cpus N] [--pool-size N] [--push-mode block|try] [--straggler-us N] [--sync-inputs] [--timings]\n"
+                   "       [--cpus N] [--pool-size N] [--drop-policy none|newest] [--push-mode block|try]\n"
+                   "       [--straggler-us N] [--sync-inputs] [--timings]\n"
                    "       [--log-level trace|debug|info|warn|err|off] [--max-spread P] [--label TEXT]\n";
             std::exit(0);
         } else {
@@ -479,7 +489,7 @@ Stat Summarize(std::vector<double> values) {
  * handed one joined message per branch group.
  */
 Coverage CoverageOf(const nexusflow::PipelineSnapshot& midRun, const nexusflow::Pipeline& pipeline,
-                    const TopologyShape& shape, bool syncInputs, std::uint64_t delivered) {
+                    const TopologyShape& shape, bool syncInputs, bool dropsAllowed, std::uint64_t delivered) {
     const nexusflow::PipelineSnapshot final = pipeline.GetSnapshot();
     Coverage coverage;
 
@@ -522,7 +532,11 @@ Coverage CoverageOf(const nexusflow::PipelineSnapshot& midRun, const nexusflow::
         const std::uint64_t extra = coverage.sinkPopped > expected ? coverage.sinkPopped - expected : 0;
         sinkMatches = coverage.sinkPopped >= delivered && extra <= coverage.dropped;
     }
-    coverage.ok = coverage.midDropped == 0 && coverage.midFailed == 0 && coverage.midJoinExpired == 0 &&
+    // A lossy policy makes drops a normal outcome rather than a leak: they are
+    // still counted and reported on the `cov,` line, they just no longer fail the
+    // run. Everything else must hold even then.
+    const bool nothingLost = dropsAllowed || coverage.midDropped == 0;
+    coverage.ok = nothingLost && coverage.midFailed == 0 && coverage.midJoinExpired == 0 &&
                   coverage.pushed == coverage.popped + coverage.discarded + coverage.residual && sinkMatches;
     return coverage;
 }
@@ -709,6 +723,11 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
         built.pipeline->GetContext()->WithThreadPoolSize(static_cast<std::size_t>(options.poolSize));
     }
 
+    if (options.dropPolicy == "newest") {
+        // Modules read the policy in ModuleActor::Start(), so set it before Start().
+        built.pipeline->GetContext()->WithBackpressurePolicy(BackpressurePolicy::kDropNewest);
+    }
+
     if (options.timings) {
         // Before Start(): every worker reads the switch on its first message.
         built.pipeline->GetContext()->EnableModuleTimings();
@@ -779,7 +798,8 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
     }
     sample.attempts = injectionAttempts;
     sample.refused = injectionRefused;
-    sample.coverage = CoverageOf(midRun, *built.pipeline, shape, options.syncInputs, delivered);
+    sample.coverage = CoverageOf(midRun, *built.pipeline, shape, options.syncInputs,
+                                 options.dropPolicy == "newest", delivered);
 
     built.pipeline->DeInit();
     return sample;
@@ -1001,6 +1021,9 @@ int main(int argc, char* argv[]) {
     }
     if (options.timings) {
         std::cout << "module timings: on\n";
+    }
+    if (options.dropPolicy != "none") {
+        std::cout << "backpressure: drop-newest on full output edges\n";
     }
     if (options.poolSize > 0) {
         std::cout << "thread pool: " << options.poolSize << " threads for all non-join modules\n";

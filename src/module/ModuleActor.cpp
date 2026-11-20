@@ -1,4 +1,5 @@
 #include "ModuleActor.hpp"
+#include <nexusflow/PipelineContext.hpp>
 #include "nexusflow/ErrorCode.hpp"
 #include <memory>
 
@@ -64,6 +65,13 @@ ErrorCode ModuleActor::Start() {
     }
     // A drain from a previous Stop() must not leak into this run.
     m_worker->ClearDrain();
+    // The drop policy lives on the pipeline context so one switch covers every
+    // module; the dispatcher is the place where a blocked push would happen.
+    if (m_dispatcher) {
+        const auto context = m_module ? m_module->GetContext() : nullptr;
+        m_dispatcher->SetBackpressurePolicy(context ? context->GetBackpressurePolicy()
+                                                    : BackpressurePolicy::kNone);
+    }
     // Sharing a thread only works for a worker that returns after one unit of
     // work. A join worker waits for a whole group, so it keeps its own thread.
     if (m_pool && m_worker && !m_worker->HasJoinInputs()) {
