@@ -3,6 +3,7 @@
 #include "base/Graph.hpp"
 #include "base/GraphUtils.hpp"
 #include <nexusflow/common/ViewPtr.hpp>
+#include "core/ThreadPool.hpp"
 #include "core/Worker.hpp"
 #include "dispatcher/Dispatcher.hpp"
 #include "nexusflow/Logging.hpp"
@@ -259,8 +260,17 @@ ErrorCode Pipeline::Start() {
         actorNode->ResetStopTiming();
     }
 
+    // An opt-in shared pool: 0 keeps the historical one-thread-per-module model.
+    const std::size_t poolThreads = m_pImpl->context ? m_pImpl->context->GetThreadPoolSize() : 0;
+    if (poolThreads > 0) {
+        m_pImpl->threadPool = std::make_shared<core::ThreadPool>(poolThreads);
+    }
+
     std::vector<std::shared_ptr<ActorNode>> startedActors;
     for (auto& actorNode : m_pImpl->actorOrderedNodes) {
+        if (m_pImpl->threadPool) {
+            actorNode->AttachThreadPool(m_pImpl->threadPool.get());
+        }
         const ErrorCode errCode = actorNode->Start();
         if (errCode != ErrorCode::SUCCESS) {
             LOG_ERROR("Start worker failed, actorName={}", actorNode->GetModuleName());
@@ -268,10 +278,19 @@ ErrorCode Pipeline::Start() {
             for (auto it = startedActors.rbegin(); it != startedActors.rend(); ++it) {
                 (*it)->Stop();
             }
+            if (m_pImpl->threadPool) {
+                m_pImpl->threadPool->StopAndJoin();
+                m_pImpl->threadPool.reset();
+            }
             return errCode;
         }
         startedActors.push_back(actorNode);
         LOG_DEBUG("Start module success, actorName={}", actorNode->GetModuleName());
+    }
+    // Every worker is registered and prepared, so the shared threads can
+    // start stepping them.
+    if (m_pImpl->threadPool) {
+        m_pImpl->threadPool->Start();
     }
     m_pImpl->started = true;
     LOG_DEBUG("Pipeline started successfully.");
@@ -418,6 +437,18 @@ ErrorCode Pipeline::Stop() {
         actor->ShutdownOutputs();
     }
 
+    // The shared threads have nothing left to step: every worker already
+    // published its exit, so joining them here is just teardown.
+    if (m_pImpl->threadPool) {
+        m_pImpl->threadPool->StopAndJoin();
+        m_pImpl->threadPool.reset();
+        for (auto& actorNode : m_pImpl->actorOrderedNodes) {
+            if (actorNode) {
+                actorNode->AttachThreadPool(nullptr);
+            }
+        }
+    }
+
     // Nothing can push any more, so every edge can be closed. A stopped pipeline
     // is reusable: Start() with a closed edge used to fail in the middle of its
     // worker rollback, leaving some workers running.
@@ -482,6 +513,16 @@ ErrorCode Pipeline::Cancel() {
             const auto joinStart = std::chrono::steady_clock::now();
             actorNode->Stop();
             actorNode->RecordStopTiming(0, ElapsedMs(joinStart, std::chrono::steady_clock::now()));
+        }
+    }
+
+    if (m_pImpl->threadPool) {
+        m_pImpl->threadPool->StopAndJoin();
+        m_pImpl->threadPool.reset();
+        for (auto& actorNode : m_pImpl->actorOrderedNodes) {
+            if (actorNode) {
+                actorNode->AttachThreadPool(nullptr);
+            }
         }
     }
 

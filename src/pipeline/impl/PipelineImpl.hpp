@@ -30,6 +30,10 @@ public:
     std::shared_ptr<PipelineContext> context;
     std::vector<MessageQueueUPtr> queues;
 
+    // Set for a run that opted into a shared pool (see
+    // PipelineContext::WithThreadPoolSize()); null keeps one thread per module.
+    std::shared_ptr<core::ThreadPool> threadPool;
+
     // Edge queue configuration and names, used by Pipeline::GetSnapshot().
     // Required: the builder (Build(capacity)) or the yaml config states it
     // before Init() runs, so 0 here means a caller skipped InitWithGraph().

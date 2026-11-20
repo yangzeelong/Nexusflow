@@ -13,6 +13,10 @@
 
 namespace nexusflow { namespace core {
 
+/// Messages (or batches) one StepOnce() turn may move before it hands the
+/// slot back. Bounded so a busy module cannot starve its slot mates.
+constexpr int kStepTurns = 16;
+
 namespace {
 
 // A profiled loop iteration measures through a timer handle interned once, so
@@ -461,6 +465,144 @@ void Worker::RunFusion() {
         // only drop or only forward, so readers see every recorded number.
         PublishCounters();
     }
+}
+
+std::size_t Worker::OutputRoom() const {
+    std::size_t room = std::numeric_limits<std::size_t>::max();
+    for (const auto& queue : m_outputQueues) {
+        if (!queue) {
+            continue;
+        }
+        const int edgeCapacity = queue->capacity();
+        if (edgeCapacity <= 0) {
+            // Unbounded edge: it never back-pressures.
+            continue;
+        }
+        const std::size_t size = queue->getSize();
+        const std::size_t available = size >= static_cast<std::size_t>(edgeCapacity)
+                                          ? 0
+                                          : static_cast<std::size_t>(edgeCapacity) - size;
+        if (available < room) {
+            room = available;
+        }
+    }
+    return room;
+}
+
+bool Worker::OutputsHaveRoom() const {
+    for (const auto& queue : m_outputQueues) {
+        if (!queue) {
+            continue;
+        }
+        const int edgeCapacity = queue->capacity();
+        if (edgeCapacity > 0 && queue->getSize() >= static_cast<std::size_t>(edgeCapacity)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool Worker::StepOnce() {
+    if (m_stopFlag.load(std::memory_order_relaxed)) {
+        MarkExited();
+        return false;
+    }
+    if (!m_modulePtr) {
+        return false;
+    }
+    // A fusion worker parks on inputs that may never arrive, so it never runs
+    // on a shared thread; ModuleActor keeps it on its own.
+    if (m_syncInputs) {
+        return false;
+    }
+    // One turn may move several messages: a shared slot pays for the scheduling
+    // round and the counter publication once, so moving just one message per
+    // turn costs more than it buys in fairness. The turn count is bounded so a
+    // busy module still hands its slot back promptly.
+    bool didWork = false;
+    for (int turn = 0; turn < kStepTurns; ++turn) {
+        // Cooperative backpressure: a pooled worker never blocks. When any edge
+        // is full it stops producing, and the slot goes on to step the other
+        // modules it hosts, including the consumer that must drain that edge.
+        const std::size_t room = OutputRoom();
+        if (room == 0) {
+            break;
+        }
+        if (m_inputQueueMap.empty()) {
+            Message emptyMessage;
+            bool produced = false;
+            try {
+                produced = m_modulePtr->ProcessTimed(emptyMessage);
+                if (produced) {
+                    AddProcessed(1);
+                }
+            } catch (const std::exception& e) {
+                LOG_ERROR("Module '{}' threw while processing: {}", m_modulePtr->GetModuleName(), e.what());
+                AddFailed();
+                break;
+            } catch (...) {
+                LOG_ERROR("Module '{}' threw an unknown exception while processing.", m_modulePtr->GetModuleName());
+                AddFailed();
+                break;
+            }
+            if (!produced) {
+                break;
+            }
+            didWork = true;
+            continue;
+        }
+        // Take no more than the tightest output edge can still accept: the
+        // room check above is exact because this worker is the only producer
+        // of every output edge, so a full batch can never overflow a queue and
+        // the pooled path never has to drop.
+        const std::size_t take = m_maxBatchSize < room ? m_maxBatchSize : room;
+        std::vector<Message> batchMessage = PullBatchNow(take);
+        if (batchMessage.empty()) {
+            break;
+        }
+        try {
+            m_modulePtr->ProcessBatch(batchMessage);
+            AddProcessed(batchMessage.size());
+        } catch (const std::exception& e) {
+            LOG_ERROR("Module '{}' threw while processing a batch: {}", m_modulePtr->GetModuleName(), e.what());
+            AddFailed();
+            break;
+        } catch (...) {
+            LOG_ERROR("Module '{}' threw an unknown exception while processing a batch.", m_modulePtr->GetModuleName());
+            AddFailed();
+            break;
+        }
+        didWork = true;
+    }
+    if (didWork) {
+        PublishCounters();
+    }
+    return didWork;
+}
+
+void Worker::MarkExited() {
+    std::lock_guard<std::mutex> lock(m_loopMutex);
+    m_loopExited = true;
+}
+
+std::vector<Message> Worker::PullBatchNow(std::size_t maxBatchSize) {
+    std::vector<Message> batchMessage;
+    batchMessage.reserve(maxBatchSize);
+    for (auto& item : m_inputQueueMap) {
+        auto& queue = item.second;
+        while (batchMessage.size() < maxBatchSize) {
+            Message message;
+            if (queue->tryPop(message)) {
+                batchMessage.push_back(std::move(message));
+            } else {
+                break;
+            }
+        }
+        if (batchMessage.size() >= maxBatchSize) {
+            break;
+        }
+    }
+    return batchMessage;
 }
 
 std::vector<Message> Worker::PullBatchMessage(size_t maxBatchSize, std::chrono::milliseconds batchTimeout) {

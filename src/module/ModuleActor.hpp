@@ -1,6 +1,7 @@
 #ifndef NEXUSFLOW_MODULE_ACTOR_HPP
 #define NEXUSFLOW_MODULE_ACTOR_HPP
 
+#include "core/ThreadPool.hpp"
 #include "core/Worker.hpp"
 #include "dispatcher/Dispatcher.hpp"
 #include "nexusflow/ErrorCode.hpp"
@@ -67,6 +68,15 @@ public:
     ErrorCode Stop();
 
     /**
+     * @brief Hands the next Start() to a shared pool instead of a private
+     *        thread. Pass nullptr to go back to one thread per module.
+     * @details The pool must already be attached when Start() runs: it is
+     * told about the worker there, and it is started by the pipeline once
+     * every actor has been started. Fusion workers ignore the pool.
+     */
+    void AttachThreadPool(core::ThreadPool* pool) { m_pool = pool; }
+
+    /**
      * @brief Tells the worker loop to return, without joining it yet.
      */
     void RequestStop() {
@@ -96,7 +106,7 @@ public:
     /**
      * @brief Whether this actor's worker was started (and is therefore joinable).
      */
-    bool IsStarted() const { return m_workThread.joinable(); }
+    bool IsStarted() const { return m_workThread.joinable() || m_poolStarted; }
 
     /**
      * @brief Whether the worker of a previous run is still executing.
@@ -194,6 +204,10 @@ private:
     std::unique_ptr<Config> m_config;
 
     std::thread m_workThread;
+    /// Non-null while this actor's worker is hosted by a shared pool.
+    core::ThreadPool* m_pool = nullptr;
+    /// True between Start() and Stop() while the worker runs on that pool.
+    bool m_poolStarted = false;
 
     std::atomic<std::uint64_t> m_lastDrainInputsMs{0};
     std::atomic<std::uint64_t> m_lastExitLoopMs{0};
