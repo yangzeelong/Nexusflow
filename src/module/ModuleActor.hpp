@@ -41,16 +41,16 @@ public:
     std::uint64_t ProcessedCount() const { return m_worker ? m_worker->ProcessedCount() : 0; }
 
     /// Messages this module lost: its dispatcher could not push them downstream
-    /// plus whatever the worker itself dropped (e.g. fusion timeouts).
+    /// plus whatever the worker itself dropped (e.g. join timeouts).
     std::uint64_t DroppedCount() const {
         const std::uint64_t dispatcherDrops = m_dispatcher ? m_dispatcher->DroppedCount() : 0;
         const std::uint64_t workerDrops = m_worker ? m_worker->DroppedCount() : 0;
         return dispatcherDrops + workerDrops;
     }
 
-    /// Subset of DroppedCount() that expired in the fusion group instead of
+    /// Subset of DroppedCount() that expired in the join group instead of
     /// being refused by a queue.
-    std::uint64_t FusionExpiredCount() const { return m_worker ? m_worker->FusionExpiredCount() : 0; }
+    std::uint64_t JoinExpiredCount() const { return m_worker ? m_worker->JoinExpiredCount() : 0; }
 
     /// Invocations that threw. processed + dropped + failed accounts for
     /// everything the module was handed.
@@ -72,7 +72,7 @@ public:
      *        thread. Pass nullptr to go back to one thread per module.
      * @details The pool must already be attached when Start() runs: it is
      * told about the worker there, and it is started by the pipeline once
-     * every actor has been started. Fusion workers ignore the pool.
+     * every actor has been started. Join workers ignore the pool.
      */
     void AttachThreadPool(core::ThreadPool* pool) { m_pool = pool; }
 

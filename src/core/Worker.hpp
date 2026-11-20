@@ -103,7 +103,7 @@ public:
      * gets exactly one invocation. Returns false when there was nothing to
      * do, so the caller can move on to the next module it hosts.
      *
-     * Fusion workers are not stepped: RunFusion() waits for a whole group
+     * Join workers are not stepped: RunJoin() waits for a whole group
      * and keeps a dedicated thread. StepOnce() reports false for them.
      */
     bool StepOnce();
@@ -116,9 +116,9 @@ public:
     /// SIZE_MAX when every output edge is unbounded (or there is none).
     std::size_t OutputRoom() const;
 
-    /// True when this worker fuses several inputs into one message, i.e. when
+    /// True when this worker joins several inputs into one message, i.e. when
     /// it cannot share a thread with other modules.
-    bool HasFusionInputs() const { return m_syncInputs; }
+    bool HasJoinInputs() const { return m_syncInputs; }
 
     /// Marks the loop of the current run as finished without running it.
     /// Used by ModuleActor when a pool never started (a failed Start()
@@ -144,14 +144,14 @@ public:
     }
 
     /**
-     * @brief Tells a fusion worker that the pipeline is closing.
-     * @details RunFusion() waits for one message id to show up on every input.
+     * @brief Tells a join worker that the pipeline is closing.
+     * @details RunJoin() waits for one message id to show up on every input.
      * When the upstream stages are already gone, that wait can only time out, so
      * the drain asks the worker to flush what it has instead of waiting.
      */
     void RequestDrain() { m_drainRequested.store(true); }
 
-    /// Re-arms normal fusion behaviour when the pipeline is started again.
+    /// Re-arms normal join behaviour when the pipeline is started again.
     void ClearDrain() { m_drainRequested.store(false); }
 
     /// Whether the worker loop of the current run has not returned yet.
@@ -215,7 +215,7 @@ public:
 
     /**
      * @brief Messages this worker dropped: outputs a module could not hand to a
-     *        downstream queue, plus partial fused messages that hit the fusion
+     *        downstream queue, plus partial joined messages that hit the join
      *        timeout. processed + dropped accounts for everything the module saw.
      */
     std::uint64_t DroppedCount() const {
@@ -238,13 +238,13 @@ public:
     }
 
     /**
-     * @brief Partial fused messages this worker dropped after the fusion timeout.
+     * @brief Partial joined messages this worker dropped after the join timeout.
      * @details A subset of DroppedCount(), broken out because it is a different
      * failure: the inputs arrived, one of them just arrived too late.
      */
-    std::uint64_t FusionExpiredCount() const {
+    std::uint64_t JoinExpiredCount() const {
         ObserveCounters();
-        return m_fusionExpiredCount.load(std::memory_order_relaxed);
+        return m_joinExpiredCount.load(std::memory_order_relaxed);
     }
 
     /**
@@ -287,7 +287,7 @@ public:
 
 private:
     /**
-     * @brief Reads the per-module tuning knobs (batch size/timeout, fusion timeout,
+     * @brief Reads the per-module tuning knobs (batch size/timeout, join timeout,
      *        source idle time, sync-inputs flag) and pre-builds the timer labels.
      *        Called once from the constructor so the hot loop does no config lookups.
      *        All values fall back to the historical defaults when absent.
@@ -298,7 +298,7 @@ private:
 
     void LoadConfig();
 
-    void RunFusion();
+    void RunJoin();
 
     /**
      * @brief Efficiently pulls a batch of messages from the input queue.
@@ -333,7 +333,7 @@ private:
     std::unordered_map<std::string, ViewPtr<MessageQueue>> m_inputQueueMap;
 
     std::atomic<bool> m_stopFlag{false};
-    /// Fusion only: set by the shutdown drain, see RequestDrain().
+    /// Join only: set by the shutdown drain, see RequestDrain().
     std::atomic<bool> m_drainRequested{false};
 
     /*
@@ -353,8 +353,8 @@ private:
      */
     std::atomic<std::uint64_t> m_processedCount{0};
     std::atomic<std::uint64_t> m_droppedCount{0};
-    /// Subset of m_droppedCount: fusion groups dropped after the timeout.
-    std::atomic<std::uint64_t> m_fusionExpiredCount{0};
+    /// Subset of m_droppedCount: join groups dropped after the timeout.
+    std::atomic<std::uint64_t> m_joinExpiredCount{0};
     std::atomic<std::uint64_t> m_failedCount{0};
     /// 1 while only the loop thread writes, 0 once a second thread has reported a
     /// drop or a failure. Flipped by a compare-exchange: the test-then-set this
@@ -374,7 +374,7 @@ private:
     void AddProcessed(std::uint64_t count) { m_processedCount.fetch_add(count, std::memory_order_relaxed); }
     void AddFailed() { m_failedCount.fetch_add(1, std::memory_order_relaxed); }
     void AddDropped(std::uint64_t count) { m_droppedCount.fetch_add(count, std::memory_order_relaxed); }
-    void AddFusionExpired(std::uint64_t count) { m_fusionExpiredCount.fetch_add(count, std::memory_order_relaxed); }
+    void AddJoinExpired(std::uint64_t count) { m_joinExpiredCount.fetch_add(count, std::memory_order_relaxed); }
 
     /// Acquire-side bookend: everyone who reads a counter loads this first.
     /// Cheap enough for a snapshot, and it keeps a snapshot's counter loads from
@@ -395,10 +395,10 @@ private:
 
     // Per-module tuning, resolved once in LoadConfig().
     std::size_t m_maxBatchSize = 4;
-    /// Multi-input switch: when inputs are not fused, a batch is collected from
+    /// Multi-input switch: when inputs are not joined, a batch is collected from
     /// every input queue until it is full or this timeout elapses.
     std::chrono::milliseconds m_batchTimeout{100};
-    std::chrono::milliseconds m_fusionTimeout{60000};
+    std::chrono::milliseconds m_joinTimeout{60000};
     int m_sourceIdleMs = 1;
     /// Set by a source module for the invocation that has just returned, see
     /// NoteBlockedWait().

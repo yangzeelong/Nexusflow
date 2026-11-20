@@ -5,8 +5,8 @@
 //
 // The edge memory a topology holds is `capacity * bytes` and can be computed on
 // paper. Two allocations are invisible to Pipeline::GetSnapshot() though: the
-// frames themselves (shared_ptr payloads) and the fusion sink's `messageCache`,
-// which is a local inside Worker::RunFusion(). The process's own page accounting
+// frames themselves (shared_ptr payloads) and the join sink's `messageCache`,
+// which is a local inside Worker::RunJoin(). The process's own page accounting
 // is the only witness, so the harness samples it while a run is in flight and
 // reports the peak next to the throughput.
 

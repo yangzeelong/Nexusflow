@@ -145,7 +145,7 @@ public:
      * one thread. A positive value shares that many threads between the
      * modules; module i is hosted by thread i % threadCount for its whole
      * run, which is what lets a worker keep its single-writer counters.
-     * Fusion modules (a sink with several synchronised inputs) block on
+     * Join modules (a sink with several synchronised inputs) block on
      * every input of a group and therefore keep their own thread.
      *
      * Chainable with the other setters:

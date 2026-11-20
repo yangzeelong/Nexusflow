@@ -230,7 +230,7 @@ for (const auto& edge : snapshot.edges) {
 }
 for (const auto& module : snapshot.modules) {
     // module.name, module.processedTotal, module.droppedTotal,
-    // module.fusionExpiredTotal, module.failedTotal
+    // module.joinExpiredTotal, module.failedTotal
 }
 std::cout << snapshot.ToString() << std::endl;   // one line, greppable
 ```

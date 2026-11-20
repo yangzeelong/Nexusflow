@@ -344,7 +344,7 @@ TEST(PipelineMetricsTest, ProcessedDroppedAndFailedAccountForEveryMessage) {
     ASSERT_EQ(snapshot.edges.size(), std::size_t(1));
     const ModuleSnapshot& sourceSnapshot = snapshot.modules[0];
     EXPECT_EQ(sourceSnapshot.failedTotal, std::uint64_t(0)) << sourceSnapshot.name;
-    EXPECT_LE(sourceSnapshot.fusionExpiredTotal, sourceSnapshot.droppedTotal) << sourceSnapshot.name;
+    EXPECT_LE(sourceSnapshot.joinExpiredTotal, sourceSnapshot.droppedTotal) << sourceSnapshot.name;
     EXPECT_EQ(sourceSnapshot.processedTotal + sourceSnapshot.droppedTotal, snapshot.edges[0].pushedTotal)
         << sourceSnapshot.name;
 

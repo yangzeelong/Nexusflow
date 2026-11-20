@@ -74,8 +74,8 @@ cmake --build build --config Release --target pipeline_benchmark --parallel 16
   `stat,<label>,<platform>,<baseline>,<batch>,<observe>,<topology>,<modules>,<branches>,<edges>,<capacity>,<payload>,<fresh>,<sync>,<reps>,<tp_med>,<tp_min>,<tp_max>,<tp_spread_pct>,<cores_med>,<cores_min>,<cores_max>,<p50_med>,<p95_med>,<p99_med>,<cpu_per_msg_med>,<unstable>`。
   中位数 + 三次重复的范围 + 波动百分比；`unstable=1` 表示吞吐波动超过 `--max-spread`（默认 10%），这一档别直接读，先重跑。
 - 每次运行一行 **`cov,`**（覆盖率断言）：
-  `cov,<label>,<baseline>,<modules>,<branches>,<capacity>,<rep>,<pushed>,<popped>,<discarded>,<residual>,<sink_popped>,<delivered>,<processed>,<dropped>,<failed>,<fusion_expired>,<dropped_mid_run>,<fusion_expired_mid_run>,<stop_ms>,<ok>`。
-  判据：**跑动中** `dropped`/`failed`/`fusion_expired` 必须为 0；`pushed == popped + discarded + residual`；sink 收到的条数与 `delivered` 对得上（融合路径按 `branches` 折算）。
+  `cov,<label>,<baseline>,<modules>,<branches>,<capacity>,<rep>,<pushed>,<popped>,<discarded>,<residual>,<sink_popped>,<delivered>,<processed>,<dropped>,<failed>,<join_expired>,<dropped_mid_run>,<join_expired_mid_run>,<stop_ms>,<ok>`。
+  判据：**跑动中** `dropped`/`failed`/`join_expired` 必须为 0；`pushed == popped + discarded + residual`；sink 收到的条数与 `delivered` 对得上（融合路径按 `branches` 折算）。
   不满足就打印 `COVERAGE MISMATCH` 并让退出码为 1。停机尾部为关队列而丢掉的那几条只报不判错（`dropped`/`failure` 列照实给）。
 
 `--payload` 档位：`none` / `1080p-rgb`（5.937 MiB）/ `1080p-yuv420`（2.969 MiB）/ `2k-rgb`（QHD 2560×1440，10.547 MiB）/ `2k-yuv420`（5.273 MiB）。

@@ -23,7 +23,7 @@ std::string PipelineSnapshot::ToString() const {
             out << ' ' << '|' << ' ';
         }
         out << module.name << " processed=" << module.processedTotal << " dropped=" << module.droppedTotal
-            << " fusionExpired=" << module.fusionExpiredTotal << " failed=" << module.failedTotal;
+            << " joinExpired=" << module.joinExpiredTotal << " failed=" << module.failedTotal;
     }
     out << ']';
     return out.str();

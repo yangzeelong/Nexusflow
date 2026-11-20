@@ -64,7 +64,7 @@ ModuleSnapshot TakeModuleSnapshot(const ModuleActor& actor) {
     module.name = actor.GetModuleName();
     module.processedTotal = actor.ProcessedCount();
     module.droppedTotal = actor.DroppedCount();
-    module.fusionExpiredTotal = actor.FusionExpiredCount();
+    module.joinExpiredTotal = actor.JoinExpiredCount();
     module.failedTotal = actor.FailedCount();
     module.drainInputsMs = actor.LastDrainInputsMs();
     module.exitLoopMs = actor.LastExitLoopMs();
@@ -375,7 +375,7 @@ ErrorCode Pipeline::Stop() {
     // reversing it gives a valid topological one, producers first.
     std::reverse(stopOrder.begin(), stopOrder.end());
     // Every stage learns about the drain up front: a stage that is waiting for
-    // inputs that will never arrive (a fusion module missing one of its sources)
+    // inputs that will never arrive (a join module missing one of its sources)
     // has to stop waiting now, not when its turn in the order comes up.
     for (const auto& name : stopOrder) {
         auto actorIt = m_pImpl->actorModuleMap.find(name);
