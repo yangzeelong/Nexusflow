@@ -48,6 +48,10 @@
 - `Worker` / `Dispatcher` 计数器改为 `std::atomic<uint64_t>`（relaxed add/load）；
   `RecordDropped` / `RecordFailed` 的多写者检测改用 compare-exchange。
 - `Start()` 拒绝在上一轮被放弃的活线程上重启；`~ModuleActor` 只等待并报错，不 detach。
+- 台式机基准报告的拐点结论更正：2026-11-20 同机同参复测显示 18 模块只比 16 模块低
+  2.6%（1.697 vs 1.742 M msg/s），真正的塌陷在 28 模块（0.856 M，−51%）；原报告的
+  「16→18 −41%（拐点）」与 P/E 归因不再作为结论引用（详见
+  `benchmarks/PERFORMANCE-desktop.md` §1.1）。
 - `RunFusion()` 的分组 key 由 `MessageMeta::sourceName` 改为输入边名，修复多路输入
   永远凑不齐、最终按 60 s 超时静默丢弃的问题。
 - `PullBatchMessage()` 在所有输入边 shutdown 时提前返回；`waitForRoom()` 在 park 前
