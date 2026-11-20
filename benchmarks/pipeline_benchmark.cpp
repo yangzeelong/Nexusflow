@@ -18,6 +18,7 @@
 #include "ProcessCpuTime.hpp"
 #include "ProcessMemory.hpp"
 #include "RawPipeline.hpp"
+#include "TscClock.hpp"
 
 #include <nexusflow/Logging.hpp>
 #include <nexusflow/Module.hpp>
@@ -405,11 +406,23 @@ struct Coverage {
     bool ok = true;
 };
 
+namespace
+{
+
+/// TSC ticks per second, calibrated once in main(); zero when unavailable.
+double g_tscHz = 0.0;
+
+} // namespace
+
 struct Sample {
     double throughput = 0.0;  // delivered messages per second
     std::uint64_t delivered = 0;
     double wallSeconds = 0.0;
     double cpuSeconds = 0.0;
+    /// CPU cycles per delivered message (TSC ticks); 0 when the platform has no
+    /// TSC. Derived from cpuSeconds and the calibrated rate, so it is the same
+    /// measurement as "cpu per msg", just expressed in a frequency-free unit.
+    double cyclesPerMsg = 0.0;
     double latencyAvgUs = 0.0;
     double latencyP50Us = 0.0;
     double latencyP95Us = 0.0;
@@ -628,6 +641,9 @@ Sample RunRawChain(const Options& options, const TopologyShape& shape, const Pay
     sample.delivered = counters.delivered;
     sample.throughput =
         sample.wallSeconds > 0.0 ? static_cast<double>(counters.delivered) / sample.wallSeconds : 0.0;
+    sample.cyclesPerMsg = (g_tscHz > 0.0 && sample.delivered > 0)
+                             ? sample.cpuSeconds * g_tscHz / static_cast<double>(sample.delivered)
+                             : 0.0;
     sample.latencyAvgUs = latency.MeanNs() / 1000.0;
     sample.latencyP50Us = latency.PercentileNs(50.0) / 1000.0;
     sample.latencyP95Us = latency.PercentileNs(95.0) / 1000.0;
@@ -742,6 +758,9 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
     sample.cpuSeconds = cpuAfter - cpuBefore;
     sample.delivered = delivered;
     sample.throughput = sample.wallSeconds > 0.0 ? static_cast<double>(delivered) / sample.wallSeconds : 0.0;
+    sample.cyclesPerMsg = (g_tscHz > 0.0 && sample.delivered > 0)
+                             ? sample.cpuSeconds * g_tscHz / static_cast<double>(sample.delivered)
+                             : 0.0;
     sample.latencyAvgUs = latency.MeanNs() / 1000.0;
     sample.latencyP50Us = latency.PercentileNs(50.0) / 1000.0;
     sample.latencyP95Us = latency.PercentileNs(95.0) / 1000.0;
@@ -782,7 +801,8 @@ void PrintCsv(const Options& options, const TopologyShape& shape, std::size_t ca
               << (options.timings ? 1 : 0) << ',' << NameOf(options.workload.kind) << ','
               << WorkloadParameter(options.workload) << ',' << options.pushMode << ',' << sample.attempts << ','
               << sample.refused << ',' << sample.rssStartMiB << ',' << sample.rssPeakMiB << ',' << sample.rssEndMiB
-              << ',' << sample.edgeDepthMax << ',' << sample.stopMs << ',' << options.poolSize << '\n';
+              << ',' << sample.edgeDepthMax << ',' << sample.stopMs << ',' << sample.cyclesPerMsg
+              << ',' << options.poolSize << '\n';
 }
 
 /**
@@ -851,6 +871,11 @@ int main(int argc, char* argv[]) {
     const Options options = ParseOptions(argc, argv);
     logger::InitializeGlobalLogger({LogLevelFromName(options.logLevel)});
     TimerResolutionGuard timerResolution;
+
+    // One calibration for the whole process: three x 20 ms windows, best wins.
+    g_tscHz = nexusflow_bench::TscHz();
+    std::cout << "tsc               : " << (g_tscHz / 1.0e9) << " GHz"
+              << (g_tscHz > 0.0 ? " (cycles/msg enabled)" : " (cycles/msg unavailable)") << '\n';
 
     // --micro-observer: what the harness's own per-message observer costs. Run
     // separately, because inside a real pipeline the difference between
@@ -1008,6 +1033,7 @@ int main(int argc, char* argv[]) {
     std::vector<double> p99s;
     std::vector<double> cores;
     std::vector<double> cpuPerMessage;
+    std::vector<double> cyclesPerMessage;
     for (const Sample& sample : samples) {
         throughputs.push_back(sample.throughput);
         p50s.push_back(sample.latencyP50Us);
@@ -1017,10 +1043,12 @@ int main(int argc, char* argv[]) {
         cpuPerMessage.push_back(sample.delivered > 0
                                     ? sample.cpuSeconds / static_cast<double>(sample.delivered) * 1.0e6
                                     : 0.0);
+        cyclesPerMessage.push_back(sample.cyclesPerMsg);
     }
     const Stat throughputStat = Summarize(throughputs);
     const Stat coresStat = Summarize(cores);
     const Stat cpuPerMessageStat = Summarize(cpuPerMessage);
+    const Stat cyclesPerMessageStat = Summarize(cyclesPerMessage);
     const Stat p50Stat = Summarize(p50s);
     const Stat p95Stat = Summarize(p95s);
     const Stat p99Stat = Summarize(p99s);
@@ -1044,6 +1072,7 @@ int main(int argc, char* argv[]) {
     printRange("throughput  msg/s : ", throughputStat, true);
     printRange("cores             : ", coresStat, false);
     printRange("cpu per msg  us   : ", cpuPerMessageStat, false);
+    printRange("cycles per msg    : ", cyclesPerMessageStat, false);
     printRange("latency p50  us   : ", p50Stat, false);
     printRange("latency p95  us   : ", p95Stat, false);
     printRange("latency p99  us   : ", p99Stat, false);
