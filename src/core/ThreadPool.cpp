@@ -26,12 +26,6 @@ namespace {
 /// module keeps the others of its slot waiting.
 constexpr int kTurnBudget = 16;
 
-/// Idle backoff before Loop() parks a slot. Counted in spin rounds on purpose:
-/// a sub-millisecond sleep is a whole-tick park on Windows, so the ladder must
-/// not try to express "10 us of patience" with sleep_for.
-constexpr unsigned kIdlePauseRounds = 4096;
-constexpr unsigned kIdleYieldRounds = 4096;
-
 /// Spins the core without giving it away: see the blocked branch in Loop().
 void Pause() {
 #if defined(_MSC_VER)
@@ -42,6 +36,44 @@ void Pause() {
     std::this_thread::yield();
 #endif
 }
+
+/// Backs off a slot that just found nothing to do: spin, then yield, then park.
+///
+/// Re-checking is nanoseconds, so spin first and only park once the slot has been
+/// idle for a while. A parked slot is not woken by queue pushes - it re-checks on
+/// the next system tick - so parking during a burst gap turns that gap into a
+/// millisecond stall.
+///
+/// The ladder counts rounds, never microseconds. Windows rounds a sub-millisecond
+/// sleep up to the system tick, so the old sleep_for(10 us)/sleep_for(50 us) steps
+/// were 1.9 ms parks with timeBeginPeriod(1) in effect and 15.6 ms without it
+/// (measured), which cost about 35% of the pooled throughput on a 4-module linear
+/// pipeline.
+class IdleBackoff {
+public:
+    /// Called when the slot did some work again.
+    void Reset() { m_rounds = 0; }
+
+    /// One backoff step for a slot that found nothing to do.
+    void Wait() {
+        if (m_rounds < kSpinRounds) {
+            ++m_rounds;
+            Pause();
+            return;
+        }
+        if (m_rounds < kSpinRounds + kYieldRounds) {
+            ++m_rounds;
+            std::this_thread::yield();
+            return;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+private:
+    static const unsigned kSpinRounds = 4096;
+    static const unsigned kYieldRounds = 4096;
+    unsigned m_rounds = 0;
+};
 
 }  // namespace
 
@@ -122,7 +154,7 @@ ThreadPoolStats ThreadPool::Snapshot() const {
 
 void ThreadPool::Loop(std::size_t index) {
     std::vector<std::shared_ptr<Worker>>& mine = m_workers[index];
-    unsigned spins = 0;
+    IdleBackoff idle;
     while (!m_stop.load(std::memory_order_relaxed)) {
         m_rounds.fetch_add(1, std::memory_order_relaxed);
         bool didWork = false;
@@ -143,12 +175,12 @@ void ThreadPool::Loop(std::size_t index) {
             }
         }
         if (didWork) {
-            spins = 0;
+            idle.Reset();
             continue;
         }
         if (blocked) {
             m_blockedRounds.fetch_add(1, std::memory_order_relaxed);
-            spins = 0;
+            idle.Reset();
             // Pause, do not yield(): a blocked slot unblocks within a few
             // hundred cycles once the consumer drains one slot, while a
             // blocking wait measured 40% lower throughput at every timeout
@@ -158,25 +190,7 @@ void ThreadPool::Loop(std::size_t index) {
             continue;
         }
         m_idleRounds.fetch_add(1, std::memory_order_relaxed);
-        // Nothing on this slot had work. Re-checking costs nanoseconds, so spin
-        // first, and only park once the slot has been idle for a while: a parked
-        // slot is not woken by the queue pushes, it re-checks on the next tick,
-        // so parking during a burst gap turns that gap into a millisecond stall.
-        //
-        // The ladder counts spin rounds, never microseconds: Windows rounds a
-        // sub-millisecond sleep up to the system tick, so the old
-        // sleep_for(10 us)/sleep_for(50 us) steps were 1.9 ms parks with
-        // timeBeginPeriod(1) in effect and 15.6 ms without it (measured), which
-        // cost ~35% of the pooled throughput on a 4-module linear pipeline.
-        if (spins < kIdlePauseRounds) {
-            ++spins;
-            Pause();
-        } else if (spins < kIdlePauseRounds + kIdleYieldRounds) {
-            ++spins;
-            std::this_thread::yield();
-        } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+        idle.Wait();
     }
     // A worker whose actor is stopped by the pipeline is normally stepped one
     // last time and publishes its own exit; this covers a worker that was never
