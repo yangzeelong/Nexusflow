@@ -20,6 +20,14 @@
   `Worker::AddJoinExpired()`、`Worker::m_joinTimeout`；旧名 `fusion*` 全部移除。
   配置键优先读 `joinTimeoutMs`，同时兼容旧拼写 `fusionTimeoutMs`（保留一个版本）。
 
+### Fixed
+
+- 线程池的空闲退避把 `sleep_for(10us/50us)` 当成"等一会儿"，而 MSVC 会向上取整成
+  `Sleep(1)` 并按系统 tick 醒来（实测 1.9 ms；默认分辨率下 15.4 ms），池线程又没有唤醒源，
+  于是每次空闲都让这一级流水线停一个 tick：MSVC 上 pool4 只有 pool0 的 63–68%。
+  退避阶梯改为"4096 轮 PAUSE → 4096 轮 yield → 1 ms 停泊"，pool4/pool0 回到 93.6%，
+  L16cap8 p4 提升 44%。机制与 API 对照见 `benchmarks/TIMERS.md`。
+
 ## [1.0.1] - 2026-11-20
 
 补测量口径与 cycles/消息指标，不改库代码。
