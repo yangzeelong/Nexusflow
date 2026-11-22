@@ -526,14 +526,14 @@ bool Worker::StepOnce() {
     // turn costs more than it buys in fairness. The turn count is bounded so a
     // busy module still hands its slot back promptly.
     bool didWork = false;
-    for (int turn = 0; turn < kStepTurns; ++turn) {
-        // Cooperative backpressure: a pooled worker never blocks. When any edge
-        // is full it stops producing, and the slot goes on to step the other
-        // modules it hosts, including the consumer that must drain that edge.
-        const std::size_t room = OutputRoom();
-        if (room == 0) {
-            break;
-        }
+    // Room is measured once per call, not once per turn: OutputRoom() walks
+    // every output edge and is the single most expensive line in the pooled
+    // hot path. Every edge has exactly one producer (this worker), so the room
+    // only shrinks by what this call itself pushes, and counting down a local
+    // budget is exact for modules that emit at most one message per input per
+    // edge -- which Broadcast() by definition does.
+    std::size_t room = OutputRoom();
+    for (int turn = 0; turn < kStepTurns && room > 0; ++turn) {
         if (m_inputQueueMap.empty()) {
             Message emptyMessage;
             bool produced = false;
@@ -554,6 +554,7 @@ bool Worker::StepOnce() {
             if (!produced) {
                 break;
             }
+            --room;
             didWork = true;
             continue;
         }
@@ -562,10 +563,12 @@ bool Worker::StepOnce() {
         // of every output edge, so a full batch can never overflow a queue and
         // the pooled path never has to drop.
         const std::size_t take = m_maxBatchSize < room ? m_maxBatchSize : room;
-        std::vector<Message> batchMessage = PullBatchNow(take);
+        std::vector<Message>& batchMessage = m_batchScratch;
+        PullBatchNow(take, batchMessage);
         if (batchMessage.empty()) {
             break;
         }
+        const std::size_t produced = batchMessage.size();
         try {
             m_modulePtr->ProcessBatch(batchMessage);
             AddProcessed(batchMessage.size());
@@ -578,8 +581,13 @@ bool Worker::StepOnce() {
             AddFailed();
             break;
         }
+        room -= produced;
         didWork = true;
     }
+    // Remembered for the pool loop: it used to re-scan every edge after the
+    // turn loop to decide whether the slot was blocked, duplicating the scan
+    // StepOnce had already paid for.
+    m_outputsBlocked = (room == 0);
     if (didWork) {
         PublishCounters();
     }
@@ -591,11 +599,12 @@ void Worker::MarkExited() {
     m_loopExited = true;
 }
 
-std::vector<Message> Worker::PullBatchNow(std::size_t maxBatchSize) {
-    std::vector<Message> batchMessage;
-    batchMessage.reserve(maxBatchSize);
-    for (auto& item : m_inputQueueMap) {
-        auto& queue = item.second;
+void Worker::PullBatchNow(std::size_t maxBatchSize, std::vector<Message>& batchMessage) {
+    batchMessage.clear();
+    if (batchMessage.capacity() < maxBatchSize) {
+        batchMessage.reserve(maxBatchSize);
+    }
+    for (auto& queue : m_inputQueuesFlat) {
         while (batchMessage.size() < maxBatchSize) {
             Message message;
             if (queue->tryPop(message)) {
@@ -608,7 +617,6 @@ std::vector<Message> Worker::PullBatchNow(std::size_t maxBatchSize) {
             break;
         }
     }
-    return batchMessage;
 }
 
 std::vector<Message> Worker::PullBatchMessage(size_t maxBatchSize, std::chrono::milliseconds batchTimeout) {
@@ -623,8 +631,7 @@ std::vector<Message> Worker::PullBatchMessage(size_t maxBatchSize, std::chrono::
 
     // --- Phase 1: Greedy non-blocking pull ---
     // Quickly drain any messages that are already waiting in the queues.
-    for (auto& item : m_inputQueueMap) {
-        auto& queue = item.second;
+    for (auto& queue : m_inputQueuesFlat) {
         while (batchMessage.size() < maxBatchSize) {
             Message message;
             if (queue->tryPop(message)) {
@@ -663,8 +670,7 @@ std::vector<Message> Worker::PullBatchMessage(size_t maxBatchSize, std::chrono::
         }
 
         // Iterate through all input queues and perform a short wait on each.
-        for (auto& item : m_inputQueueMap) {
-            auto& queue = item.second;
+        for (auto& queue : m_inputQueuesFlat) {
             Message msg;
             // Wait for a very short period (e.g., 1ms). This is the key to avoiding
             // busy-waiting while remaining responsive to multiple inputs.

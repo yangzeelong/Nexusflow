@@ -101,6 +101,22 @@ struct ModuleSnapshot {
  * so a second Start() continues the same totals. What a restart does clear is the
  * stop timing (`stopPipelineMs`, and each module's `drainInputsMs`/`exitLoopMs`).
  */
+/**
+ * @brief Counters of the opt-in thread pool; all zero when no pool is used.
+ *
+ * One round is one pass of a pool thread over its whole worker list. A turn is
+ * a Worker::StepOnce() call that did work. A blocked round ended with an output
+ * edge full (the slot is waiting on back-pressure, not idle); an idle round
+ * found nothing to do at all. The split is what separates "too many threads"
+ * from "producer/consumer out of phase".
+ */
+struct ThreadPoolSnapshot {
+    std::uint64_t rounds = 0;
+    std::uint64_t turns = 0;
+    std::uint64_t blockedRounds = 0;
+    std::uint64_t idleRounds = 0;
+};
+
 struct PipelineSnapshot {
     /// Graph name of the pipeline.
     std::string name;

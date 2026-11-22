@@ -263,7 +263,8 @@ ErrorCode Pipeline::Start() {
     // An opt-in shared pool: 0 keeps the historical one-thread-per-module model.
     const std::size_t poolThreads = m_pImpl->context ? m_pImpl->context->GetThreadPoolSize() : 0;
     if (poolThreads > 0) {
-        m_pImpl->threadPool = std::make_shared<core::ThreadPool>(poolThreads);
+        m_pImpl->threadPool =
+            std::make_shared<core::ThreadPool>(poolThreads, m_pImpl->context->GetThreadPoolMapping());
     }
 
     std::vector<std::shared_ptr<ActorNode>> startedActors;
@@ -539,6 +540,18 @@ ErrorCode Pipeline::Cancel() {
     m_pImpl->lastStopPipelineMs.store(cancelPipelineMs, std::memory_order_relaxed);
     LOG_DEBUG("Pipeline cancelled in {} ms; nothing was drained.", cancelPipelineMs);
     return ErrorCode::SUCCESS;
+}
+
+ThreadPoolSnapshot Pipeline::GetThreadPoolStats() const {
+    ThreadPoolSnapshot snapshot;
+    if (m_pImpl && m_pImpl->threadPool) {
+        const core::ThreadPoolStats stats = m_pImpl->threadPool->Snapshot();
+        snapshot.rounds = stats.rounds;
+        snapshot.turns = stats.turns;
+        snapshot.blockedRounds = stats.blockedRounds;
+        snapshot.idleRounds = stats.idleRounds;
+    }
+    return snapshot;
 }
 
 PipelineSnapshot Pipeline::GetSnapshot() const {
