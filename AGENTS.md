@@ -142,7 +142,7 @@ from 29 suites，PASSED 173**（MSVC 19.40）。
 
 ## 5. 计数器与快照的命名/并发规则
 
-写新的运行期指标时按这一节走（`docs/telemetry.md` 是本地设计笔记，不入库，不要引用它）。
+写新的运行期指标时按这一节走（速查见 [`docs/design/telemetry.md`](docs/design/telemetry.md)，设计讨论见 [`docs/design/telemetry-design.md`](docs/design/telemetry-design.md)）。
 
 **命名**
 
@@ -198,3 +198,10 @@ from 29 suites，PASSED 173**（MSVC 19.40）。
    本机 `git` 的 `core.autocrlf` 是 `true`（全局配置，不是仓库局部）。在 Windows
    上用 Git Bash 时 `git` 默认 `autocrlf=false`，会把整个工作区显示成 CRLF 假 diff。
 6. 汇报带**数字 + 命令原文**；拿不准标"未确认"，不要猜。
+7. **文档分两处**：代码一变就会错的内容（平台事实、设计文档、参考手册）放本仓 `docs/`，
+   并随代码一起提交；复盘、长文、跨项目对比放 `engineering-notes` 仓（链接见
+   [`docs/README.md`](docs/README.md) 的“外部阅读”）。不要在两处写同一段事实。
+8. **提 PR 前先整理提交**：一个 PR 只留一组逻辑提交（代码 / 基准文档 / 仓库文档三类），
+   不要把逐次试跑的碎片带进去（21 个 commit 的 PR 没人看得下去）。合并用
+   `git reset --soft <base>` 后按组重新 stage，或 `git rebase -i <base>`；整理完
+   `git log master..HEAD` 应该一眼能读完。已验证完的临时实验分支直接删，不留历史。
