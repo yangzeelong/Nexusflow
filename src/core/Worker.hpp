@@ -70,6 +70,7 @@ public:
             throw std::invalid_argument("Output queue with name " + name + " already exists");
         }
         m_inputQueueMap[name] = std::move(queue);
+        m_inputQueuesFlat.push_back(m_inputQueueMap[name]);
     }
     // ViewPtr<MessageQueue> GetQueue(const std::string& name) { return m_inputQueueMap[name]; }
     // void RemoveQueue(const std::string& name) { m_inputQueueMap.erase(name); }
@@ -107,6 +108,10 @@ public:
      * and keeps a dedicated thread. StepOnce() reports false for them.
      */
     bool StepOnce();
+
+    /// True when the last StepOnce() stopped because an output edge was full.
+    /// Written and read by the owning slot only, so no atomics are needed.
+    bool BlockedOnOutputs() const { return m_outputsBlocked; }
 
     /// True when every output edge still has room for one more message.
     /// Pooled workers use it to apply backpressure without blocking.
@@ -168,6 +173,7 @@ public:
 
     /// Edges this worker pushes into, as seen by the loop.
     const std::vector<ViewPtr<MessageQueue>>& OutputQueues() const { return m_outputQueues; }
+    const std::vector<ViewPtr<MessageQueue>>& InputQueues() const { return m_inputQueuesFlat; }
 
     /**
      * @brief Handles a source invocation that produced nothing.
@@ -324,13 +330,23 @@ private:
 
     /// Greedy, non-blocking form of PullBatchMessage(): only what is queued
     /// right now, never a wait.
-    std::vector<Message> PullBatchNow(std::size_t maxBatchSize);
+    void PullBatchNow(std::size_t maxBatchSize, std::vector<Message>& out);
+
+    /// Reused across turns so a pooled step does not allocate a batch vector
+    /// every time it runs: the allocator showed up as 6% of the pooled profile.
+    std::vector<Message> m_batchScratch;
 
 private:
     std::shared_ptr<Module> m_modulePtr = nullptr;
     ViewPtr<Config> m_configPtr;
     std::shared_ptr<PipelineContext> m_context;
     std::unordered_map<std::string, ViewPtr<MessageQueue>> m_inputQueueMap;
+
+    /// The same queues as m_inputQueueMap, in insertion order. The pull paths
+    /// walk this instead of the hash map: hashing a string name on every turn
+    /// was pure overhead, and the order the queues were added in is the order
+    /// the pull paths already relied on.
+    std::vector<ViewPtr<MessageQueue>> m_inputQueuesFlat;
 
     std::atomic<bool> m_stopFlag{false};
     /// Join only: set by the shutdown drain, see RequestDrain().
@@ -408,6 +424,7 @@ private:
     /// on (see IdleAfterEmptyOutput()).
     std::vector<ViewPtr<MessageQueue>> m_outputQueues;
     bool m_syncInputs = false;
+    bool m_outputsBlocked = false;  ///< see BlockedOnOutputs()
     // Profiling costs a name copy and a registry lock per measurement; the
     // work loop only pays it for modules that opt in.
     bool m_profileTimers = false;
