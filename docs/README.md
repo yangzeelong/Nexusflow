@@ -18,10 +18,12 @@
 | [`platform/linux.md`](platform/linux.md) | Linux hrtimer、`perf` 可用性、WSL2 差异 |
 | [`design/thread-pool.md`](design/thread-pool.md) | 线程池（`--pool-size`）：映射、`StepOnce`、退避阶梯、计数 |
 | [`design/metrics.md`](design/metrics.md) | 四种指标口径与恒等式 |
+| [`adr/`](adr/README.md) | 架构决策记录（ADR）：处境、决定、代价、翻案条件 |
 | [`design/telemetry.md`](design/telemetry.md) | 运行期指标速查（边/模块/自定义指标） |
 | [`design/telemetry-design.md`](design/telemetry-design.md) | 指标系统的设计讨论 |
-| [`../benchmarks/README.md`](../benchmarks/README.md) | 基准 CLI、CSV schema |
-| [`../benchmarks/HARNESS.md`](../benchmarks/HARNESS.md) | 测量协议与口径 |
+| [`../benchmarks/README.md` 的「测量协议」节](../benchmarks/README.md#测量协议) | 测量协议与口径 |
+| [`../HARNESS.md`](../HARNESS.md) | 工程约束总表（角色/流程、代码、测量、文档） |
+| [`../benchmarks/README.md` 的「测量协议」节](../benchmarks/README.md#测量协议) | 测量协议与口径 |
 
 ## 外部阅读
 
@@ -35,3 +37,4 @@
 1. 平台事实变了就改 `platform/`，并在 PR 里说明是哪个平台版本。
 2. 手册与代码同 commit：改 CLI/CSV 时同步 `benchmarks/README.md`。
 3. 不在两处写同一段事实：要么写进本文档并让外部链接指向它，要么反过来。
+4. 会活过 PR 的决定写成 ADR（`adr/`），PR 描述只留摘要。

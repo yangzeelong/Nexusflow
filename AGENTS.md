@@ -25,7 +25,7 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | `include/nexusflow/common/` | 公开的 header-only 容器/工具：`Any`、`ConcurrentQueue`、`Optional`、`ViewPtr`（`Nexusflow::nexusflow_common` INTERFACE target） |
 | `tests/test/` | gtest 用例（`nexusflow_tests`，当前 173 个，见 §3）；**全部用例都在这一层**，没有第二处 test 目录 |
 | `examples/` | 3 个纯框架示例：`1-how-to-use`、`2-linear-vision-pipline`、`3-joined-vision-pipline` |
-| `benchmarks/` | 两个基准目标：Google Benchmark 用例（`nexusflow_benchmarks`）与端到端吞吐（`pipeline_benchmark`，`--capacity`）；**全部基准源码都在这一层**；测量规则见 [`benchmarks/HARNESS.md`](benchmarks/HARNESS.md) |
+| `benchmarks/` | 两个基准目标：Google Benchmark 用例（`nexusflow_benchmarks`）与端到端吞吐（`pipeline_benchmark`，`--capacity`）；**全部基准源码都在这一层**；测量规则见 [`benchmarks/README.md` 的「测量协议」节](benchmarks/README.md#测量协议) |
 | `cmake/` | `include.cmake`（第三方依赖 include）、`Summary.cmake`、`3rdparty/*.cmake`（FetchContent 定义） |
 | `extensions/` | 可选扩展；机制与新增扩展见 [`extensions/README.md`](extensions/README.md) |
 | `tools/` | 仓库级脚本（`clang-format-all.sh`） |
@@ -186,6 +186,8 @@ from 29 suites，PASSED 173**（MSVC 19.40）。
 
 ## 6. 硬规则（务必遵守）
 
+> 文档、流程与提交的约束统一在 [`HARNESS.md`](HARNESS.md)；本节只留代码与构建相关的规则。
+
 1. **不要自动 `git commit`**。只有用户明确说"提交/commit"时才提交；否则改动一律
    留在工作区，并在汇报里说明未提交。
 2. **C++14**，不用 C++17+ 语法（结构化绑定、`if constexpr`、`std::optional`、
@@ -198,13 +200,4 @@ from 29 suites，PASSED 173**（MSVC 19.40）。
    本机 `git` 的 `core.autocrlf` 是 `true`（全局配置，不是仓库局部）。在 Windows
    上用 Git Bash 时 `git` 默认 `autocrlf=false`，会把整个工作区显示成 CRLF 假 diff。
 6. 汇报带**数字 + 命令原文**；拿不准标"未确认"，不要猜。
-7. **文档分两处**：代码一变就会错的内容（平台事实、设计文档、参考手册）放本仓 `docs/`，
-   并随代码一起提交；复盘、长文、跨项目对比放 `engineering-notes` 仓（链接见
-   [`docs/README.md`](docs/README.md) 的“外部阅读”）。不要在两处写同一段事实。
-8. **提 PR 前先整理提交**：一个 PR 只留一组逻辑提交（代码 / 基准文档 / 仓库文档三类），
-   不要把逐次试跑的碎片带进去（21 个 commit 的 PR 没人看得下去）。合并用
-   `git reset --soft <base>` 后按组重新 stage，或 `git rebase -i <base>`；整理完
-   `git log master..HEAD` 应该一眼能读完。已验证完的临时实验分支直接删，不留历史。
-9. **PR 必须能自解释**：有架构调整就带对比表（之前 / 之后 / 代价），有新增函数就逐个写清
-   「做什么 / 为什么引入 / 边界」。模板见 `.github/PULL_REQUEST_TEMPLATE.md`；缺这两样的 PR
-   不算 ready。长决策（会活过这个 PR 的）另写 ADR，放 `docs/design/decisions/`。
+7. **流程与提交约束**：提交收敛、PR 只能由用户提交、PR 自解释（架构对比表 + 新增函数说明）、文档落点——全部见 [`HARNESS.md`](HARNESS.md)。
