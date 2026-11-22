@@ -1,7 +1,7 @@
 # PERFORMANCE-laptop.md — 笔记本实测
 
 > 机器：THUNDERBOT ZERO / i7-11800H。**只对本文件写明的机器、commit、工具参数有效。**
-> 规则见 [HARNESS.md](HARNESS.md)，怎么跑见 [README.md](README.md)。台式机（i7-14700KF）写 `PERFORMANCE-desktop.md`，两份**不许混读**。
+> 规则见 [README.md 的「测量协议」节](README.md#测量协议)，怎么跑见 [README.md](README.md)。台式机（i7-14700KF）写 `PERFORMANCE-desktop.md`，两份**不许混读**。
 
 ## 0. 环境与口径
 

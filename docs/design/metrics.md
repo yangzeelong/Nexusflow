@@ -1,6 +1,6 @@
 # 指标口径
 
-> 四个数字，别混用。基准的 `stat,` 行与 `HARNESS.md §4` 一一对应。
+> 四个数字，别混用。基准的 `stat,` 行与 `README.md「测量协议」§4` 一一对应。
 
 ## 1. 四条定义
 
@@ -43,6 +43,6 @@ cyclesPerMsg = cpuPerMsgUs × tscGhz × 1000
 ## 4. 各列在哪
 
 - `benchmarks/README.md`：CSV 39 列的 schema；
-- `benchmarks/HARNESS.md §4`：四条定义、三条恒等式、GB 口径的坑；
+- `benchmarks/README.md` 的「测量协议」§4：四条定义、三条恒等式、GB 口径的坑；
 - `benchmarks/PERFORMANCE-desktop.md §1.2`：cycles/消息的读数示例；
 - `benchmarks/ProcessCpuTime.hpp` / `ProcessMemory.hpp` / `TscClock.hpp`：实现。

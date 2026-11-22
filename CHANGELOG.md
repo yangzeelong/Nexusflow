@@ -37,7 +37,7 @@
 
 - 基准新增 `cycles_per_msg` 列（`benchmarks/TscClock.hpp`，TSC 三窗校准）：
   `cpu/msg × TSC 频率`，去掉主频差异；非 x86 上该列为 0，不伪造。
-- `benchmarks/HARNESS.md §4` 重写指标口径：交付吞吐 / CPU 归一吞吐 /
+- `benchmarks/README.md` 的「测量协议」§4 重写指标口径：交付吞吐 / CPU 归一吞吐 /
   每消息 CPU / 每消息周期 四条定义、三条恒等式，以及"Google Benchmark 的
   `items_per_second` 是 CPU 口径"这一常见坑。
 - `benchmarks/PERFORMANCE-desktop.md §1.2` 记录 3/4/16 模块的 cycles/消息
@@ -54,7 +54,7 @@
   在满时阻塞、`TryPush` 立即返回 `kQueueFull`；`Stop()` 会排水并在停机后拒绝新输入。
   配套 6 个单测（`tests/test/PipelinePushTest.cpp`）与 README
   "Feeding a Running Pipeline" 一节。
-- 基准工具链：`benchmarks/HARNESS.md`（测量规则与维度）、`benchmarks/RawPipeline.hpp`
+- 基准工具链：`benchmarks/README.md` 的「测量协议」节（测量规则与维度）、`benchmarks/RawPipeline.hpp`
   （裸线程基线）、按机器分开的 `benchmarks/PERFORMANCE-laptop.md` 与
   `benchmarks/PERFORMANCE-desktop.md`。`pipeline_benchmark` 新增 workload
   （delay / compute / memory）、inject 拓扑、`--cpus`、`--timings`、RSS 与停机采样、
