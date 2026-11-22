@@ -205,3 +205,6 @@ from 29 suites，PASSED 173**（MSVC 19.40）。
    不要把逐次试跑的碎片带进去（21 个 commit 的 PR 没人看得下去）。合并用
    `git reset --soft <base>` 后按组重新 stage，或 `git rebase -i <base>`；整理完
    `git log master..HEAD` 应该一眼能读完。已验证完的临时实验分支直接删，不留历史。
+9. **PR 必须能自解释**：有架构调整就带对比表（之前 / 之后 / 代价），有新增函数就逐个写清
+   「做什么 / 为什么引入 / 边界」。模板见 `.github/PULL_REQUEST_TEMPLATE.md`；缺这两样的 PR
+   不算 ready。长决策（会活过这个 PR 的）另写 ADR，放 `docs/design/decisions/`。
