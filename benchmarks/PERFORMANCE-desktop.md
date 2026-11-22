@@ -1,7 +1,7 @@
 # PERFORMANCE-desktop.md — 台式机实测
 
 > 机器：i7-14700KF（20 物理核 / 28 逻辑核）。**只对本文件写明的机器、commit、工具参数有效。**
-> 规则见 [HARNESS.md](HARNESS.md)，怎么跑见 [README.md](README.md)。笔记本（i7-11800H）在 `PERFORMANCE-laptop.md`，两份**不许混读**。
+> 规则见 [README.md 的「测量协议」节](README.md#测量协议)，怎么跑见 [README.md](README.md)。笔记本（i7-11800H）在 `PERFORMANCE-laptop.md`，两份**不许混读**。
 
 ## 0. 环境与口径
 
@@ -125,7 +125,7 @@
 
 读法：3 模块是 2 跳，约 1,477 cycles/跳；16 模块是 15 跳，约 1,550 cycles/跳。
 **浅链的每跳成本几乎不随深度变化**，23K 只是"15 跳 × 每跳 1.5K"的线性累加，
-不是深链本身变贵。口径定义与三条恒等式见 `benchmarks/HARNESS.md` §4。
+不是深链本身变贵。口径定义与三条恒等式见 `benchmarks/README.md` 的「测量协议」节 §4。
 
 ## 2. 三层拆分（每多一个模块多花多少，µs）
 
