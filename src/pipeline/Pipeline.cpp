@@ -19,6 +19,7 @@
 #include <nexusflow/PipelineContext.hpp>
 #include <nexusflow/Pipeline.hpp>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -263,6 +264,16 @@ ErrorCode Pipeline::Start() {
     // An opt-in shared pool: 0 keeps the historical one-thread-per-module model.
     const std::size_t poolThreads = m_pImpl->context ? m_pImpl->context->GetThreadPoolSize() : 0;
     if (poolThreads > 0) {
+        const unsigned usableCpus = std::thread::hardware_concurrency();
+        if (usableCpus > 0 && poolThreads > usableCpus) {
+            // The pool spins before parking, so more worker threads than CPUs is not a mild
+            // slowdown: on 2 CPUs a pool of 8 measured 39 K msg/s against 2 M for a pool of 8
+            // on 16 CPUs. Warn once at start; sizing stays the caller's decision.
+            LOG_WARN("Thread pool has {} threads but this machine reports {} logical CPUs; "
+                     "the pool spins before parking, so oversubscribing it is far slower than "
+                     "sizing it to the core count.",
+                     static_cast<unsigned long long>(poolThreads), static_cast<unsigned long long>(usableCpus));
+        }
         m_pImpl->threadPool =
             std::make_shared<core::ThreadPool>(poolThreads, m_pImpl->context->GetThreadPoolMapping());
     }
