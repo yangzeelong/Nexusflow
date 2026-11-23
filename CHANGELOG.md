@@ -7,6 +7,18 @@
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-11-23
+
+性能补丁：不改 API、不改行为，只把热路径上的两次时钟读取挪到“有人开启模块计时”之后。
+
+### Fixed
+
+- `Module::ProcessTimed()` 原先每条消息无条件调两次 `std::chrono::steady_clock::now()`，
+  即使没有任何模块开启计时。现在开启与否由 `CapturesModuleTimings()` 决定，未开启时
+  `elapsedMs` 直接为 0。同机实测（5 s × 3 中位）：3 模块 MSVC 3.287→3.698 M msg/s（+12.5%）、
+  WSL2 3.292→3.563 M（+8.2%）；16 模块 MSVC +11.7%。测量口径与复现命令见后续版本的
+  `benchmarks/PERFORMANCE-desktop.md` §16。
+
 ## [1.0.1] - 2026-11-20
 
 补测量口径与 cycles/消息指标，不改库代码。

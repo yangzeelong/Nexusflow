@@ -67,13 +67,17 @@ bool Module::ProcessTimed(Message& inputMessage) {
     // Copying the upstream timing map on every message is the single largest cost
     // of the framework hot path (measured at ~2x throughput on a 3-stage
     // pipeline), so it only happens when someone opted in.
-    if (CapturesModuleTimings()) {
+    const bool captureTiming = CapturesModuleTimings();
+    if (captureTiming) {
         m_activeInputTimingMs = inputMessage.GetMetaData().GetModuleTimings();
     } else {
         m_activeInputTimingMs.clear();
     }
     m_processing = true;
-    const auto started = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point started;
+    if (captureTiming) {
+        started = std::chrono::steady_clock::now();
+    }
 
     try {
         Process(inputMessage);
@@ -84,8 +88,10 @@ bool Module::ProcessTimed(Message& inputMessage) {
         throw;
     }
 
-    const double elapsedMs = std::chrono::duration<double, std::milli>(
-        std::chrono::steady_clock::now() - started).count();
+    const double elapsedMs =
+        captureTiming
+            ? std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count()
+            : 0.0;
     m_processing = false;
 
     auto pending = std::move(m_pendingOutputs);
