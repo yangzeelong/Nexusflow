@@ -136,10 +136,10 @@ inline BuiltTopology BuildLinear(const TopologyShape& shape, std::size_t capacit
  *
  * Without `syncInputs` the sink simply reads whatever arrives from any branch,
  * which is the shape the original harness measured. With `syncInputs` the
- * framework runs the sink through the fusion path: it waits for every branch of
+ * framework runs the sink through the join path: it waits for every branch of
  * one message id and hands over a map of Messages, which is the only way the
- * fusion batching cost becomes measurable. Branches run `workload`; a positive
- * `stragglerUs` makes branch_0 sleep that long, which is the only way fused
+ * join batching cost becomes measurable. Branches run `workload`; a positive
+ * `stragglerUs` makes branch_0 sleep that long, which is the only way joined
  * groups stay half-complete long enough for the sink's cache to grow.
  */
 inline BuiltTopology BuildDiamond(const TopologyShape& shape, std::size_t capacity, PayloadSpec spec,
@@ -180,8 +180,8 @@ inline BuiltTopology BuildDiamond(const TopologyShape& shape, std::size_t capaci
         }
     }
     if (batchSize > 0 || syncInputs) {
-        // Only the sink may fuse: a branch has one input, so `syncInputs` there
-        // would turn it into a fusion worker waiting for inputs that never come.
+        // Only the sink may join: a branch has one input, so `syncInputs` there
+        // would turn it into a join worker waiting for inputs that never come.
         nexusflow::Config sinkConfig;
         if (batchSize > 0) {
             sinkConfig.Add<int>("maxBatchSize", batchSize);

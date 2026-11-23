@@ -70,6 +70,7 @@ public:
             throw std::invalid_argument("Output queue with name " + name + " already exists");
         }
         m_inputQueueMap[name] = std::move(queue);
+        m_inputQueuesFlat.push_back(m_inputQueueMap[name]);
     }
     // ViewPtr<MessageQueue> GetQueue(const std::string& name) { return m_inputQueueMap[name]; }
     // void RemoveQueue(const std::string& name) { m_inputQueueMap.erase(name); }
@@ -95,6 +96,40 @@ public:
 
     void WorkLoop();
 
+    /**
+     * @brief One non-blocking unit of work, used when a shared pool hosts
+     *        this worker (see PipelineContext::WithThreadPoolSize()).
+     * @details A pooled thread cannot afford the blocking waits of
+     * WorkLoop(): a stage pulls only what is already queued, and a source
+     * gets exactly one invocation. Returns false when there was nothing to
+     * do, so the caller can move on to the next module it hosts.
+     *
+     * Join workers are not stepped: RunJoin() waits for a whole group
+     * and keeps a dedicated thread. StepOnce() reports false for them.
+     */
+    bool StepOnce();
+
+    /// True when the last StepOnce() stopped because an output edge was full.
+    /// Written and read by the owning slot only, so no atomics are needed.
+    bool BlockedOnOutputs() const { return m_outputsBlocked; }
+
+    /// True when every output edge still has room for one more message.
+    /// Pooled workers use it to apply backpressure without blocking.
+    bool OutputsHaveRoom() const;
+
+    /// Free slots in the tightest bounded output edge.
+    /// SIZE_MAX when every output edge is unbounded (or there is none).
+    std::size_t OutputRoom() const;
+
+    /// True when this worker joins several inputs into one message, i.e. when
+    /// it cannot share a thread with other modules.
+    bool HasJoinInputs() const { return m_syncInputs; }
+
+    /// Marks the loop of the current run as finished without running it.
+    /// Used by ModuleActor when a pool never started (a failed Start()
+    /// rollback), where nothing else would publish the exit.
+    void MarkExited();
+
     /// Whether this worker is a source (has no input queue to pull from).
     bool IsSource() const { return m_inputQueueMap.empty(); }
 
@@ -114,14 +149,14 @@ public:
     }
 
     /**
-     * @brief Tells a fusion worker that the pipeline is closing.
-     * @details RunFusion() waits for one message id to show up on every input.
+     * @brief Tells a join worker that the pipeline is closing.
+     * @details RunJoin() waits for one message id to show up on every input.
      * When the upstream stages are already gone, that wait can only time out, so
      * the drain asks the worker to flush what it has instead of waiting.
      */
     void RequestDrain() { m_drainRequested.store(true); }
 
-    /// Re-arms normal fusion behaviour when the pipeline is started again.
+    /// Re-arms normal join behaviour when the pipeline is started again.
     void ClearDrain() { m_drainRequested.store(false); }
 
     /// Whether the worker loop of the current run has not returned yet.
@@ -138,6 +173,7 @@ public:
 
     /// Edges this worker pushes into, as seen by the loop.
     const std::vector<ViewPtr<MessageQueue>>& OutputQueues() const { return m_outputQueues; }
+    const std::vector<ViewPtr<MessageQueue>>& InputQueues() const { return m_inputQueuesFlat; }
 
     /**
      * @brief Handles a source invocation that produced nothing.
@@ -185,7 +221,7 @@ public:
 
     /**
      * @brief Messages this worker dropped: outputs a module could not hand to a
-     *        downstream queue, plus partial fused messages that hit the fusion
+     *        downstream queue, plus partial joined messages that hit the join
      *        timeout. processed + dropped accounts for everything the module saw.
      */
     std::uint64_t DroppedCount() const {
@@ -208,13 +244,13 @@ public:
     }
 
     /**
-     * @brief Partial fused messages this worker dropped after the fusion timeout.
+     * @brief Partial joined messages this worker dropped after the join timeout.
      * @details A subset of DroppedCount(), broken out because it is a different
      * failure: the inputs arrived, one of them just arrived too late.
      */
-    std::uint64_t FusionExpiredCount() const {
+    std::uint64_t JoinExpiredCount() const {
         ObserveCounters();
-        return m_fusionExpiredCount.load(std::memory_order_relaxed);
+        return m_joinExpiredCount.load(std::memory_order_relaxed);
     }
 
     /**
@@ -257,7 +293,7 @@ public:
 
 private:
     /**
-     * @brief Reads the per-module tuning knobs (batch size/timeout, fusion timeout,
+     * @brief Reads the per-module tuning knobs (batch size/timeout, join timeout,
      *        source idle time, sync-inputs flag) and pre-builds the timer labels.
      *        Called once from the constructor so the hot loop does no config lookups.
      *        All values fall back to the historical defaults when absent.
@@ -268,7 +304,7 @@ private:
 
     void LoadConfig();
 
-    void RunFusion();
+    void RunJoin();
 
     /**
      * @brief Efficiently pulls a batch of messages from the input queue.
@@ -292,14 +328,28 @@ private:
      */
     std::vector<Message> PullBatchMessage(std::size_t maxBatchSize, std::chrono::milliseconds batchTimeout);
 
+    /// Greedy, non-blocking form of PullBatchMessage(): only what is queued
+    /// right now, never a wait.
+    void PullBatchNow(std::size_t maxBatchSize, std::vector<Message>& out);
+
+    /// Reused across turns so a pooled step does not allocate a batch vector
+    /// every time it runs: the allocator showed up as 6% of the pooled profile.
+    std::vector<Message> m_batchScratch;
+
 private:
     std::shared_ptr<Module> m_modulePtr = nullptr;
     ViewPtr<Config> m_configPtr;
     std::shared_ptr<PipelineContext> m_context;
     std::unordered_map<std::string, ViewPtr<MessageQueue>> m_inputQueueMap;
 
+    /// The same queues as m_inputQueueMap, in insertion order. The pull paths
+    /// walk this instead of the hash map: hashing a string name on every turn
+    /// was pure overhead, and the order the queues were added in is the order
+    /// the pull paths already relied on.
+    std::vector<ViewPtr<MessageQueue>> m_inputQueuesFlat;
+
     std::atomic<bool> m_stopFlag{false};
-    /// Fusion only: set by the shutdown drain, see RequestDrain().
+    /// Join only: set by the shutdown drain, see RequestDrain().
     std::atomic<bool> m_drainRequested{false};
 
     /*
@@ -319,8 +369,8 @@ private:
      */
     std::atomic<std::uint64_t> m_processedCount{0};
     std::atomic<std::uint64_t> m_droppedCount{0};
-    /// Subset of m_droppedCount: fusion groups dropped after the timeout.
-    std::atomic<std::uint64_t> m_fusionExpiredCount{0};
+    /// Subset of m_droppedCount: join groups dropped after the timeout.
+    std::atomic<std::uint64_t> m_joinExpiredCount{0};
     std::atomic<std::uint64_t> m_failedCount{0};
     /// 1 while only the loop thread writes, 0 once a second thread has reported a
     /// drop or a failure. Flipped by a compare-exchange: the test-then-set this
@@ -340,7 +390,7 @@ private:
     void AddProcessed(std::uint64_t count) { m_processedCount.fetch_add(count, std::memory_order_relaxed); }
     void AddFailed() { m_failedCount.fetch_add(1, std::memory_order_relaxed); }
     void AddDropped(std::uint64_t count) { m_droppedCount.fetch_add(count, std::memory_order_relaxed); }
-    void AddFusionExpired(std::uint64_t count) { m_fusionExpiredCount.fetch_add(count, std::memory_order_relaxed); }
+    void AddJoinExpired(std::uint64_t count) { m_joinExpiredCount.fetch_add(count, std::memory_order_relaxed); }
 
     /// Acquire-side bookend: everyone who reads a counter loads this first.
     /// Cheap enough for a snapshot, and it keeps a snapshot's counter loads from
@@ -361,10 +411,10 @@ private:
 
     // Per-module tuning, resolved once in LoadConfig().
     std::size_t m_maxBatchSize = 4;
-    /// Multi-input switch: when inputs are not fused, a batch is collected from
+    /// Multi-input switch: when inputs are not joined, a batch is collected from
     /// every input queue until it is full or this timeout elapses.
     std::chrono::milliseconds m_batchTimeout{100};
-    std::chrono::milliseconds m_fusionTimeout{60000};
+    std::chrono::milliseconds m_joinTimeout{60000};
     int m_sourceIdleMs = 1;
     /// Set by a source module for the invocation that has just returned, see
     /// NoteBlockedWait().
@@ -374,6 +424,7 @@ private:
     /// on (see IdleAfterEmptyOutput()).
     std::vector<ViewPtr<MessageQueue>> m_outputQueues;
     bool m_syncInputs = false;
+    bool m_outputsBlocked = false;  ///< see BlockedOnOutputs()
     // Profiling costs a name copy and a registry lock per measurement; the
     // work loop only pays it for modules that opt in.
     bool m_profileTimers = false;

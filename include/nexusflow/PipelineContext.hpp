@@ -1,8 +1,10 @@
 #ifndef NEXUSFLOW_PIPELINE_CONTEXT_HPP
 #define NEXUSFLOW_PIPELINE_CONTEXT_HPP
 
+#include <nexusflow/QueueFullPolicy.hpp>
 #include <nexusflow/Logging.hpp>
 #include <nexusflow/MetricsCollector.hpp>
+#include <nexusflow/ThreadPoolMapping.hpp>
 
 #include <atomic>
 #include <cstddef>
@@ -139,6 +141,43 @@ public:
     /// Whether this pipeline's modules record per-hop stage timings.
     bool ModuleTimingsEnabled() const;
 
+    /**
+     * @brief Sets how many host threads drive the modules of this pipeline.
+     * @details 0 (the default) keeps the historical model: every module owns
+     * one thread. A positive value shares that many threads between the
+     * modules; module i is hosted by thread i % threadCount for its whole
+     * run, which is what lets a worker keep its single-writer counters.
+     * Join modules (a sink with several synchronised inputs) block on
+     * every input of a group and therefore keep their own thread.
+     *
+     * Chainable with the other setters:
+     *     pipeline->GetContext()->WithThreadPoolSize(4);
+     *
+     * Must be set before Start(); the value is read when the pipeline
+     * starts and stays fixed for that run.
+     */
+    PipelineContext& WithThreadPoolSize(std::size_t threadCount);
+
+    /// Threads the next Start() will share between this pipeline's modules;
+    /// 0 means one thread per module.
+    std::size_t GetThreadPoolSize() const;
+
+    /**
+     * @brief How the next Start() packs modules into the pool's threads.
+     *
+     * kContiguous (default) gives each thread a run of consecutive stages;
+     * kRoundRobin deals them out one per thread. Ignored when the pool size
+     * is 0. Must be set before Start().
+     */
+    PipelineContext& WithThreadPoolMapping(ThreadPoolMapping mapping);
+
+    /// See WithThreadPoolMapping().
+    ThreadPoolMapping GetThreadPoolMapping() const;
+
+    /** Selects what modules do when an output queue is full (default kBlock). */
+    PipelineContext& WithQueueFullPolicy(QueueFullPolicy policy);
+    QueueFullPolicy GetQueueFullPolicy() const;
+
 private:
     std::string m_name;
 
@@ -157,6 +196,12 @@ private:
     /// See EnableModuleTimings(): pressing this switch is the only pipeline-wide
     /// reason to pay for the per-hop timing map.
     std::atomic<bool> m_moduleTimingsEnabled{false};
+    /// 0 means one thread per module; see WithThreadPoolSize().
+    std::atomic<std::size_t> m_threadPoolSize{0};
+    /// See WithThreadPoolMapping(); stored as int like the other enums.
+    std::atomic<int> m_threadPoolMapping{static_cast<int>(ThreadPoolMapping::kContiguous)};
+    /// Stored as int because every trivially copyable enum works that way.
+    std::atomic<int> m_queueFullPolicy{static_cast<int>(QueueFullPolicy::kBlock)};
 };
 
 } // namespace nexusflow

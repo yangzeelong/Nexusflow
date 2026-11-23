@@ -1,6 +1,7 @@
 #ifndef NEXUSFLOW_MODULE_ACTOR_HPP
 #define NEXUSFLOW_MODULE_ACTOR_HPP
 
+#include "core/ThreadPool.hpp"
 #include "core/Worker.hpp"
 #include "dispatcher/Dispatcher.hpp"
 #include "nexusflow/ErrorCode.hpp"
@@ -40,16 +41,19 @@ public:
     std::uint64_t ProcessedCount() const { return m_worker ? m_worker->ProcessedCount() : 0; }
 
     /// Messages this module lost: its dispatcher could not push them downstream
-    /// plus whatever the worker itself dropped (e.g. fusion timeouts).
+    /// plus whatever the worker itself dropped (e.g. join timeouts).
     std::uint64_t DroppedCount() const {
         const std::uint64_t dispatcherDrops = m_dispatcher ? m_dispatcher->DroppedCount() : 0;
+        // Work discarded by the drop policy never reached a queue, but it is
+        // lost work all the same and belongs in the same total.
+        const std::uint64_t policyDrops = m_dispatcher ? m_dispatcher->PolicyDroppedCount() : 0;
         const std::uint64_t workerDrops = m_worker ? m_worker->DroppedCount() : 0;
-        return dispatcherDrops + workerDrops;
+        return dispatcherDrops + policyDrops + workerDrops;
     }
 
-    /// Subset of DroppedCount() that expired in the fusion group instead of
+    /// Subset of DroppedCount() that expired in the join group instead of
     /// being refused by a queue.
-    std::uint64_t FusionExpiredCount() const { return m_worker ? m_worker->FusionExpiredCount() : 0; }
+    std::uint64_t JoinExpiredCount() const { return m_worker ? m_worker->JoinExpiredCount() : 0; }
 
     /// Invocations that threw. processed + dropped + failed accounts for
     /// everything the module was handed.
@@ -65,6 +69,15 @@ public:
      * @brief Requests the stop and joins the worker.
      */
     ErrorCode Stop();
+
+    /**
+     * @brief Hands the next Start() to a shared pool instead of a private
+     *        thread. Pass nullptr to go back to one thread per module.
+     * @details The pool must already be attached when Start() runs: it is
+     * told about the worker there, and it is started by the pipeline once
+     * every actor has been started. Join workers ignore the pool.
+     */
+    void AttachThreadPool(core::ThreadPool* pool) { m_pool = pool; }
 
     /**
      * @brief Tells the worker loop to return, without joining it yet.
@@ -96,7 +109,7 @@ public:
     /**
      * @brief Whether this actor's worker was started (and is therefore joinable).
      */
-    bool IsStarted() const { return m_workThread.joinable(); }
+    bool IsStarted() const { return m_workThread.joinable() || m_poolStarted; }
 
     /**
      * @brief Whether the worker of a previous run is still executing.
@@ -194,6 +207,10 @@ private:
     std::unique_ptr<Config> m_config;
 
     std::thread m_workThread;
+    /// Non-null while this actor's worker is hosted by a shared pool.
+    core::ThreadPool* m_pool = nullptr;
+    /// True between Start() and Stop() while the worker runs on that pool.
+    bool m_poolStarted = false;
 
     std::atomic<std::uint64_t> m_lastDrainInputsMs{0};
     std::atomic<std::uint64_t> m_lastExitLoopMs{0};

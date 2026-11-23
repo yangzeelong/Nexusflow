@@ -7,6 +7,28 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增可选的队列满策略 `QueueFullPolicy::kDrop`（`PipelineContext::WithQueueFullPolicy`）：
+  输出队列满时丢弃整条消息而不是阻塞（拒收发生在模块发送路径，队列里的旧消息不会被驱逐），丢弃数计入 `ModuleSnapshot::droppedTotal`；默认仍是 `kBlock`。
+  基准侧新增 `--queue-full block|drop`，`cov,` 行在 drop 下把策略丢弃记为预期结果。
+
+### Changed
+
+- **breaking（未发版）**：框架里“汇合”这套概念统一改名为 join，与公开头文件注释和示例目录一致：
+  `Worker::RunJoin()`、`Worker::HasJoinInputs()`、`ModuleSnapshot::joinExpiredTotal`、
+  `Worker::AddJoinExpired()`、`Worker::m_joinTimeout`；旧名 `fusion*` 全部移除。
+  配置键优先读 `joinTimeoutMs`，同时兼容旧拼写 `fusionTimeoutMs`（保留一个版本）。
+- 基准文档 §14.5 的池化对比改用 60 s 窗口重测：此前 5 s 窗口在 WSL2 上量到的是进程/虚拟机启动后的爬坡段，非池化吞吐被低估约 2 倍；同时把“跨平台 p0 数字至少用 60 s 窗口”写进测量协议。
+
+### Fixed
+
+- 线程池的空闲退避把 `sleep_for(10us/50us)` 当成"等一会儿"，而 MSVC 会向上取整成
+  `Sleep(1)` 并按系统 tick 醒来（实测 1.9 ms；默认分辨率下 15.4 ms），池线程又没有唤醒源，
+  于是每次空闲都让这一级流水线停一个 tick：MSVC 上 pool4 只有 pool0 的 63–68%。
+  退避阶梯改为"4096 轮 PAUSE → 4096 轮 yield → 1 ms 停泊"，pool4/pool0 回到 93.6%，
+  L16cap8 p4 提升 44%。机制与 API 对照见 `benchmarks/TIMERS.md`。
+
 ## [1.0.2] - 2026-11-23
 
 性能补丁：不改 API、不改行为，只把热路径上的两次时钟读取挪到“有人开启模块计时”之后。
@@ -27,7 +49,7 @@
 
 - 基准新增 `cycles_per_msg` 列（`benchmarks/TscClock.hpp`，TSC 三窗校准）：
   `cpu/msg × TSC 频率`，去掉主频差异；非 x86 上该列为 0，不伪造。
-- `benchmarks/HARNESS.md §4` 重写指标口径：交付吞吐 / CPU 归一吞吐 /
+- `benchmarks/README.md` 的「测量协议」§4 重写指标口径：交付吞吐 / CPU 归一吞吐 /
   每消息 CPU / 每消息周期 四条定义、三条恒等式，以及"Google Benchmark 的
   `items_per_second` 是 CPU 口径"这一常见坑。
 - `benchmarks/PERFORMANCE-desktop.md §1.2` 记录 3/4/16 模块的 cycles/消息
@@ -44,7 +66,7 @@
   在满时阻塞、`TryPush` 立即返回 `kQueueFull`；`Stop()` 会排水并在停机后拒绝新输入。
   配套 6 个单测（`tests/test/PipelinePushTest.cpp`）与 README
   "Feeding a Running Pipeline" 一节。
-- 基准工具链：`benchmarks/HARNESS.md`（测量规则与维度）、`benchmarks/RawPipeline.hpp`
+- 基准工具链：`benchmarks/README.md` 的「测量协议」节（测量规则与维度）、`benchmarks/RawPipeline.hpp`
   （裸线程基线）、按机器分开的 `benchmarks/PERFORMANCE-laptop.md` 与
   `benchmarks/PERFORMANCE-desktop.md`。`pipeline_benchmark` 新增 workload
   （delay / compute / memory）、inject 拓扑、`--cpus`、`--timings`、RSS 与停机采样、

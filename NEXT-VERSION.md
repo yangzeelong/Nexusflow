@@ -59,17 +59,17 @@
 
 - **硬约束**：`AGENTS.md` §5 的前提是"每个计数器只有一个写线程"。L2 靠"模块固定宿主线程"保住这一点，plain `++` + `PublishCounters()` 不变。代价是 `WorkLoop()`（阻塞式 while）必须拆成非阻塞的 `Step()`，由宿主线程轮询自己那组模块——**延迟特征会变，必须用曲线说话**。
 - **第二个硬约束**：停机顺序是"生产者先关边，再 `actor->Stop()` → `join()`"。共享线程后 join 无法表达"单个模块排水完成" → 完成信号要改成 per-module 的完成标志（C++14 用 `atomic` + `condition_variable` 自写），`join` 只留给池析构。
-- **前置条件已满足**：`pipeline_benchmark` 已参数化（`--modules/--branches/--capacity/--batch/--observe`，规则见 `benchmarks/HARNESS.md`），台式机 2–40 模块阶梯已经扫出 16→18 的拐点（§3.4）；线程模型改动直接用这条阶梯量收益。
+- **前置条件已满足**：`pipeline_benchmark` 已参数化（`--modules/--branches/--capacity/--batch/--observe`，规则见 `benchmarks/README.md` 的「测量协议」节），台式机 2–40 模块阶梯已经扫出 16→18 的拐点（§3.4）；线程模型改动直接用这条阶梯量收益。
 
 验收：同等吞吐下线程数下降；`WorkerBehaviorTest` / `PipelineLifecycleTest` 全绿；`AGENTS.md` §5 同步更新。
 
-### 3.2 融合批处理 —— [`src/core/Worker.cpp:316`](src/core/Worker.cpp#L316) `Worker::RunFusion()`
+### 3.2 融合批处理 —— [`src/core/Worker.cpp:316`](src/core/Worker.cpp#L316) `Worker::RunJoin()`
 
-现状（已读代码确认）：`messageCache` 是 `unordered_map<uint64_t, unordered_map<std::string, Message>>`，凑齐一组**立刻**处理且一组只装一条 —— `fusedMessageVec.clear(); push_back(MakeMessage(...)); ProcessBatch(...)`。**两处**要改：正常路径 [`377-380`](src/core/Worker.cpp#L377-L380) 与排水路径 [`415-420`](src/core/Worker.cpp#L415-L420)。函数开头第 317 行就是这条 TODO。
+现状（已读代码确认）：`messageCache` 是 `unordered_map<uint64_t, unordered_map<std::string, Message>>`，凑齐一组**立刻**处理且一组只装一条 —— `joinedMessageVec.clear(); push_back(MakeMessage(...)); ProcessBatch(...)`。**两处**要改：正常路径 [`377-380`](src/core/Worker.cpp#L377-L380) 与排水路径 [`415-420`](src/core/Worker.cpp#L415-L420)。函数开头第 317 行就是这条 TODO。
 
 要做：
 
-- 一次迭代把所有凑齐的组攒进同一个 `fusedMessageVec`，最后只调一次 `ProcessBatch`；
+- 一次迭代把所有凑齐的组攒进同一个 `joinedMessageVec`，最后只调一次 `ProcessBatch`；
 - 内层 `unordered_map<std::string, Message>` 换成小 `vector`（输入数已知 = `expectedInputCount`），输入边 → 下标在启动时预建，省掉每消息的哈希与字符串比较；
 - **错误语义要钉死**：现在每组各自 try/catch、按组计 `AddProcessed/AddFailed`；改成批调用后一个组抛异常会中断整批 → 取"整批一个 try/catch，异常时剩余条数计 `AddFailed(n)`"，并用用例写清；
 - **必须测内存**：半凑齐状态下 `messageCache` 的峰值（`GetSnapshot()` 看不到，用进程 RSS 或临时统计，不要入库）。
@@ -91,7 +91,7 @@
 
 ### 3.4 本轮基准暴露的框架问题（下版优化清单）
 
-> 数据：[`benchmarks/PERFORMANCE-desktop.md`](benchmarks/PERFORMANCE-desktop.md)（台式机 i7-14700KF，20 物理 / 28 逻辑核；114 条 `stat`、342 条 `cov` 全 ok；duration 5 s × 3，observe full；规则见 [`benchmarks/HARNESS.md`](benchmarks/HARNESS.md)）。这里列的是**框架问题**，不是测量误差；数字只用于同机前后对比。
+> 数据：[`benchmarks/PERFORMANCE-desktop.md`](benchmarks/PERFORMANCE-desktop.md)（台式机 i7-14700KF，20 物理 / 28 逻辑核；114 条 `stat`、342 条 `cov` 全 ok；duration 5 s × 3，observe full；规则见 [`benchmarks/README.md` 的「测量协议」节](benchmarks/README.md#测量协议)）。这里列的是**框架问题**，不是测量误差；数字只用于同机前后对比。
 
 **P0：线程模型的断崖（§3.1 的直接动机，现在有曲线了）**
 
@@ -121,11 +121,11 @@
 - 3 模块 batch4、cap8：**0.931 µs/消息、3.156 M msg/s、约 2.9 核**。
 - 目标：3 模块 batch4 ≤ 0.75 µs（−20%），2 模块 batch1 ≤ 0.70 µs；先动 §3.3 第 1 项（调度链），再动分配。注意这是 CPU 时间不是延迟：真实 60 fps × 4 分支下 0.93 µs/消息约等于 0.02% 一个核。
 
-**P1：fan-out / fusion 的每帧成本**
+**P1：fan-out / join 的每帧成本**
 
 - 8 分支：4.950 M msg/s = 618 K 帧/s，每帧 14.877 µs；1 分支 1.14 µs/帧。
 - 8 分支融合：361 K 帧/s、26.749 µs/帧（spread 13.9%，标 unstable）。
-- 要做：广播路径去掉可以合并的 per-branch 检查；融合按 §3.2 批量。验收：fan8 ≤ 10 µs/帧，fusion8 ≥ 500 K 帧/s。
+- 要做：广播路径去掉可以合并的 per-branch 检查；融合按 §3.2 批量。验收：fan8 ≤ 10 µs/帧，join8 ≥ 500 K 帧/s。
 
 **P1：批处理语义**
 
@@ -146,7 +146,7 @@
 
 ---
 
-## 4. 性能现状（数字见 [`benchmarks/PERFORMANCE-laptop.md`](benchmarks/PERFORMANCE-laptop.md)，规则见 [`benchmarks/HARNESS.md`](benchmarks/HARNESS.md)）
+## 4. 性能现状（数字见 [`benchmarks/PERFORMANCE-laptop.md`](benchmarks/PERFORMANCE-laptop.md)，规则见 [`benchmarks/README.md` 的「测量协议」节](benchmarks/README.md#测量协议)）
 
 笔记本（i7-11800H，8 物理核）：3 模块线性、模块内无计算、capacity 8、batch 4（默认）——约 **2.47 M msg/s**、**1.20 µs CPU/消息**、**约 2.9 核**。同构的裸线程 + 裸 SpscQueue 基线是 **0.19 µs/消息**（零分配口径）、**0.32 µs**（每消息分配口径）。
 
@@ -165,7 +165,7 @@
 
 ## 5. 验收口径
 
-同拓扑、同机器、同 batch、同观测模式；每档 3 次，报 `median [min .. max]`，从 `stat,` 行取数，覆盖率断言（`cov,`）必须 ok。数字连同 **commit + 机器名** 写进 `benchmarks/PERFORMANCE-<machine>.md`，**不许跨机器比绝对值**。没有前后数字的"性能优化"不算完成——完整规则见 [`benchmarks/HARNESS.md`](benchmarks/HARNESS.md)。
+同拓扑、同机器、同 batch、同观测模式；每档 3 次，报 `median [min .. max]`，从 `stat,` 行取数，覆盖率断言（`cov,`）必须 ok。数字连同 **commit + 机器名** 写进 `benchmarks/PERFORMANCE-<machine>.md`，**不许跨机器比绝对值**。没有前后数字的"性能优化"不算完成——完整规则见 [`benchmarks/README.md` 的「测量协议」节](benchmarks/README.md#测量协议)。
 
 ---
 
@@ -180,11 +180,11 @@
 ### 6.2 风险
 
 - **只有 §3.1 可能把框架改坏**：§5 的单写者计数器前提、停机里"生产者先关边再 join"的顺序，都绑在"每模块一个线程"上。动它要单独分支 + 测量数据 + 文档同步。
-- **§3.2 动的是没有专门用例的代码**：`RunFusion()` 现在没有"融合 batch 大小 > 1"的用例，先补一个再改实现。
+- **§3.2 动的是没有专门用例的代码**：`RunJoin()` 现在没有"融合 batch 大小 > 1"的用例，先补一个再改实现。
 
 ### 6.3 顺手可做（按价值排序）
 
-- ~~**benchmark 拓扑参数化**（`--modules N`）~~：已做——`--modules`/`--branches`/`--capacity`/`--batch`/`--observe` 阶梯加上三条裸基线（`--baseline raw|raw-alloc|raw-message`），规则见 `benchmarks/HARNESS.md`，§3.1 / §3.2 的收益可以直接量。
+- ~~**benchmark 拓扑参数化**（`--modules N`）~~：已做——`--modules`/`--branches`/`--capacity`/`--batch`/`--observe` 阶梯加上三条裸基线（`--baseline raw|raw-alloc|raw-message`），规则见 `benchmarks/README.md` 的「测量协议」节，§3.1 / §3.2 的收益可以直接量。
 - **CI 基准记录**：先只记录数字贴到 PR，不做门禁（托管 runner 噪声大，70% 阈值会假红）。
 - **`ToString()` 补 `AppendTo(std::string&)`**：现在 `GetSnapshot()` 与 `ToString()` 各拼一次字符串。
 - **`MetricSamples` 窗口容量可配**：现在 1024 是编译期常量，p99 可信度直接取决于它。

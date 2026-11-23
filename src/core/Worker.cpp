@@ -13,6 +13,10 @@
 
 namespace nexusflow { namespace core {
 
+/// Messages (or batches) one StepOnce() turn may move before it hands the
+/// slot back. Bounded so a busy module cannot starve its slot mates.
+constexpr int kStepTurns = 16;
+
 namespace {
 
 // A profiled loop iteration measures through a timer handle interned once, so
@@ -157,11 +161,17 @@ void Worker::LoadConfig() {
     }
     m_batchTimeout = std::chrono::milliseconds(batchTimeoutMs);
 
-    int fusionTimeoutMs = m_configPtr->GetValueOrDefault<int>("fusionTimeoutMs", static_cast<int>(m_fusionTimeout.count()));
-    if (fusionTimeoutMs < 0) {
-        fusionTimeoutMs = 0;
+    int joinTimeoutMs = m_configPtr->GetValueOrDefault<int>("joinTimeoutMs", -1);
+    if (joinTimeoutMs < 0) {
+        // v1.0 compatibility: this key was named "fusionTimeoutMs" before the
+        // fusion -> join rename. Keep reading the old spelling for one release.
+        joinTimeoutMs = m_configPtr->GetValueOrDefault<int>(
+            "fusionTimeoutMs", static_cast<int>(m_joinTimeout.count()));
     }
-    m_fusionTimeout = std::chrono::milliseconds(fusionTimeoutMs);
+    if (joinTimeoutMs < 0) {
+        joinTimeoutMs = 0;
+    }
+    m_joinTimeout = std::chrono::milliseconds(joinTimeoutMs);
 
     int sourceIdleMs = m_configPtr->GetValueOrDefault<int>("sourceIdleMs", m_sourceIdleMs);
     if (sourceIdleMs < 0) {
@@ -207,7 +217,7 @@ void Worker::WorkLoop() {
 
     if (m_syncInputs) {
         assert(!isSourceModule);
-        RunFusion(); // Run the fusion module.
+        RunJoin(); // Run the join module.
     } else {
         // Per-module timing splits each loop iteration into the time spent
         // waiting for work and the time spent processing it. The difference
@@ -313,7 +323,7 @@ void Worker::WorkLoop() {
     LOG_DEBUG("Worker for module '{}' finished.", m_modulePtr->GetModuleName());
 }
 
-void Worker::RunFusion() {
+void Worker::RunJoin() {
     // TODO: 如何优化呢，现在只有单Batch, 并且需要测试下内存占用.
 
     // Key: message id, value: map of source module name and message.
@@ -325,17 +335,17 @@ void Worker::RunFusion() {
     std::unordered_map<uint64_t, uint64_t> cacheArrivalMs;
     const std::size_t expectedInputCount = m_inputQueueMap.size(); // Expected number of inputs.
 
-    // Partial fused messages are dropped after this many milliseconds.
-    const uint64_t timeoutMs = static_cast<uint64_t>(m_fusionTimeout.count());
+    // Partial joined messages are dropped after this many milliseconds.
+    const uint64_t timeoutMs = static_cast<uint64_t>(m_joinTimeout.count());
 
     // One message id is in flight per input at most, so the cache stays close to
     // this size; reserving keeps the per-message inserts off the rehash path.
     messageCache.reserve(std::max<std::size_t>(expectedInputCount, 8));
     cacheArrivalMs.reserve(std::max<std::size_t>(expectedInputCount, 8));
 
-    // Reused across iterations: a fresh vector per fused message meant one heap
-    // allocation per fused batch.
-    std::vector<Message> fusedMessageVec;
+    // Reused across iterations: a fresh vector per joined message meant one heap
+    // allocation per joined batch.
+    std::vector<Message> joinedMessageVec;
 
     while (!m_stopFlag.load()) {
         uint64_t currentTimeMs =
@@ -356,7 +366,7 @@ void Worker::RunFusion() {
                 // it -- so two inputs carrying the same message id both landed
                 // under "" and the group could only ever hold one entry. It never
                 // reached expectedInputCount, so every such group was dropped
-                // silently at the fusion timeout (60 s by default).
+                // silently at the join timeout (60 s by default).
                 const std::string& inputEdge = queuePair.first;
                 cacheArrivalMs.emplace(messageId, currentTimeMs); // Keeps the first-seen time.
                 messageCache[messageId][inputEdge] = message;
@@ -373,17 +383,17 @@ void Worker::RunFusion() {
             LOG_TRACE("Number of inputs received: {}, Expected inputs: {}, module name: {}", messageMap.size(), expectedInputCount,
                       m_modulePtr->GetModuleName());
             if (messageMap.size() == expectedInputCount) {
-                // Construct a fused message and concat to batchMessage.
-                fusedMessageVec.clear();
-                fusedMessageVec.push_back(MakeMessage(std::move(messageMap)));
+                // Construct a joined message and concat to batchMessage.
+                joinedMessageVec.clear();
+                joinedMessageVec.push_back(MakeMessage(std::move(messageMap)));
                 try {
-                    m_modulePtr->ProcessBatch(fusedMessageVec); // process the fused message
-                    AddProcessed(fusedMessageVec.size());
+                    m_modulePtr->ProcessBatch(joinedMessageVec); // process the joined message
+                    AddProcessed(joinedMessageVec.size());
                 } catch (const std::exception& e) {
-                    LOG_ERROR("Module '{}' threw while processing a fused batch: {}", m_modulePtr->GetModuleName(), e.what());
+                    LOG_ERROR("Module '{}' threw while processing a joined batch: {}", m_modulePtr->GetModuleName(), e.what());
                     AddFailed();
                 } catch (...) {
-                    LOG_ERROR("Module '{}' threw an unknown exception while processing a fused batch.",
+                    LOG_ERROR("Module '{}' threw an unknown exception while processing a joined batch.",
                               m_modulePtr->GetModuleName());
                     AddFailed();
                 }
@@ -391,10 +401,10 @@ void Worker::RunFusion() {
                 it = messageCache.erase(it); // remove the message from cache
             } else {
                 const auto arrivalIt = cacheArrivalMs.find(messageId);
-                const bool fusionTimedOut = arrivalIt != cacheArrivalMs.end() && currentTimeMs - arrivalIt->second >= timeoutMs;
+                const bool joinTimedOut = arrivalIt != cacheArrivalMs.end() && currentTimeMs - arrivalIt->second >= timeoutMs;
                 // A drain only means "stop waiting for inputs that cannot arrive".
                 // As long as this stage reads from an open input it keeps converting
-                // them, so the decision to forward an incomplete fusion group belongs
+                // them, so the decision to forward an incomplete join group belongs
                 // to the iteration that sees every input closed, not to every
                 // iteration while draining. Deciding earlier counts the missing side
                 // as dropped on each pass and leaves the producer's messages unread
@@ -407,35 +417,35 @@ void Worker::RunFusion() {
                     }
                 }
                 const bool drainGaveUp = m_drainRequested.load() && !nextIterationPlanned;
-                const bool timedOut = fusionTimedOut || drainGaveUp;
+                const bool timedOut = joinTimedOut || drainGaveUp;
                 if (timedOut) {
-                    if (drainGaveUp && !fusionTimedOut) {
+                    if (drainGaveUp && !joinTimedOut) {
                         LOG_DEBUG("Drain requested; forwarding incomplete message {} without waiting for the missing inputs",
                                   messageId);
-                        fusedMessageVec.clear();
-                        fusedMessageVec.push_back(MakeMessage(std::move(messageMap)));
+                        joinedMessageVec.clear();
+                        joinedMessageVec.push_back(MakeMessage(std::move(messageMap)));
                         const std::size_t missing =
                             expectedInputCount > messageMap.size() ? expectedInputCount - messageMap.size() : 0;
                         try {
-                            m_modulePtr->ProcessBatch(fusedMessageVec);
-                            AddProcessed(fusedMessageVec.size());
+                            m_modulePtr->ProcessBatch(joinedMessageVec);
+                            AddProcessed(joinedMessageVec.size());
                         } catch (const std::exception& e) {
-                            LOG_ERROR("Module '{}' threw while processing a partially fused batch: {}",
+                            LOG_ERROR("Module '{}' threw while processing a partially joined batch: {}",
                                       m_modulePtr->GetModuleName(), e.what());
                             AddFailed();
                         } catch (...) {
-                            LOG_ERROR("Module '{}' threw an unknown exception while processing a partially fused batch.",
+                            LOG_ERROR("Module '{}' threw an unknown exception while processing a partially joined batch.",
                                       m_modulePtr->GetModuleName());
                             AddFailed();
                         }
                         AddDropped(missing);
-                        AddFusionExpired(missing);
+                        AddJoinExpired(missing);
                     } else {
                         LOG_WARN("Timeout for message with ID: {}, will be removed from cache", messageId);
-                        // Every partial in the cache is one fused message that will
+                        // Every partial in the cache is one joined message that will
                         // never reach the module, so it counts as dropped output.
                         AddDropped(messageMap.size());
-                        AddFusionExpired(messageMap.size());
+                        AddJoinExpired(messageMap.size());
                     }
                     cacheArrivalMs.erase(arrivalIt);
                     it = messageCache.erase(it);
@@ -456,10 +466,156 @@ void Worker::RunFusion() {
         }
 #endif
 
-        // One iteration is one snapshot boundary. RunFusion() reaches here
+        // One iteration is one snapshot boundary. RunJoin() reaches here
         // once per pass whatever happened inside it, including the paths that
         // only drop or only forward, so readers see every recorded number.
         PublishCounters();
+    }
+}
+
+std::size_t Worker::OutputRoom() const {
+    std::size_t room = std::numeric_limits<std::size_t>::max();
+    for (const auto& queue : m_outputQueues) {
+        if (!queue) {
+            continue;
+        }
+        const int edgeCapacity = queue->capacity();
+        if (edgeCapacity <= 0) {
+            // Unbounded edge: it never back-pressures.
+            continue;
+        }
+        const std::size_t size = queue->getSize();
+        const std::size_t available = size >= static_cast<std::size_t>(edgeCapacity)
+                                          ? 0
+                                          : static_cast<std::size_t>(edgeCapacity) - size;
+        if (available < room) {
+            room = available;
+        }
+    }
+    return room;
+}
+
+bool Worker::OutputsHaveRoom() const {
+    for (const auto& queue : m_outputQueues) {
+        if (!queue) {
+            continue;
+        }
+        const int edgeCapacity = queue->capacity();
+        if (edgeCapacity > 0 && queue->getSize() >= static_cast<std::size_t>(edgeCapacity)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool Worker::StepOnce() {
+    if (m_stopFlag.load(std::memory_order_relaxed)) {
+        MarkExited();
+        return false;
+    }
+    if (!m_modulePtr) {
+        return false;
+    }
+    // A join worker parks on inputs that may never arrive, so it never runs
+    // on a shared thread; ModuleActor keeps it on its own.
+    if (m_syncInputs) {
+        return false;
+    }
+    // One turn may move several messages: a shared slot pays for the scheduling
+    // round and the counter publication once, so moving just one message per
+    // turn costs more than it buys in fairness. The turn count is bounded so a
+    // busy module still hands its slot back promptly.
+    bool didWork = false;
+    // Room is measured once per call, not once per turn: OutputRoom() walks
+    // every output edge and is the single most expensive line in the pooled
+    // hot path. Every edge has exactly one producer (this worker), so the room
+    // only shrinks by what this call itself pushes, and counting down a local
+    // budget is exact for modules that emit at most one message per input per
+    // edge -- which Broadcast() by definition does.
+    std::size_t room = OutputRoom();
+    for (int turn = 0; turn < kStepTurns && room > 0; ++turn) {
+        if (m_inputQueueMap.empty()) {
+            Message emptyMessage;
+            bool produced = false;
+            try {
+                produced = m_modulePtr->ProcessTimed(emptyMessage);
+                if (produced) {
+                    AddProcessed(1);
+                }
+            } catch (const std::exception& e) {
+                LOG_ERROR("Module '{}' threw while processing: {}", m_modulePtr->GetModuleName(), e.what());
+                AddFailed();
+                break;
+            } catch (...) {
+                LOG_ERROR("Module '{}' threw an unknown exception while processing.", m_modulePtr->GetModuleName());
+                AddFailed();
+                break;
+            }
+            if (!produced) {
+                break;
+            }
+            --room;
+            didWork = true;
+            continue;
+        }
+        // Take no more than the tightest output edge can still accept: the
+        // room check above is exact because this worker is the only producer
+        // of every output edge, so a full batch can never overflow a queue and
+        // the pooled path never has to drop.
+        const std::size_t take = m_maxBatchSize < room ? m_maxBatchSize : room;
+        std::vector<Message>& batchMessage = m_batchScratch;
+        PullBatchNow(take, batchMessage);
+        if (batchMessage.empty()) {
+            break;
+        }
+        const std::size_t produced = batchMessage.size();
+        try {
+            m_modulePtr->ProcessBatch(batchMessage);
+            AddProcessed(batchMessage.size());
+        } catch (const std::exception& e) {
+            LOG_ERROR("Module '{}' threw while processing a batch: {}", m_modulePtr->GetModuleName(), e.what());
+            AddFailed();
+            break;
+        } catch (...) {
+            LOG_ERROR("Module '{}' threw an unknown exception while processing a batch.", m_modulePtr->GetModuleName());
+            AddFailed();
+            break;
+        }
+        room -= produced;
+        didWork = true;
+    }
+    // Remembered for the pool loop: it used to re-scan every edge after the
+    // turn loop to decide whether the slot was blocked, duplicating the scan
+    // StepOnce had already paid for.
+    m_outputsBlocked = (room == 0);
+    if (didWork) {
+        PublishCounters();
+    }
+    return didWork;
+}
+
+void Worker::MarkExited() {
+    std::lock_guard<std::mutex> lock(m_loopMutex);
+    m_loopExited = true;
+}
+
+void Worker::PullBatchNow(std::size_t maxBatchSize, std::vector<Message>& batchMessage) {
+    batchMessage.clear();
+    if (batchMessage.capacity() < maxBatchSize) {
+        batchMessage.reserve(maxBatchSize);
+    }
+    for (auto& queue : m_inputQueuesFlat) {
+        while (batchMessage.size() < maxBatchSize) {
+            Message message;
+            if (queue->tryPop(message)) {
+                batchMessage.push_back(std::move(message));
+            } else {
+                break;
+            }
+        }
+        if (batchMessage.size() >= maxBatchSize) {
+            break;
+        }
     }
 }
 
@@ -475,8 +631,7 @@ std::vector<Message> Worker::PullBatchMessage(size_t maxBatchSize, std::chrono::
 
     // --- Phase 1: Greedy non-blocking pull ---
     // Quickly drain any messages that are already waiting in the queues.
-    for (auto& item : m_inputQueueMap) {
-        auto& queue = item.second;
+    for (auto& queue : m_inputQueuesFlat) {
         while (batchMessage.size() < maxBatchSize) {
             Message message;
             if (queue->tryPop(message)) {
@@ -515,8 +670,7 @@ std::vector<Message> Worker::PullBatchMessage(size_t maxBatchSize, std::chrono::
         }
 
         // Iterate through all input queues and perform a short wait on each.
-        for (auto& item : m_inputQueueMap) {
-            auto& queue = item.second;
+        for (auto& queue : m_inputQueuesFlat) {
             Message msg;
             // Wait for a very short period (e.g., 1ms). This is the key to avoiding
             // busy-waiting while remaining responsive to multiple inputs.

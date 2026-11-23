@@ -84,9 +84,9 @@ cmake --build build --config Release --target pipeline_benchmark --parallel 16
 
 ## P1 — 下个大版本的核心优化
 
-### 4. 融合批处理 (Fusion batching)
+### 4. 融合批处理 (Join batching)
 
-位置：`src/core/Worker.cpp` `Worker::RunFusion()`，里面有现成 TODO：
+位置：`src/core/Worker.cpp` `Worker::RunJoin()`，里面有现成 TODO：
 `// TODO: 如何优化呢，现在只有单Batch, 并且需要测试下内存占用.`
 
 现状问题：
@@ -168,7 +168,7 @@ cmake --build build --config Release --target pipeline_benchmark --parallel 16
   （原先只有慢路径清 flag，慢路径因此永不可达，检测形同不存在）。
 - **`Start()`**：在 `restart()` 之前检查是否还有上一轮被放弃的线程（`IsStarted()`），
   有则拒绝启动 —— 否则会在活线程脚下重置队列索引。
-- **`RunFusion()`**：分组 key 由 `MessageMeta::sourceName` 改为**输入边名**。框架从不写
+- **`RunJoin()`**：分组 key 由 `MessageMeta::sourceName` 改为**输入边名**。框架从不写
   `sourceName`，同一 messageId 的多路输入会挤在同一个 key 上、永远凑不齐，最后按 60 s
   超时静默丢弃。同时给完整分组的异常路径补上 failed 计数。
 - **`PullBatchMessage()`**：所有输入边都 shutdown 时提前返回，不再空转整个 batchTimeout。

@@ -23,9 +23,9 @@ CMake、`cmake/include.cmake`、`examples/`、`benchmarks/` 里不出现具体�
 | `include/nexusflow/` | 公开头文件（Message/Module/Pipeline/PipelineBuilder/ModuleFactory/MetricsCollector/Logging…） |
 | `src/` | 框架实现：`base/`（Graph、队列）、`core/`（Worker）、`module/`（ModuleActor）、`dispatcher/`、`pipeline/impl/`、`common/`（MetricsCollector、Logging 实现） |
 | `include/nexusflow/common/` | 公开的 header-only 容器/工具：`Any`、`ConcurrentQueue`、`Optional`、`ViewPtr`（`Nexusflow::nexusflow_common` INTERFACE target） |
-| `tests/test/` | gtest 用例（`nexusflow_tests`，当前 167 个，见 §3）；**全部用例都在这一层**，没有第二处 test 目录 |
+| `tests/test/` | gtest 用例（`nexusflow_tests`，当前 173 个，见 §3）；**全部用例都在这一层**，没有第二处 test 目录 |
 | `examples/` | 3 个纯框架示例：`1-how-to-use`、`2-linear-vision-pipline`、`3-joined-vision-pipline` |
-| `benchmarks/` | 两个基准目标：Google Benchmark 用例（`nexusflow_benchmarks`）与端到端吞吐（`pipeline_benchmark`，`--capacity`）；**全部基准源码都在这一层**；测量规则见 [`benchmarks/HARNESS.md`](benchmarks/HARNESS.md) |
+| `benchmarks/` | 两个基准目标：Google Benchmark 用例（`nexusflow_benchmarks`）与端到端吞吐（`pipeline_benchmark`，`--capacity`）；**全部基准源码都在这一层**；测量规则见 [`benchmarks/README.md` 的「测量协议」节](benchmarks/README.md#测量协议) |
 | `cmake/` | `include.cmake`（第三方依赖 include）、`Summary.cmake`、`3rdparty/*.cmake`（FetchContent 定义） |
 | `extensions/` | 可选扩展；机制与新增扩展见 [`extensions/README.md`](extensions/README.md) |
 | `tools/` | 仓库级脚本（`clang-format-all.sh`） |
@@ -111,8 +111,8 @@ cmake --build build --config Release --parallel 16
 ./build/tests/Release/nexusflow_tests.exe
 ```
 
-实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **167 tests
-from 27 suites，PASSED 167**（MSVC 19.40）。
+实测：`build/src/Release/nexusflow.lib` 编译通过，`nexusflow_tests` **173 tests
+from 29 suites，PASSED 173**（MSVC 19.40）。
 
 ---
 
@@ -122,7 +122,7 @@ from 27 suites，PASSED 167**（MSVC 19.40）。
 ./build/tests/nexusflow_tests   # Unix（Makefiles 默认布局）；Windows 见上（build/tests/Release/）
 ```
 
-- 当前 167 个用例（27 个 suite）：消息 7、计时器 10、图 7、Optional 23（TestOptional 18 + OptionalTest 2 + OptionalThrowingTest 3）、Any 5、ConcurrentQueue 9、Dispatcher 4、日志 8、Config 3、MessageMeta 3、SpscQueue 16、SpscMessageStress 1、Pipeline 生命周期 6、Pipeline 错误路径 14、Pipeline 图序 2、Pipeline 计时 2、Pipeline 指标 8、Pipeline 上下文 9、Pipeline 排水 2、Pipeline 取消 7、Pipeline 停机计时 4、Worker 行为 7、Worker 启动 2、Worker 计时 2、Pipeline 注入 6。
+- 当前 173 个用例（29 个 suite）：消息 7、计时器 10、图 7、Optional 23（TestOptional 18 + OptionalTest 2 + OptionalThrowingTest 3）、Any 5、ConcurrentQueue 9、Dispatcher 4、日志 8、Config 3、MessageMeta 3、SpscQueue 16、SpscMessageStress 1、Pipeline 生命周期 6、Pipeline 错误路径 14、Pipeline 图序 2、Pipeline 计时 2、Pipeline 指标 8、Pipeline 上下文 9、Pipeline 排水 2、Pipeline 取消 7、Pipeline 停机计时 4、Worker 行为 7、Worker 启动 2、Worker 计时 2、Pipeline 注入 6、ThreadPool 4、BackpressurePolicy 2。
 - 用例数随手改：`./build/tests/Release/nexusflow_tests.exe --gtest_list_tests` 数一遍，别照抄本节。
 - 改框架（Message/Module/Pipeline/Dispatcher/Graph/Timer）**必须**跑；不要为了
   让测试通过而改测试语义。
@@ -142,13 +142,13 @@ from 27 suites，PASSED 167**（MSVC 19.40）。
 
 ## 5. 计数器与快照的命名/并发规则
 
-写新的运行期指标时按这一节走（`docs/telemetry.md` 是本地设计笔记，不入库，不要引用它）。
+写新的运行期指标时按这一节走（速查见 [`docs/design/telemetry.md`](docs/design/telemetry.md)，设计讨论见 [`docs/design/telemetry-design.md`](docs/design/telemetry-design.md)）。
 
 **命名**
 
 | 后缀/形式 | 含义 | 例子 |
 | --- | --- | --- |
-| `*Total` | **累计计数**："发生了几次"，只增不减；两次快照相减才有意义 | `pushedTotal`、`poppedTotal`、`discardedTotal`、`processedTotal`、`droppedTotal`、`fusionExpiredTotal`、`failedTotal` |
+| `*Total` | **累计计数**："发生了几次"，只增不减；两次快照相减才有意义 | `pushedTotal`、`poppedTotal`、`discardedTotal`、`processedTotal`、`droppedTotal`、`joinExpiredTotal`、`failedTotal` |
 | `*Ms` | 毫秒值；**不要**在毫秒值上用 `*Total`——"total 多少毫秒"在 `items` 旁边读起来像计数 | `sumMs`（样本耗时之和）、`avgMs`、`p95Ms`、`p99Ms`、`minMs`、`maxMs`、`windowSpanMs`、`drainInputsMs`、`exitLoopMs`、`stopPipelineMs` |
 | 无后缀名词 | 此刻的瞬时值（gauge） | `size`、`capacity` |
 | `max*` | 自上次 `ResetMetrics()` 以来的极值（water mark） | `maxSize` |
@@ -186,6 +186,8 @@ from 27 suites，PASSED 167**（MSVC 19.40）。
 
 ## 6. 硬规则（务必遵守）
 
+> 文档、流程与提交的约束统一在 [`HARNESS.md`](HARNESS.md)；本节只留代码与构建相关的规则。
+
 1. **不要自动 `git commit`**。只有用户明确说"提交/commit"时才提交；否则改动一律
    留在工作区，并在汇报里说明未提交。
 2. **C++14**，不用 C++17+ 语法（结构化绑定、`if constexpr`、`std::optional`、
@@ -198,3 +200,4 @@ from 27 suites，PASSED 167**（MSVC 19.40）。
    本机 `git` 的 `core.autocrlf` 是 `true`（全局配置，不是仓库局部）。在 Windows
    上用 Git Bash 时 `git` 默认 `autocrlf=false`，会把整个工作区显示成 CRLF 假 diff。
 6. 汇报带**数字 + 命令原文**；拿不准标"未确认"，不要猜。
+7. **流程与提交约束**：提交收敛、PR 只能由用户提交、PR 自解释（架构对比表 + 新增函数说明）、文档落点——全部见 [`HARNESS.md`](HARNESS.md)。

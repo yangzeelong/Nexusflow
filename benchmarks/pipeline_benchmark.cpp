@@ -10,7 +10,7 @@
 //     into a spreadsheet (grep '^csv,' over a batch of runs);
 //   * a human-readable block with the median, for reading by eye.
 //
-// Delivered means "the sink processed this many messages". For a fused sink that
+// Delivered means "the sink processed this many messages". For a joined sink that
 // is one per logical frame; for a fan-in that does not synchronise it is one per
 // branch message. The line says which topology produced it.
 
@@ -89,10 +89,18 @@ struct Options {
     /// refusals and yields while an edge is full, never dropping a message.
     std::string pushMode = "block";
     /// diamond: branch_0 sleeps this many microseconds, the straggler that keeps
-    /// fused groups half-complete.
+    /// joined groups half-complete.
     int stragglerUs = 0;
     /// Enable the module per-hop timing chain (`PipelineContext::EnableModuleTimings`).
     bool timings = false;
+    /// 0 = one thread per module (the framework default). Greater than zero
+    /// hosts every non-join module on a shared pool of this many threads.
+    int poolSize = 0;
+    /// How the pool packs modules into its threads; see ThreadPoolMapping.
+    std::string poolMap = "contiguous";
+    /// What a module does when an output edge is full: `none` (block, the
+    /// framework default) or `drop` (drop the message, see QueueFullPolicy).
+    std::string queueFullPolicy = "block";
     std::string logLevel = "warn";
 };
 
@@ -341,6 +349,24 @@ Options ParseOptions(int argc, char* argv[]) {
                 std::exit(1);
             }
             options.logLevel = value;
+        } else if (TakeValue(arg, "--pool-size", argc, argv, i, value)) {
+            options.poolSize = NumberOrExit("--pool-size", value);
+            if (options.poolSize < 0) {
+                std::cerr << "--pool-size expects a non-negative number\n";
+                std::exit(1);
+            }
+        } else if (TakeValue(arg, "--pool-map", argc, argv, i, value)) {
+            if (value != "contiguous" && value != "round-robin") {
+                std::cerr << "unknown --pool-map '" << value << "': expected contiguous or round-robin\n";
+                std::exit(1);
+            }
+            options.poolMap = value;
+        } else if (TakeValue(arg, "--queue-full", argc, argv, i, value)) {
+            if (value != "block" && value != "drop") {
+                std::cerr << "--queue-full expects block or drop\n";
+                std::exit(1);
+            }
+            options.queueFullPolicy = value;
         } else if (arg == "--timings") {
             options.timings = true;
         } else if (arg == "--sync-inputs") {
@@ -353,7 +379,9 @@ Options ParseOptions(int argc, char* argv[]) {
                    "       [--modules N] [--branches N] [--capacity N] [--batch N] [--duration S] [--repeat R]\n"
                    "       [--payload none|1080p-rgb|1080p-yuv420|2k-rgb|2k-yuv420] [--payload-fresh]\n"
                    "       [--workload none|delay|compute|memory] [--delay-us N] [--compute-iters N] [--memory-bytes N]\n"
-                   "       [--cpus N] [--push-mode block|try] [--straggler-us N] [--sync-inputs] [--timings]\n"
+                   "       [--cpus N] [--pool-size N] [--pool-map contiguous|round-robin]\n"
+                   "       [--queue-full block|drop] [--push-mode block|try]\n"
+                   "       [--straggler-us N] [--sync-inputs] [--timings]\n"
                    "       [--log-level trace|debug|info|warn|err|off] [--max-spread P] [--label TEXT]\n";
             std::exit(0);
         } else {
@@ -382,7 +410,7 @@ struct Coverage {
     /// Mid-run (taken while the pipeline still runs, before Stop()).
     std::uint64_t midDropped = 0;
     std::uint64_t midFailed = 0;
-    std::uint64_t midFusionExpired = 0;
+    std::uint64_t midJoinExpired = 0;
     /// After Stop(): the whole run, including the shutdown tail.
     std::uint64_t pushed = 0;
     std::uint64_t popped = 0;
@@ -392,7 +420,7 @@ struct Coverage {
     std::uint64_t processed = 0;
     std::uint64_t dropped = 0;  ///< a module could not hand a message downstream
     std::uint64_t failed = 0;
-    std::uint64_t fusionExpired = 0;
+    std::uint64_t joinExpired = 0;
     std::uint64_t stopMs = 0;
     bool ok = true;
 };
@@ -425,7 +453,7 @@ struct Sample {
     Coverage coverage;
     /// Whole-process resident memory, sampled every 25 ms during the run, in MiB.
     /// Edge memory is `capacity * frame * edges` on paper, but frames and the
-    /// fusion sink's messageCache are invisible to every counter, so this is the
+    /// join sink's messageCache are invisible to every counter, so this is the
     /// only witness for them.
     double rssStartMiB = 0.0;
     double rssPeakMiB = 0.0;
@@ -437,6 +465,11 @@ struct Sample {
     /// inject only: Push/TryPush attempts and refusals (TryPush found the edge full).
     std::uint64_t attempts = 0;
     std::uint64_t refused = 0;
+    /// Pool counters; all zero when the run did not use a pool.
+    std::uint64_t poolRounds = 0;
+    std::uint64_t poolTurns = 0;
+    std::uint64_t poolBlocked = 0;
+    std::uint64_t poolIdle = 0;
 };
 
 /// min / median / max of one metric over the measured runs.
@@ -466,18 +499,18 @@ Stat Summarize(std::vector<double> values) {
  *
  * `pushed == popped + discarded + residual` is the identity Stats.hpp promises;
  * the sink-side check ties the sink's own count back to the graph: the sink is
- * handed one message per logical frame, except on the fusion path, where it is
- * handed one fused message per branch group.
+ * handed one message per logical frame, except on the join path, where it is
+ * handed one joined message per branch group.
  */
 Coverage CoverageOf(const nexusflow::PipelineSnapshot& midRun, const nexusflow::Pipeline& pipeline,
-                    const TopologyShape& shape, bool syncInputs, std::uint64_t delivered) {
+                    const TopologyShape& shape, bool syncInputs, bool dropsAllowed, std::uint64_t delivered) {
     const nexusflow::PipelineSnapshot final = pipeline.GetSnapshot();
     Coverage coverage;
 
     for (const auto& module : midRun.modules) {
         coverage.midDropped += module.droppedTotal;
         coverage.midFailed += module.failedTotal;
-        coverage.midFusionExpired += module.fusionExpiredTotal;
+        coverage.midJoinExpired += module.joinExpiredTotal;
     }
     for (const auto& edge : final.edges) {
         coverage.pushed += edge.pushedTotal;
@@ -492,20 +525,20 @@ Coverage CoverageOf(const nexusflow::PipelineSnapshot& midRun, const nexusflow::
         coverage.processed += module.processedTotal;
         coverage.dropped += module.droppedTotal;
         coverage.failed += module.failedTotal;
-        coverage.fusionExpired += module.fusionExpiredTotal;
+        coverage.joinExpired += module.joinExpiredTotal;
     }
     coverage.stopMs = final.stopPipelineMs;
 
     const std::uint64_t messagesPerFrame =
         (syncInputs && !shape.IsLinear() && shape.branches > 0) ? static_cast<std::uint64_t>(shape.branches) : 1u;
     // While the pipeline runs nothing may be lost. The sink-side count is exact on
-    // every path except fusion: there a frame normally costs `branches` pops, but
+    // every path except join: there a frame normally costs `branches` pops, but
     // a group that drains incomplete costs fewer, so it is checked as a range.
     bool sinkMatches = false;
     if (messagesPerFrame == 1) {
         sinkMatches = coverage.sinkPopped == delivered;
     } else {
-        // Fusion: a frame normally costs `branches` pops, an incomplete group at
+        // Join: a frame normally costs `branches` pops, an incomplete group at
         // shutdown costs fewer, and the messages a half-finished group left in
         // the worker cache were popped but never delivered -- those have to show
         // up as drops at stop, so the excess is only trusted up to that count.
@@ -513,7 +546,11 @@ Coverage CoverageOf(const nexusflow::PipelineSnapshot& midRun, const nexusflow::
         const std::uint64_t extra = coverage.sinkPopped > expected ? coverage.sinkPopped - expected : 0;
         sinkMatches = coverage.sinkPopped >= delivered && extra <= coverage.dropped;
     }
-    coverage.ok = coverage.midDropped == 0 && coverage.midFailed == 0 && coverage.midFusionExpired == 0 &&
+    // A lossy policy makes drops a normal outcome rather than a leak: they are
+    // still counted and reported on the `cov,` line, they just no longer fail the
+    // run. Everything else must hold even then.
+    const bool nothingLost = dropsAllowed || coverage.midDropped == 0;
+    coverage.ok = nothingLost && coverage.midFailed == 0 && coverage.midJoinExpired == 0 &&
                   coverage.pushed == coverage.popped + coverage.discarded + coverage.residual && sinkMatches;
     return coverage;
 }
@@ -694,6 +731,20 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
         std::exit(1);
     }
 
+    if (options.poolSize > 0) {
+        // Start() creates the pool from this context value; Init() does not
+        // look at it, so setting it here is early enough.
+        built.pipeline->GetContext()->WithThreadPoolSize(static_cast<std::size_t>(options.poolSize));
+        built.pipeline->GetContext()->WithThreadPoolMapping(
+            options.poolMap == "round-robin" ? nexusflow::ThreadPoolMapping::kRoundRobin
+                                             : nexusflow::ThreadPoolMapping::kContiguous);
+    }
+
+    if (options.queueFullPolicy == "drop") {
+        // Modules read the policy in ModuleActor::Start(), so set it before Start().
+        built.pipeline->GetContext()->WithQueueFullPolicy(QueueFullPolicy::kDrop);
+    }
+
     if (options.timings) {
         // Before Start(): every worker reads the switch on its first message.
         built.pipeline->GetContext()->EnableModuleTimings();
@@ -725,6 +776,8 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
     // saturated run has to be in (nothing dropped, nothing cancelled). It costs
     // one pass over the counters per run, not per message.
     const nexusflow::PipelineSnapshot midRun = built.pipeline->GetSnapshot();
+    // Stop() drops the pool, so snapshot its counters while it still exists.
+    const nexusflow::ThreadPoolSnapshot poolStats = built.pipeline->GetThreadPoolStats();
 
     // Capture the counters after Stop(): the sink's histogram is written by its
     // worker thread, so reading it while the pipeline still runs would race.
@@ -764,7 +817,12 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
     }
     sample.attempts = injectionAttempts;
     sample.refused = injectionRefused;
-    sample.coverage = CoverageOf(midRun, *built.pipeline, shape, options.syncInputs, delivered);
+    sample.poolRounds = poolStats.rounds;
+    sample.poolTurns = poolStats.turns;
+    sample.poolBlocked = poolStats.blockedRounds;
+    sample.poolIdle = poolStats.idleRounds;
+    sample.coverage = CoverageOf(midRun, *built.pipeline, shape, options.syncInputs,
+                                 options.queueFullPolicy == "drop", delivered);
 
     built.pipeline->DeInit();
     return sample;
@@ -786,7 +844,8 @@ void PrintCsv(const Options& options, const TopologyShape& shape, std::size_t ca
               << (options.timings ? 1 : 0) << ',' << NameOf(options.workload.kind) << ','
               << WorkloadParameter(options.workload) << ',' << options.pushMode << ',' << sample.attempts << ','
               << sample.refused << ',' << sample.rssStartMiB << ',' << sample.rssPeakMiB << ',' << sample.rssEndMiB
-              << ',' << sample.edgeDepthMax << ',' << sample.stopMs << ',' << sample.cyclesPerMsg << '\n';
+              << ',' << sample.edgeDepthMax << ',' << sample.stopMs << ',' << sample.cyclesPerMsg
+              << ',' << options.poolSize << '\n';
 }
 
 /**
@@ -803,15 +862,15 @@ void PrintCoverage(const Options& options, const TopologyShape& shape, std::size
               << shape.branches << ',' << capacity << ',' << repetition << ',' << coverage.pushed << ','
               << coverage.popped << ',' << coverage.discarded << ',' << coverage.residual << ','
               << coverage.sinkPopped << ',' << sample.delivered << ',' << coverage.processed << ','
-              << coverage.dropped << ',' << coverage.failed << ',' << coverage.fusionExpired << ','
-              << coverage.midDropped << ',' << coverage.midFusionExpired << ',' << coverage.stopMs << ','
+              << coverage.dropped << ',' << coverage.failed << ',' << coverage.joinExpired << ','
+              << coverage.midDropped << ',' << coverage.midJoinExpired << ',' << coverage.stopMs << ','
               << (coverage.ok ? 1 : 0) << '\n';
     if (!coverage.ok) {
         std::cerr << "COVERAGE MISMATCH (repetition " << repetition << "): pushed=" << coverage.pushed
                   << " popped=" << coverage.popped << " discarded=" << coverage.discarded
                   << " residual=" << coverage.residual << " sinkPopped=" << coverage.sinkPopped
                   << " droppedWhileRunning=" << coverage.midDropped
-                  << " fusionExpiredWhileRunning=" << coverage.midFusionExpired
+                  << " joinExpiredWhileRunning=" << coverage.midJoinExpired
                   << " droppedAtStop=" << coverage.dropped << " failed=" << coverage.failed << '\n';
     }
 }
@@ -899,7 +958,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     if (injection && options.syncInputs) {
-        std::cerr << "--topology inject is a chain: it has no fusion path, drop --sync-inputs\n";
+        std::cerr << "--topology inject is a chain: it has no join path, drop --sync-inputs\n";
         return 1;
     }
     if (linear && options.modules < 2) {
@@ -931,7 +990,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     if (IsRawBaseline(options) && options.syncInputs) {
-        std::cerr << "--baseline " << options.baseline << " has no fusion path: drop --sync-inputs\n";
+        std::cerr << "--baseline " << options.baseline << " has no join path: drop --sync-inputs\n";
         return 1;
     }
     TopologyShape shape;
@@ -986,6 +1045,13 @@ int main(int argc, char* argv[]) {
     if (options.timings) {
         std::cout << "module timings: on\n";
     }
+    if (options.queueFullPolicy != "block") {
+        std::cout << "queue full policy: drop on full output queues\n";
+    }
+    if (options.poolSize > 0) {
+        std::cout << "thread pool: " << options.poolSize << " threads (" << options.poolMap
+                  << " map) for all non-join modules\n";
+    }
     std::cout << "payload: " << NameOf(options.payload) << " (" << spec.bytes << " bytes/frame, "
               << (options.freshPayload ? "fresh per message" : "one buffer reused") << ")  capacity=" << capacity
               << "  streams=" << options.repeat << " x " << options.durationSeconds << "s (+1 warm-up)\n";
@@ -1005,6 +1071,10 @@ int main(int argc, char* argv[]) {
         samples.push_back(sample);
         PrintCsv(options, shape, capacity, repetition, sample);
         PrintCoverage(options, shape, capacity, repetition, sample);
+        if (options.poolSize > 0) {
+            std::cout << "poolstats," << options.label << ',' << repetition << ',' << sample.poolRounds << ','
+                      << sample.poolTurns << ',' << sample.poolBlocked << ',' << sample.poolIdle << '\n';
+        }
         coverageOk = coverageOk && sample.coverage.ok;
     }
 

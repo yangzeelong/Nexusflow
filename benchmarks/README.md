@@ -4,12 +4,10 @@
 
 `benchmarks/` 里放两个基准目标，**源码都在这一层**（不再有子目录）：
 
-> **测量规则**（阶梯、拐点、归因、观测开销、两机分报告）见 [`HARNESS.md`](HARNESS.md)。本文件只讲怎么跑。
-
 | 文件 | 目标 | 说明 |
 | --- | --- | --- |
 | `BenchmarkMessage.cpp` + `benchmark_main.cpp` | `nexusflow_benchmarks` | Google Benchmark 微基准：消息创建/广播（拷贝）/数据访问两种实现对比 |
-| `pipeline_benchmark.cpp` | `pipeline_benchmark` | 端到端吞吐与延迟扫描：`--topology diamond|linear|inject`、`--baseline`、`--batch`、`--observe`、`--modules`、`--branches`、`--capacity`、`--payload`、`--payload-fresh`、`--sync-inputs`、`--workload`、`--cpus`、`--push-mode`、`--straggler-us`、`--timings`、`--duration`、`--repeat`；自己带 `main()`。结果见 [`PERFORMANCE.md`](PERFORMANCE.md) |
+| `pipeline_benchmark.cpp` | `pipeline_benchmark` | 端到端吞吐与延迟扫描：`--topology diamond|linear|inject`、`--baseline`、`--batch`、`--observe`、`--modules`、`--branches`、`--capacity`、`--payload`、`--payload-fresh`、`--sync-inputs`、`--workload`、`--cpus`、`--push-mode`、`--straggler-us`、`--pool-size`、`--queue-full`、`--timings`、`--duration`、`--repeat`；自己带 `main()`。结果见 [`PERFORMANCE.md`](PERFORMANCE.md) |
 | `LatencyHistogram.hpp` / `ProcessCpuTime.hpp` / `ProcessMemory.hpp` | — | 对数桶直方图（P50/P99）、CPU 时间与常驻内存采集 |
 | `BenchmarkNodes.hpp` / `BenchmarkTopology.hpp` | — | 基准用的模块与拓扑构造器（线性 / 扇出扇入 / 外部注入）；`WorkloadModule` 提供 delay / compute / memory 三种负载 |
 | `RawPipeline.hpp` | — | 裸线程 + 裸 `SpscQueue` 的同构基线，用于把框架成本拆成三层 |
@@ -38,11 +36,12 @@ cmake --build build --config Release --target pipeline_benchmark --parallel 16
 ```
 
 每次运行会打印一行
-`csv,<label>,<platform>,<baseline>,<batch>,<observe>,<topology>,<modules>,<branches>,<capacity>,<payload>,<fresh>,<sync>,<duration>,<rep>,<delivered>,<throughput>,<cpu_s>,<cores>,<avg>,<p50>,<p95>,<p99>,<min>,<max>,<cpus>,<timings>,<workload>,<work_param>,<push_mode>,<attempts>,<refused>,<rss_start>,<rss_peak>,<rss_end>,<edge_depth_max>,<stop_ms>,<cycles_per_msg>`，
+`csv,<label>,<platform>,<baseline>,<batch>,<observe>,<topology>,<modules>,<branches>,<capacity>,<payload>,<fresh>,<sync>,<duration>,<rep>,<delivered>,<throughput>,<cpu_s>,<cores>,<avg>,<p50>,<p95>,<p99>,<min>,<max>,<cpus>,<timings>,<workload>,<work_param>,<push_mode>,<attempts>,<refused>,<rss_start>,<rss_peak>,<rss_end>,<edge_depth_max>,<stop_ms>,<cycles_per_msg>,<pool>`，
 批量跑时 `grep '^csv,'` 收集成表。`min`/`max` 是单次样本的极值（`max` 通常是调度离群点，别当稳态读）。
 `modules` / `branches` 是**实际建出来的拓扑**，不是命令行回显：`diamond --branches 2` 记 `modules=4, branches=2`，`linear --modules 2` 记 `modules=2, branches=0`。
 后 12 列是本分支扩展：`cpus`（绑核数，0=不绑）、`timings`（逐跳计时 0/1）、`workload`/`work_param`（负载类型与参数）、`push_mode`（`block`/`try`）、`attempts`/`refused`（注入尝试/队列满拒绝次数）、`rss_start`/`rss_peak`/`rss_end`（MiB）、`edge_depth_max`（最深积压）、`stop_ms`（Stop 排水+join 耗时）。
-第 37 列 `cycles_per_msg` 是补充指标：`cpu/msg × TSC`，TSC 频率由 `tsc` 行给出（三窗校准）；ARM 上恒为 0，不伪造。口径见 `HARNESS.md` §4。
+倒数第 2 列 `cycles_per_msg` 是补充指标：`cpu/msg × TSC`，TSC 频率由 `tsc` 行给出（三窗校准）；ARM 上恒为 0，不伪造。口径见下文「测量协议」§4。
+最后一列 `pool` 是池化线程数（0 = 每模块一线程，`--pool-size N` 开启）。
 
 `--baseline raw|raw-alloc|raw-message` 跑**裸线程 + 裸 SpscQueue** 的同构基线（[`RawPipeline.hpp`](RawPipeline.hpp)），用来把"框架成本"和"机器成本"分开：同拓扑、同容量、同阻塞语义，一个 stage 一个线程。三档口径，用于三层拆分：
 
@@ -59,6 +58,10 @@ cmake --build build --config Release --target pipeline_benchmark --parallel 16
 
 `--topology inject` 把线性链的 source 换成 passive source（`IsPassiveSource()`），主线程用 `Pipeline::Push`（`--push-mode block`）或 `TryPush`（`--push-mode try`）从外部喂帧——就是解码器/网络收包的形状。`attempts` 是送入尝试次数，`refused` 是 `TryPush` 遇到边队列满的次数；Stop 前 harness 会校验 pushed/popped 与 sink 计数（见 `cov,` 行）。inject 必须配 `--baseline framework`。
 
+`--pool-size N` 走 v1.1 的线程池模型（`PipelineContext::WithThreadPoolSize`）：非融合模块固定绑定到 N 个共享线程，融合模块仍独占线程。池模式用精确配额背压（`OutputRoom()`），不丢帧，`cov` 应为 `ok`；代价是浅队列深链上吞吐下降，实测见 [`PERFORMANCE-desktop.md`](PERFORMANCE-desktop.md) §14。
+
+`--queue-full block|drop` 选择输出队列满时的行为：`block`（默认）阻塞等待，慢下游给上游施加背压；`drop` 丢掉这条消息并计数（`QueueFullPolicy::kDrop`），只在允许丢帧的流水线上有意义。丢弃发生在模块的发送路径（`Dispatcher::Broadcast`），不是队列内部：队列里的旧消息一条都不会被赶走，**被拒收的是正要入队的新消息**。策略是**全有或全无**：一条消息要么进所有输出队列、要么一条都不进，否则 join 组会永远凑不齐。实测见 [`PERFORMANCE-desktop.md`](PERFORMANCE-desktop.md) §15：它买到的是活性，不是吞吐。
+
 `--workload none|delay|compute|memory` 给每个中间 stage 加负载：`--delay-us`（等待；Windows 上用高精度 waitable timer，因为系统的 `Sleep` 在进程跑几秒后会被合并到 15.6 ms tick，`sleep_for` 不再可信；这个维度用 ≥2 ms 档）、`--compute-iters`（sin/cos 串行链）、`--memory-bytes`（每消息两次半区 memcpy）。`work_param` 记录实际参数。
 
 `--cpus N` 用 `SetProcessAffinityMask`（Windows）/ `sched_setaffinity`（Linux）把进程绑到前 N 个逻辑核，0 表示不绑；`affinity:` 横幅会打印实际绑定。HARNESS 的阶梯矩阵默认不绑核。
@@ -71,8 +74,8 @@ cmake --build build --config Release --target pipeline_benchmark --parallel 16
   `stat,<label>,<platform>,<baseline>,<batch>,<observe>,<topology>,<modules>,<branches>,<edges>,<capacity>,<payload>,<fresh>,<sync>,<reps>,<tp_med>,<tp_min>,<tp_max>,<tp_spread_pct>,<cores_med>,<cores_min>,<cores_max>,<p50_med>,<p95_med>,<p99_med>,<cpu_per_msg_med>,<unstable>`。
   中位数 + 三次重复的范围 + 波动百分比；`unstable=1` 表示吞吐波动超过 `--max-spread`（默认 10%），这一档别直接读，先重跑。
 - 每次运行一行 **`cov,`**（覆盖率断言）：
-  `cov,<label>,<baseline>,<modules>,<branches>,<capacity>,<rep>,<pushed>,<popped>,<discarded>,<residual>,<sink_popped>,<delivered>,<processed>,<dropped>,<failed>,<fusion_expired>,<dropped_mid_run>,<fusion_expired_mid_run>,<stop_ms>,<ok>`。
-  判据：**跑动中** `dropped`/`failed`/`fusion_expired` 必须为 0；`pushed == popped + discarded + residual`；sink 收到的条数与 `delivered` 对得上（融合路径按 `branches` 折算）。
+  `cov,<label>,<baseline>,<modules>,<branches>,<capacity>,<rep>,<pushed>,<popped>,<discarded>,<residual>,<sink_popped>,<delivered>,<processed>,<dropped>,<failed>,<join_expired>,<dropped_mid_run>,<join_expired_mid_run>,<stop_ms>,<ok>`。
+  判据：**跑动中** `dropped`/`failed`/`join_expired` 必须为 0；`pushed == popped + discarded + residual`；sink 收到的条数与 `delivered` 对得上（融合路径按 `branches` 折算）。
   不满足就打印 `COVERAGE MISMATCH` 并让退出码为 1。停机尾部为关队列而丢掉的那几条只报不判错（`dropped`/`failure` 列照实给）。
 
 `--payload` 档位：`none` / `1080p-rgb`（5.937 MiB）/ `1080p-yuv420`（2.969 MiB）/ `2k-rgb`（QHD 2560×1440，10.547 MiB）/ `2k-yuv420`（5.273 MiB）。
@@ -81,6 +84,123 @@ cmake --build build --config Release --target pipeline_benchmark --parallel 16
 **参数下限与报错**（不再静默纠正，猜错就退出 1）：
 `--topology linear` 的 `--modules` 最小 **2**（source→sink，1 条边，是深度阶梯的对照档）；`--topology diamond` 的 `--branches` 最小 **1**；
 `--sync-inputs` 只能配 diamond；`--topology inject` 要求 `--baseline framework`、`--modules >= 2`，且不接受 `--sync-inputs`；`--baseline raw*` 不接受 `--workload`；数字参数不是整数、`--memory-bytes` 小于 1、`--payload` 未知档位、`--label` 含逗号，一律报错退出。
+
+## 测量协议
+
+一句话：**每个维度跑一条阶梯，把表贴出来，看「比上一档多花多少」就能下结论。**
+
+成本只说「每多一个模块多花 X µs」：**不要发明「跳 / 段 / 级」这类同义词**（工具输出、报告、提交信息里都一样），机器里本来就叫模块，直接用它。
+「模块」包括 source 与 sink：`--modules 3` = source + 1 个中间模块 + sink。**模块数 = 线程数**（一模块一线程），加一个模块就是同时加一个线程、一条队列、一次拷贝。
+
+---
+
+### 规则（5 条）
+
+1. **每个维度跑一条阶梯**：≥5 档，跨过拐点两侧，含一个远端点；表里必须有「比上一档多花」这一列。
+2. **每档跑 3 次**，报最小~最大；相邻差**大于波动**才允许解读（本机实测 3 秒×2 次的噪声达 14%，别省次数）。工具已经按 `--max-spread`（默认 10%）打 `UNSTABLE` 标记。
+   附注：**`unstable` 也不等于可信**。遇到过 `spread` 没超阈值、但某一档明显反常的样本（比如 batch4 反而比 batch1 慢），复测就正常了。所以任何反常点先重跑一次；重跑还反常就在报告里标出来并说明，不许当数据用。
+3. **每个数字带机器名 + commit**；两台机器各写各的报告（§5）。
+4. **结论只写两句**：从哪一档开始变贵；是框架的事还是机器满了（拿裸基线对照，§3）。
+5. **观测开销**：关掉计时/直方图再跑一遍，把差值写一行。
+
+被砍掉的（不许再加回来）：回归、截距、R²、斜率区间、拐点判据公式、观测模式矩阵。
+
+---
+
+### 1. 怎么读表
+
+真数据（本机 laptop，`--topology linear --payload none --capacity 8 --duration 3 --repeat 2`）：
+
+| 模块数 | 吞吐（M msg/s） | CPU/消息（µs） | 比上一档多花（µs） |
+| --- | --- | --- | --- |
+| 3 | 2.27 | 1.40 | — |
+| 4 | 2.10 | 1.91 | +0.51 |
+| 5 | 1.94 | 2.60 | +0.70 |
+| 6 | 1.83 | 3.23 | +0.62 |
+| 8 | 1.60 | 5.16 | +0.97 |
+| 10 | 1.36 | 6.88 | +0.86 |
+| 12 | 1.28 | 9.07 | +1.09 |
+| 16 | 0.66 | 20.1 | **+2.75** |
+
+结论一句话：8 个模块之前每加一个模块 0.5–1.0 µs，12→16 个模块突然 2.75 µs（2.5 倍）。
+本机 8 物理核 / 16 逻辑核，跨过物理核数就变贵——所以**深度和线程数在这个框架里是同一件事**，报告里必须写出来。
+
+每条阶梯报告只要求三样：这张表、一句"从哪档开始变贵"、一句"归因"（§3 的对照）。
+
+### 2. 跑哪些维度
+
+| 维度 | 参数 | 阶梯 | 对照档 |
+| --- | --- | --- | --- |
+| 深度（linear） | `--modules` | 2,3,4,5,6,8,10,12,16 | **2**（source 直连 sink） |
+| 扇出（diamond） | `--branches` | 1,2,3,4,6,8 | **1**（有边不分支） |
+| 队列容量 | `--capacity` | 1,2,4,8,16,64,256 | — |
+| 批大小 | `--batch` | 1,2,4,8 | **1** |
+| 载荷 | `--payload` | none,1080p-yuv,1080p-rgb,2k-yuv,2k-rgb | **none** |
+| 观测 | `--observe` | none,full | **none** |
+
+### 3. 两条基线
+
+1. **裸线程 + 裸 SPSC 队列**（`std::thread` + `SpscQueue`，同容量、同拓扑，先只做 linear）：跑同一套阶梯。
+   一直不贵 ⇒ 框架没问题；也变贵 ⇒ 是机器/队列模式，不是框架。
+   三个口味：`raw`（普通结构体、零分配，下界）、`raw-alloc`（每消息 `make_shared` 一个 payload 包装）、`raw-message`（直接用框架的 `Message`，队列与消息层同构）。三层拆分：`raw→raw-alloc` = 分配，`raw-alloc→raw-message` = Message 自身，`raw-message→框架` = Module/Worker/Dispatcher 调度。三者都不分批，对比时框架侧用 `--batch 1`。
+2. **无观测重跑**：同一配置加 `--observe none`，差值就是观测开销。本机实测这个差值落在批次噪声以下（测不出来），所以另有微基准 `--micro-observer N`，直接给「两次时钟读 + 一次直方图采样」的 ns/消息（本机约 40 ns）。
+
+### 4. 四个数字，别混用
+
+同一个 run 给出四个量，都在 `csv,` 行里（`throughput` / `cpu_s` / `cores` / `cycles_per_msg`）。口径先定义清楚，
+跨机器、跨框架才谈得上比较：
+
+| 数字 | 公式 | 单位 | 回答什么 | 边界 |
+| --- | --- | --- | --- | --- |
+| 交付吞吐 | `delivered / wall`，wall = `Start()` 后到 `Stop()` 前的 `steady_clock` | msg/s | 这台机器每秒真正交出多少帧 | 不含启动与停机；跨 CPU 频率不可比 |
+| CPU 归一吞吐 | `delivered / cpu_seconds` | msg/s·core | 单核能压出多少条 | **不是交付吞吐**：CPU 含自旋、轮询、丢帧重试，核多时数字好看而墙钟不涨 |
+| 每消息 CPU | `cpu_seconds / delivered` | µs/msg | 一条消息摊多少 CPU | 多线程自旋会让它虚高，且不区分交付与丢弃 |
+| 每消息周期 | `cpu_seconds / delivered × TSC` | cycles/msg | 同上的"无主频"表述 | 仅在 x86 启用；TSC 由三个 20 ms 窗口校准，取最大 |
+
+三条恒等式用来交叉验算，避免口径串味：
+
+- `cores = cpu_seconds / wall`，因此 `throughput = cores × 1e6 / cpu_per_msg`；
+- `cycles_per_msg = cpu_per_msg × tsc_ghz × 1000`；
+- 两条同时不成立时，多半是采样窗口错位：吞吐取 Stop 之前，CPU 取 Stop 之后。
+
+一句话规则：**说"有多快"只用墙钟吞吐；跨机器比"cycles/消息"；跨框架比"每交付一条的 CPU"。**
+
+常见坑：Google Benchmark 的 `items_per_second` 是 `items / cpu_time`，属 CPU 归一口径。
+直接拿它和墙钟吞吐对比会差出数倍，必须先换算到同一口径（本文件用"每交付一条"）。
+
+另外两个不在上表里的数字：**延迟 p50/p99** 是 source 造消息 → sink 处理（含 sink 攒批等待，
+不是纯处理时延）；**观测开销** 是关掉观测的同一配置之差，回答"这些数字里有多少是测量本身"。
+
+### 5. 两台机器
+
+| 文件 | 机器 |
+| --- | --- |
+| `PERFORMANCE-laptop.md` | i7-11800H（THUNDERBOT ZERO，8 物理核 / 16 逻辑核） |
+| `PERFORMANCE-desktop.md` | i7-14700KF |
+| `PERFORMANCE.md` | 索引 + 跨机器**只比趋势**，不比绝对值 |
+
+工具、`benchmarks/` 公共头文件、本文件**只在一侧改**；另一台机器只跑、只写自己那份。
+
+---
+
+### 6. 提 PR 前
+
+- [ ] 每个维度有阶梯表，且含「比上一档多花」列
+- [ ] 每档 3 次、写了噪声范围
+- [ ] 每个数字带机器名 + commit
+- [ ] 结论只有两句，且有一句是"归因"（§3 对照）
+- [ ] 观测开销差值已写
+- [ ] 构建 + `nexusflow_tests` 已跑，汇报里说明跑了没有
+- [ ] 提交已收敛：PR 里的 commit 按「代码 / 基准文档 / 仓库文档」分组，`git log master..HEAD` 一眼能读完；逐次试跑的碎片提交在开 PR 前合并掉
+- [ ] PR 由用户提交与合并：agent 只准备本地分支和本地提交；push、开 PR、合并都要用户明确指令（[`HARNESS.md`](../HARNESS.md) §1.1）
+- [ ] PR 描述按 `.github/PULL_REQUEST_TEMPLATE.md` 填：有架构调整给「之前 / 之后 / 代价」表，有新增函数逐个写「做什么 / 为什么引入 / 边界」
+
+### 7. 现状：还没做到的地方（改完一条删一条）
+
+已完成（2026-11-18）：`--modules` 最小 2、`--branches` 最小 1；参数非法一律报错退出（不再静默 clamp 或静默回退）；CSV 的 `modules`/`branches` 改为记实际建出来的拓扑；`--topology linear --sync-inputs` 改为报错；每档输出 `median [min .. max]` 与波动百分比（`stat,` 行，超过 `--max-spread` 标 `UNSTABLE`）；读 `Pipeline::GetSnapshot()` 做覆盖率断言（`cov,` 行，跑动中有丢弃就让退出码非 0）；裸线程 + 裸 SpscQueue 基线已实现（`--baseline raw|raw-alloc|raw-message`，linear 已跑出三层拆分）；观测开销已量（微基准约 40 ns/消息，流水线 A/B 落在噪声内）。
+
+- 还没有观测开销那一行（关掉计时/直方图重跑取差值）
+- 两台机器的报告还没分文件，`PERFORMANCE.md` 里混着数字、§1 的 commit 也复现不出那批数据
 
 ### 结果
 

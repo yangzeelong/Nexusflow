@@ -57,7 +57,7 @@ struct EdgeSnapshot {
  * processedTotal + droppedTotal + failedTotal accounts for everything the module
  * was handed: each message ends up in exactly one of the three. droppedTotal
  * covers messages the module could not hand downstream (a full or closed queue)
- * plus fused groups that expired; fusionExpiredTotal is the part of that which
+ * plus joined groups that expired; joinExpiredTotal is the part of that which
  * expired.
  *
  * The two `*Ms` fields answer "where did the stop go": they are the timing of the
@@ -69,11 +69,11 @@ struct ModuleSnapshot {
     std::string name;
     /// Messages the module finished processing.
     std::uint64_t processedTotal = 0;
-    /// Messages lost downstream: push refused, or a fused group expired.
+    /// Messages lost downstream: push refused, or a joined group expired.
     std::uint64_t droppedTotal = 0;
-    /// Subset of droppedTotal: fused groups dropped because an input arrived
-    /// after the fusion timeout.
-    std::uint64_t fusionExpiredTotal = 0;
+    /// Subset of droppedTotal: joined groups dropped because an input arrived
+    /// after the join timeout.
+    std::uint64_t joinExpiredTotal = 0;
     /// Invocations that threw. Counted per invocation, not per message.
     std::uint64_t failedTotal = 0;
     /// How long the most recent Stop() waited for this module's inputs to empty.
@@ -101,6 +101,22 @@ struct ModuleSnapshot {
  * so a second Start() continues the same totals. What a restart does clear is the
  * stop timing (`stopPipelineMs`, and each module's `drainInputsMs`/`exitLoopMs`).
  */
+/**
+ * @brief Counters of the opt-in thread pool; all zero when no pool is used.
+ *
+ * One round is one pass of a pool thread over its whole worker list. A turn is
+ * a Worker::StepOnce() call that did work. A blocked round ended with an output
+ * edge full (the slot is waiting on back-pressure, not idle); an idle round
+ * found nothing to do at all. The split is what separates "too many threads"
+ * from "producer/consumer out of phase".
+ */
+struct ThreadPoolSnapshot {
+    std::uint64_t rounds = 0;
+    std::uint64_t turns = 0;
+    std::uint64_t blockedRounds = 0;
+    std::uint64_t idleRounds = 0;
+};
+
 struct PipelineSnapshot {
     /// Graph name of the pipeline.
     std::string name;

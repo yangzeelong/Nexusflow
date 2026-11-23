@@ -3,6 +3,7 @@
 #include "base/Graph.hpp"
 #include "base/GraphUtils.hpp"
 #include <nexusflow/common/ViewPtr.hpp>
+#include "core/ThreadPool.hpp"
 #include "core/Worker.hpp"
 #include "dispatcher/Dispatcher.hpp"
 #include "nexusflow/Logging.hpp"
@@ -63,7 +64,7 @@ ModuleSnapshot TakeModuleSnapshot(const ModuleActor& actor) {
     module.name = actor.GetModuleName();
     module.processedTotal = actor.ProcessedCount();
     module.droppedTotal = actor.DroppedCount();
-    module.fusionExpiredTotal = actor.FusionExpiredCount();
+    module.joinExpiredTotal = actor.JoinExpiredCount();
     module.failedTotal = actor.FailedCount();
     module.drainInputsMs = actor.LastDrainInputsMs();
     module.exitLoopMs = actor.LastExitLoopMs();
@@ -259,8 +260,18 @@ ErrorCode Pipeline::Start() {
         actorNode->ResetStopTiming();
     }
 
+    // An opt-in shared pool: 0 keeps the historical one-thread-per-module model.
+    const std::size_t poolThreads = m_pImpl->context ? m_pImpl->context->GetThreadPoolSize() : 0;
+    if (poolThreads > 0) {
+        m_pImpl->threadPool =
+            std::make_shared<core::ThreadPool>(poolThreads, m_pImpl->context->GetThreadPoolMapping());
+    }
+
     std::vector<std::shared_ptr<ActorNode>> startedActors;
     for (auto& actorNode : m_pImpl->actorOrderedNodes) {
+        if (m_pImpl->threadPool) {
+            actorNode->AttachThreadPool(m_pImpl->threadPool.get());
+        }
         const ErrorCode errCode = actorNode->Start();
         if (errCode != ErrorCode::SUCCESS) {
             LOG_ERROR("Start worker failed, actorName={}", actorNode->GetModuleName());
@@ -268,10 +279,19 @@ ErrorCode Pipeline::Start() {
             for (auto it = startedActors.rbegin(); it != startedActors.rend(); ++it) {
                 (*it)->Stop();
             }
+            if (m_pImpl->threadPool) {
+                m_pImpl->threadPool->StopAndJoin();
+                m_pImpl->threadPool.reset();
+            }
             return errCode;
         }
         startedActors.push_back(actorNode);
         LOG_DEBUG("Start module success, actorName={}", actorNode->GetModuleName());
+    }
+    // Every worker is registered and prepared, so the shared threads can
+    // start stepping them.
+    if (m_pImpl->threadPool) {
+        m_pImpl->threadPool->Start();
     }
     m_pImpl->started = true;
     LOG_DEBUG("Pipeline started successfully.");
@@ -356,7 +376,7 @@ ErrorCode Pipeline::Stop() {
     // reversing it gives a valid topological one, producers first.
     std::reverse(stopOrder.begin(), stopOrder.end());
     // Every stage learns about the drain up front: a stage that is waiting for
-    // inputs that will never arrive (a fusion module missing one of its sources)
+    // inputs that will never arrive (a join module missing one of its sources)
     // has to stop waiting now, not when its turn in the order comes up.
     for (const auto& name : stopOrder) {
         auto actorIt = m_pImpl->actorModuleMap.find(name);
@@ -416,6 +436,18 @@ ErrorCode Pipeline::Stop() {
         // next stage is handled: that is what tells the next one "nothing more
         // will ever arrive".
         actor->ShutdownOutputs();
+    }
+
+    // The shared threads have nothing left to step: every worker already
+    // published its exit, so joining them here is just teardown.
+    if (m_pImpl->threadPool) {
+        m_pImpl->threadPool->StopAndJoin();
+        m_pImpl->threadPool.reset();
+        for (auto& actorNode : m_pImpl->actorOrderedNodes) {
+            if (actorNode) {
+                actorNode->AttachThreadPool(nullptr);
+            }
+        }
     }
 
     // Nothing can push any more, so every edge can be closed. A stopped pipeline
@@ -485,6 +517,16 @@ ErrorCode Pipeline::Cancel() {
         }
     }
 
+    if (m_pImpl->threadPool) {
+        m_pImpl->threadPool->StopAndJoin();
+        m_pImpl->threadPool.reset();
+        for (auto& actorNode : m_pImpl->actorOrderedNodes) {
+            if (actorNode) {
+                actorNode->AttachThreadPool(nullptr);
+            }
+        }
+    }
+
     // Every worker is gone, so nothing races these: what a stage managed to take
     // out of an edge before it stopped is a pop, and whatever is left is discarded
     // here. The two are counted apart on purpose (EdgeSnapshot::discardedTotal vs
@@ -498,6 +540,18 @@ ErrorCode Pipeline::Cancel() {
     m_pImpl->lastStopPipelineMs.store(cancelPipelineMs, std::memory_order_relaxed);
     LOG_DEBUG("Pipeline cancelled in {} ms; nothing was drained.", cancelPipelineMs);
     return ErrorCode::SUCCESS;
+}
+
+ThreadPoolSnapshot Pipeline::GetThreadPoolStats() const {
+    ThreadPoolSnapshot snapshot;
+    if (m_pImpl && m_pImpl->threadPool) {
+        const core::ThreadPoolStats stats = m_pImpl->threadPool->Snapshot();
+        snapshot.rounds = stats.rounds;
+        snapshot.turns = stats.turns;
+        snapshot.blockedRounds = stats.blockedRounds;
+        snapshot.idleRounds = stats.idleRounds;
+    }
+    return snapshot;
 }
 
 PipelineSnapshot Pipeline::GetSnapshot() const {
