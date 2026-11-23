@@ -44,3 +44,4 @@ PR 描述会过期，ADR 不会——它跟着代码走。
 |---|---|---|
 | [0001](0001-thread-pool-off-by-default.md) | 线程池默认关闭，只按需开启 | 已接受 |
 | [0002](0002-windows-deep-chain-pool-gap.md) | Windows 深链池化的残余差距记为已知限制 | 已接受 |
+| [0003](0003-why-pin-2n-logical-cpus.md) | 测量时池化 N 线程绑到 2N 个逻辑核 | 提议 |
