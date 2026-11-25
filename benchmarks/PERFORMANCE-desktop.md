@@ -18,6 +18,8 @@
 | 每轮时长 | **5 s** |
 | 观测 | `--observe full`（§3 另有 A/B） |
 
+**记号（本文件内部，不是命令行参数）**：`L<n>` = `--topology linear --modules <n>`；`cap<n>` = `--capacity <n>`；`p<n>` = `--pool-size <n>`；`S-` 前缀 = 在 WSL2 里跑；`D<n>` = `--topology diamond --branches <n>`；`I<n>` = `--topology inject --modules <n>`。例如 `L16cap8 p4` 展开就是 `--topology linear --modules 16 --capacity 8 --pool-size 4`，每节的「复现」给出完整命令。
+
 本文件覆盖 **116 个 stat 档 / 489 条覆盖率断言**（`cov,` 行全部 ok，没有任何一次运行中出现丢弃）。
 
 三个同构基线（`--baseline`，都不分批，所以框架侧用 `--batch 1` 对照）：
