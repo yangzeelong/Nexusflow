@@ -9,6 +9,91 @@
 
 The core idea of the framework is to decompose complex processing workflows into a series of independent **Modules**, which can then be connected like LEGO bricks into a powerful **Directed Acyclic Graph (DAG)** using simple configurations.
 
+## At a glance
+
+| Command | Result |
+| --- | --- |
+| `--topology inject --modules 6 --capacity 64`<br>(WSL2, 5 s × 3) | **3.80 M msg/s**, 1.52 µs CPU/msg, p50 61 µs |
+| `--topology linear --modules 4 --capacity 16 --pool-size 0`<br>(Windows, 300 s) | **2.86 M msg/s**, p50 7.03 µs |
+| `--topology linear --modules 4 --capacity 16 --pool-size 4`<br>(Windows, 300 s) | **3.00 M msg/s** — 105% of the `--pool-size 0` row above |
+| `--topology linear --modules 16 --capacity 8 --pool-size 4`<br>(Windows, 5 s × 3) | **1.41 M msg/s**, +44% after the Windows timer fix |
+| `--topology inject --modules 6 --capacity 64`<br>(WSL2, 5 s × 3, cycle cost) | **5,005 cycles/msg**, about 1,000 per hop |
+| `nexusflow_tests` | **173 tests / 29 suites**, Windows MSVC + Linux GCC |
+
+### What those numbers mean
+
+The benchmark is a separate program (`benchmarks/pipeline_benchmark.cpp`) that
+builds one of three graph shapes and counts what arrives at the sink.
+
+| `--topology` | Graph | Who produces messages | What it measures |
+| --- | --- | --- | --- |
+| `linear` | source → (N−2) processing modules → sink, where N = `--modules` | the framework's own source thread | steady-state end-to-end throughput |
+| `inject` | passive source → … → sink | the benchmark's main thread, via `Pipeline::Push` / `TryPush` | ingress rate and backpressure (`--push-mode block\|try`) |
+| `diamond` | source → `--branches` parallel branches → join sink | the framework's own source thread | fan-out / fan-in and join cost (`--sync-inputs`) |
+
+Parameter semantics, in the order people usually get them wrong:
+
+| Flag | Meaning |
+| --- | --- |
+| `--modules N` | **Every** module in the graph, including the source and the sink. `--modules 6` = source + 4 processing modules + sink. |
+| `--capacity N` | Per-edge queue capacity. `0` (or negative) means unbounded, which falls back to the mutex queue. |
+| `--batch N` | How many messages a stage pulls from its input queue at once. |
+| `--pool-size N` | `0` (default) = one thread per module; `N > 0` = every non-join module packed onto `N` threads, each module pinned to one of them. |
+| `--cpus N` | Process affinity mask: the first `N` logical CPUs. Pool runs are pinned to `2 × pool-size` (physical core + SMT). |
+| `--duration S --repeat R` | One warm-up window, then `R` measured windows of `S` seconds; medians are reported. |
+| `--payload`, `--workload`, `--straggler-us` | Per-message payload (`none`, `1080p-rgb`, …), per-message work (`delay`, `compute`, `memory`), and an optional slow branch. |
+
+How the four numbers are produced: `delivered` counts messages consumed by the
+sink module; throughput is `delivered / wall seconds`; latency is
+`now − stamp`, stamped when the source produces (or when `Push` is called) and
+read at the sink; CPU time comes from `GetProcessTimes` / `getrusage`, and
+`cycles/msg = CPU seconds × TSC / delivered`. A message rejected by the queue-full
+policy is not delivered and therefore not counted.
+
+Two caveats that change how you read a row: pinning `2 × pool-size` logical CPUs
+matters because the mask is inherited by every thread, producer included; and on
+WSL2 the same configuration can land in a slow batch (0.7–0.9 M msg/s on the
+16-module deep chain versus 2.4–2.6 M), which shows up as a blown p99 rather than
+a worse p50. The full protocol lives in [`benchmarks/README.md`](benchmarks/README.md).
+
+```mermaid
+flowchart LR
+    S[Source module] --> Q1[(queue)] --> A[Stage module]
+    A --> Q2[(queue)] --> B[Stage module]
+    B --> Q3[(queue)] --> K[Sink module]
+    A -. hosted by .-> P[[pool thread]]
+    B -. hosted by .-> P
+```
+
+Each module reads from its input queue and hands one message to every outgoing
+edge. By default every module gets its own thread; `WithThreadPoolSize(n)` packs
+several modules onto `min(modules, n)` threads instead, keeping each module on a
+fixed thread so the single-writer counter contract still holds.
+
+### 90-second quickstart
+
+```bash
+# Linux / WSL2
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DWITH_BENCHMARK=ON
+cmake --build build --parallel
+./build/tests/nexusflow_tests
+./build/benchmarks/pipeline_benchmark --topology linear --modules 6 --capacity 16 --duration 10
+```
+
+```powershell
+# Windows (MSVC)
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DWITH_BENCHMARK=ON
+cmake --build build --config Release --parallel
+.\build\tests\Release\nexusflow_tests.exe
+.\build\benchmarks\Release\pipeline_benchmark.exe --topology linear --modules 6 --capacity 16 --duration 10
+```
+
+The benchmark prints a `csv,` line per repetition plus a median summary
+(`median throughput`, `p50`, `cycles per msg`). Every number above comes from
+that harness — see [`benchmarks/README.md`](benchmarks/README.md) for the
+protocol and [`benchmarks/PERFORMANCE-desktop.md`](benchmarks/PERFORMANCE-desktop.md)
+for the full tables.
+
 ## Documentation map
 
 | File | What it covers |
