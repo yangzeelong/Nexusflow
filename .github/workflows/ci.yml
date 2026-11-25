@@ -13,7 +13,7 @@ permissions:
 env:
   # Keep in step with AGENTS.md §3. The last step fails when these drift, which
   # is the point: the documented count must match the binary.
-  EXPECTED_TEST_COUNT: 173
+  EXPECTED_TEST_COUNT: 174
   EXPECTED_SUITE_COUNT: 29
 
 jobs:

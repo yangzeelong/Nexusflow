@@ -2,6 +2,7 @@
 #include <nexusflow/Module.hpp>
 #include <nexusflow/Pipeline.hpp>
 #include <nexusflow/PipelineBuilder.hpp>
+#include <nexusflow/PipelineContext.hpp>
 
 #include <gtest/gtest.h>
 
@@ -105,7 +106,18 @@ bool WaitForReceived(const CountingSinkModule& sink, int expected, int timeoutMs
     return sink.received.load(std::memory_order_relaxed) >= expected;
 }
 
-} // namespace
+// A stage that hands every message on unchanged.
+class PassThroughStage : public Module {
+public:
+    explicit PassThroughStage(const std::string& name) : Module(name) {}
+
+protected:
+    void Process(Message& inputMessage) override {
+        if (inputMessage.HasData()) {
+            Broadcast(std::move(inputMessage));
+        }
+    }
+};
 
 TEST(PipelinePushTest, PushBeforeStartIsRejected) {
     auto source = std::make_shared<PassiveSourceModule>("source");
@@ -202,4 +214,38 @@ TEST(PipelinePushTest, PushAfterStopIsRejected) {
 
     EXPECT_EQ(pipeline->Push("source", MakeMessage(2)), PushResult::kNotRunning);
     EXPECT_EQ(pipeline->TryPush("source", MakeMessage(2)), PushResult::kNotRunning);
+}} // namespace
+
+// A passive source is fed by Pipeline::Push(), not by its worker. When the
+// pool packs that source and its consumer onto one thread the edge must still
+// block: a thread-local edge refuses instead of waiting, which would turn a
+// blocking Push() into a spurious kQueueFull.
+TEST(PipelinePushTest, PooledPassiveSourceEdgeKeepsBlocking) {
+    auto source = std::make_shared<PassiveSourceModule>("source");
+    auto first = std::make_shared<PassThroughStage>("first");
+    auto second = std::make_shared<PassThroughStage>("second");
+    auto sink = std::make_shared<CountingSinkModule>("sink");
+    auto pipeline = PipelineBuilder()
+                        .AddModule(source)
+                        .AddModule(first)
+                        .AddModule(second)
+                        .AddModule(sink)
+                        .Connect("source", "first")
+                        .Connect("first", "second")
+                        .Connect("second", "sink")
+                        .Build(1);
+    ASSERT_NE(pipeline, nullptr);
+    // Two threads over four modules: source and "first" share a slot.
+    pipeline->GetContext()->WithThreadPoolSize(2);
+    ASSERT_EQ(pipeline->Init(), ErrorCode::SUCCESS);
+    ASSERT_EQ(pipeline->Start(), ErrorCode::SUCCESS);
+
+    constexpr int kMessages = 500;
+    for (int i = 0; i < kMessages; ++i) {
+        ASSERT_EQ(pipeline->Push("source", MakeMessage(i)), PushResult::kOk);
+    }
+    EXPECT_TRUE(WaitForReceived(*sink, kMessages, 5000));
+    EXPECT_EQ(pipeline->Stop(), ErrorCode::SUCCESS);
 }
+
+

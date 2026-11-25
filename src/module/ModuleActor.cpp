@@ -58,6 +58,11 @@ ErrorCode ModuleActor::Start() {
         // A source cannot be slowed down by an input queue, so it parks on the
         // edges it fills instead (see core::Worker::IdleAfterEmptyOutput).
         m_worker->SetOutputQueues(GetOutputQueues());
+        // A passive source is fed by Pipeline::Push() from the caller's thread,
+        // not by this worker, so its output edges must keep blocking.
+        if (m_module) {
+            m_worker->SetExternalProducer(m_module->IsPassiveSource());
+        }
     }
     const ErrorCode workerCode = m_worker->Start();
     if (workerCode != ErrorCode::SUCCESS) {

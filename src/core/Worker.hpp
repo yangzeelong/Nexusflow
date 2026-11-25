@@ -130,6 +130,11 @@ public:
     /// rollback), where nothing else would publish the exit.
     void MarkExited();
 
+    /// A passive source has no pool-side producer: Pipeline::Push() writes its
+    /// output edges from the caller's thread, so those edges must keep blocking.
+    void SetExternalProducer(bool external) { m_externalProducer = external; }
+    bool ExternalProducer() const { return m_externalProducer; }
+
     /// Whether this worker is a source (has no input queue to pull from).
     bool IsSource() const { return m_inputQueueMap.empty(); }
 
@@ -340,6 +345,7 @@ private:
     std::shared_ptr<Module> m_modulePtr = nullptr;
     ViewPtr<Config> m_configPtr;
     std::shared_ptr<PipelineContext> m_context;
+    bool m_externalProducer = false;
     std::unordered_map<std::string, ViewPtr<MessageQueue>> m_inputQueueMap;
 
     /// The same queues as m_inputQueueMap, in insertion order. The pull paths
