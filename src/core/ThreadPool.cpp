@@ -113,6 +113,11 @@ void ThreadPool::Start() {
     }
     for (std::size_t slot = 0; slot < m_threadCount; ++slot) {
         for (auto& worker : m_workers[slot]) {
+            if (worker->ExternalProducer()) {
+                // The real producer is the thread calling Pipeline::Push(), so
+                // this edge crosses threads and must keep its blocking push.
+                continue;
+            }
             for (auto& queue : worker->OutputQueues()) {
                 const auto it = consumerSlot.find(queue.operator->());
                 if (it != consumerSlot.end() && it->second == slot) {
