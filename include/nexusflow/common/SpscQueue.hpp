@@ -99,6 +99,12 @@ public:
         }
         m_slotCount = static_cast<std::size_t>(capacity);
         m_slots.reset(new Slot[m_slotCount]);
+        // Each slot starts free for the write generation equal to its index, which
+        // is what the overwrite-oldest claim protocol compares against.
+        for (std::size_t index = 0; index < m_slotCount; ++index) {
+            m_slots[index].seq.store(index, std::memory_order_relaxed);
+            m_slots[index].claim.store(kClaimNone, std::memory_order_relaxed);
+        }
     }
 
     ~SpscQueue() {
@@ -202,6 +208,59 @@ public:
      * for an edge that can be touched by two threads.
      */
     void SetLocalMode(bool enabled) { m_localMode = enabled; }
+
+    /**
+     * @brief Arms overwrite-oldest mode. Must be set before any worker starts.
+     *
+     * @details In this mode the producer evicts the oldest buffered item when a
+     * push finds no room (see pushEvictOldest()), and the consumer claims each
+     * slot it reads so a concurrent eviction can never tear the item it is
+     * copying. The claim costs one compare-exchange per pop, which is why the
+     * mode stays off on the default kBlock path.
+     */
+    void SetOverwriteOldest(bool enabled) { m_overwriteOldest = enabled; }
+
+    /// Whether overwrite-oldest mode is armed (see SetOverwriteOldest()).
+    bool IsOverwriteOldest() const { return m_overwriteOldest; }
+
+    /**
+     * @brief Pushes an item, evicting the oldest buffered one when the queue is full.
+     *
+     * @details The evicted item is charged to discardedTotal (an edge-level count;
+     * it was pushed but no consumer ever popped it), and the new item takes its
+     * place, so a slow consumer always ends up with the newest frames. Only the
+     * producer thread may call this, and only after SetOverwriteOldest(true).
+     * @return false only when the queue has been shut down.
+     */
+    bool pushEvictOldest(T&& item) {
+        if (m_fallback) {
+            return m_fallback->pushEvictOldest(std::move(item));
+        }
+        if (m_shutdown.load(std::memory_order_relaxed)) {
+            return false;
+        }
+        if (m_producerWaiting.load(std::memory_order_relaxed) && m_shutdown.load(std::memory_order_relaxed)) {
+            return false;
+        }
+        if (!m_overwriteOldest) {
+            // Without the consumer-side claim an eviction could tear a slot that
+            // the consumer is copying. Fall back to the blocking push so a caller
+            // that forgot to arm the mode gets back-pressure, not corruption.
+            return push(std::move(item));
+        }
+        if (!PutEvictOldest(item)) {
+            return false;
+        }
+        if (!m_localMode) {
+            WakeConsumer();
+        }
+        return true;
+    }
+
+    bool pushEvictOldest(const T& item) {
+        T temp = item;
+        return pushEvictOldest(std::move(temp));
+    }
 
     /**
      * @brief Tries to push an item, waiting up to the given timeout.
@@ -649,8 +708,16 @@ public:
         // must not touch a third cache line for statistics. restart() and clear()
         // fold the indices into a baseline first, so these two still only grow
         // across a Stop()/Start() pair.
-        counters.pushed    = m_pushedBase + m_tail.load(std::memory_order_relaxed);
-        counters.popped    = m_poppedBase + m_head.load(std::memory_order_relaxed);
+        //
+        // An eviction (overwrite-oldest mode) advances head without delivering,
+        // so the published popped total subtracts those evictions back out. Read
+        // the eviction count before head: it never exceeds head, so reading it
+        // first keeps head >= evicted within the sample and the subtraction safe.
+        const std::uint64_t evicted = m_evictedTotal.load(std::memory_order_relaxed);
+        const std::size_t head = m_head.load(std::memory_order_acquire);
+        counters.pushed = m_pushedBase + m_tail.load(std::memory_order_relaxed);
+        const std::uint64_t deliveredHead = m_poppedBase + head;
+        counters.popped = deliveredHead >= evicted ? deliveredHead - evicted : 0;
         counters.discardedTotal = m_discardedTotal.load(std::memory_order_relaxed);
         return counters;
     }
@@ -703,6 +770,12 @@ private:
     /// and the shutdown flag at most this often, so a missed wake-up delays it by
     /// one poll instead of parking it for the rest of the run.
     static constexpr int kParkTimeoutMs = 5;
+    /// How many claim attempts PopIfAvailableOverwrite() makes before it reports
+    /// "nothing this time". A producer overwriting continuously can keep losing
+    /// the race to the consumer; the bound keeps a tryPop() call non-blocking
+    /// (the caller retries on its next turn), while a success still takes one
+    /// compare-exchange.
+    static constexpr int kOverwriteClaimRetries = 64;
 
     /// One relaxed spin iteration for the calling core.
     static void SpinPause() {
@@ -755,8 +828,22 @@ private:
         }
     }
 
+    /// Slot claim states used only in overwrite-oldest mode.
+    enum ClaimState : std::uint8_t {
+        kClaimNone = 0,  ///< nobody is touching the slot
+        kClaimRead = 1,  ///< a consumer is copying the item out
+        kClaimEvict = 2  ///< a producer is destroying the oldest item
+    };
+
     struct Slot {
         typename std::aligned_storage<sizeof(T), alignof(T)>::type storage;
+        /// Write generation of the item in this slot: an item written at ring
+        /// position p carries seq = p + 1, and a slot is free for position p when
+        /// seq == p. Only touched in overwrite-oldest mode.
+        std::atomic<std::uint64_t> seq;
+        /// See ClaimState. A plain byte would race; the compare-exchange in
+        /// PutEvictOldest()/PopIfAvailableOverwrite() owns the slot.
+        std::atomic<std::uint8_t> claim;
     };
 
     T* ElementAt(std::size_t index) const {
@@ -783,11 +870,25 @@ private:
         for (std::size_t index = head; index != tail; ++index) {
             ElementAt(index % m_slotCount)->~T();
         }
+        // Evicted items (overwrite-oldest mode) were published as discarded and
+        // never as pops, so fold them out of the popped baseline before the
+        // indices are rewound. head - evicted is the delivered count.
+        const std::uint64_t evicted = m_evictedTotal.load(std::memory_order_relaxed);
+        const std::size_t delivered = head >= static_cast<std::size_t>(evicted)
+                                          ? head - static_cast<std::size_t>(evicted)
+                                          : 0;
         m_pushedBase += tail;
-        m_poppedBase += head;
+        m_poppedBase += delivered;
         m_discardedTotal.fetch_add(static_cast<std::uint64_t>(tail - head), std::memory_order_relaxed);
+        m_evictedTotal.store(0, std::memory_order_relaxed);
         m_head.store(0, std::memory_order_release);
         m_tail.store(0, std::memory_order_release);
+        // Rewind the per-slot tags so the next run's writer starts from a clean
+        // generation. Only safe here because no thread is using the queue.
+        for (std::size_t index = 0; index < m_slotCount; ++index) {
+            m_slots[index].seq.store(index, std::memory_order_relaxed);
+            m_slots[index].claim.store(kClaimNone, std::memory_order_relaxed);
+        }
     }
 
     /// Producer-side "is there no room" check, used by waitForRoom().
@@ -814,7 +915,15 @@ private:
         if (size >= m_slotCount) {
             return false;
         }
-        new (ElementAt(tail % m_slotCount)) T(std::move(item));
+        const std::size_t index = tail % m_slotCount;
+        new (ElementAt(index)) T(std::move(item));
+        if (m_overwriteOldest) {
+            // Tag the slot with the generation this item belongs to so a consumer
+            // that claims it can tell a stale head from a live one. Published
+            // (release) before the tail store that makes the item visible.
+            m_slots[index].seq.store(tail + 1, std::memory_order_release);
+            m_slots[index].claim.store(kClaimNone, std::memory_order_relaxed);
+        }
         // seq_cst, not release: this store publishes the item *and* acts as the
         // StoreLoad barrier before WakeConsumer() reads the waiter flag (the
         // index line is already owned here, so the locked store is cheap), see
@@ -827,9 +936,70 @@ private:
     }
 
     /**
+     * @brief Publishes @p item, evicting the oldest one when the ring is full.
+     *
+     * @details Only the single producer calls this. The oldest item lives in the
+     * same physical slot the new one will take (when full, tail % N == head % N),
+     * so eviction and publication are one step: claim the slot, destroy the old
+     * item, advance head, then write the new item for position @p tail. The slot
+     * claim keeps the consumer from copying the item that is being destroyed.
+     *
+     * @return false once the queue has been shut down.
+     */
+    bool PutEvictOldest(T& item) {
+        for (;;) {
+            if (m_shutdown.load(std::memory_order_relaxed)) {
+                return false;
+            }
+            const std::size_t tail = m_tail.load(std::memory_order_relaxed);
+            const std::size_t head = m_head.load(std::memory_order_acquire);
+            if (tail - head < m_slotCount) {
+                // There is room after all: publish normally, no eviction needed.
+                if (PutIfSpace(item)) {
+                    return true;
+                }
+                continue;
+            }
+            const std::size_t index = head % m_slotCount;
+            Slot& slot = m_slots[index];
+            std::uint8_t expected = kClaimNone;
+            if (!slot.claim.compare_exchange_strong(expected, kClaimEvict, std::memory_order_acq_rel,
+                                                    std::memory_order_acquire)) {
+                // The consumer is copying this very slot; let it finish.
+                SpinPause();
+                continue;
+            }
+            // The head we read may be stale: if the consumer consumed the item
+            // between our head load and the claim, the slot no longer holds
+            // position `head`. Check the generation before destroying anything.
+            if (slot.seq.load(std::memory_order_acquire) != head + 1) {
+                slot.claim.store(kClaimNone, std::memory_order_release);
+                continue;
+            }
+            ElementAt(index)->~T();
+            m_discardedTotal.fetch_add(1, std::memory_order_relaxed);
+            m_evictedTotal.fetch_add(1, std::memory_order_relaxed);
+            // Publish the drop before reusing the slot for the new item.
+            m_head.store(head + 1, m_localMode ? std::memory_order_relaxed : std::memory_order_seq_cst);
+            new (ElementAt(index)) T(std::move(item));
+            slot.seq.store(tail + 1, std::memory_order_release);
+            slot.claim.store(kClaimNone, std::memory_order_release);
+            m_tail.store(tail + 1, m_localMode ? std::memory_order_relaxed : std::memory_order_seq_cst);
+            const std::size_t depth = tail - head;    // still full: one in, one out
+            if (depth > m_highWaterMark.load(std::memory_order_relaxed)) {
+                m_highWaterMark.store(depth, std::memory_order_relaxed);
+            }
+            return true;
+        }
+    }
+
+    /**
      * @brief Takes the head item when one is published. Caller: single consumer.
      */
     bool PopIfAvailable(T& itemRef) {
+        if (m_overwriteOldest) {
+            return PopIfAvailableOverwrite(itemRef);
+        }
         const std::size_t head = m_head.load(std::memory_order_relaxed);
         const std::size_t tail = m_tail.load(std::memory_order_acquire);    // sees the item
         if (head == tail) {
@@ -843,6 +1013,48 @@ private:
         // is also the StoreLoad barrier before WakeProducer() reads its flag.
         m_head.store(head + 1, m_localMode ? std::memory_order_relaxed : std::memory_order_seq_cst);
         return true;
+    }
+
+    /**
+     * @brief PopIfAvailable() for overwrite-oldest mode.
+     *
+     * @details The producer may evict the head slot while it is being copied, so
+     * the consumer first claims the slot with a compare-exchange. Only one of
+     * {consumer, evicting producer} can own it; the loser retries with a fresh
+     * head. A bounded retry keeps a tryPop() call from spinning behind a producer
+     * that is overwriting continuously.
+     */
+    bool PopIfAvailableOverwrite(T& itemRef) {
+        for (int attempt = 0; attempt < kOverwriteClaimRetries; ++attempt) {
+            const std::size_t head = m_head.load(std::memory_order_acquire);
+            const std::size_t tail = m_tail.load(std::memory_order_acquire);
+            if (head == tail) {
+                return false;
+            }
+            const std::size_t index = head % m_slotCount;
+            Slot& slot = m_slots[index];
+            std::uint8_t expected = kClaimNone;
+            if (!slot.claim.compare_exchange_strong(expected, kClaimRead, std::memory_order_acq_rel,
+                                                    std::memory_order_acquire)) {
+                // A producer is evicting this slot; retry with a fresh head.
+                SpinPause();
+                continue;
+            }
+            if (slot.seq.load(std::memory_order_acquire) != head + 1) {
+                // The oldest item was evicted and head moved since we read it.
+                slot.claim.store(kClaimNone, std::memory_order_release);
+                continue;
+            }
+            T* slotElement = ElementAt(index);
+            itemRef = std::move(*slotElement);
+            slotElement->~T();
+            // Free the slot for write generation head + capacity, then publish.
+            slot.seq.store(head + m_slotCount, std::memory_order_release);
+            slot.claim.store(kClaimNone, std::memory_order_release);
+            m_head.store(head + 1, m_localMode ? std::memory_order_relaxed : std::memory_order_seq_cst);
+            return true;
+        }
+        return false;
     }
 
     /**
@@ -882,6 +1094,8 @@ private:
 
     /// Set before any worker thread starts; read on both hot paths.
     bool m_localMode = false;
+    /// Overwrite-oldest mode; see SetOverwriteOldest(). Set before threads start.
+    bool m_overwriteOldest = false;
     std::atomic<std::size_t> m_highWaterMark{0};
     char m_producerLine[kCacheLineSize - 2 * sizeof(std::atomic<std::size_t>)];
 
@@ -909,9 +1123,14 @@ private:
     // contract for both calls); read by GetStats().
     std::size_t m_pushedBase = 0;
     std::size_t m_poppedBase = 0;
-    // Items clear()/restart() destroyed. Kept apart from the pushed/popped
-    // indices so pushed == popped + size + discarded stays exact.
+    // Items clear()/restart() destroyed, plus overwrite-oldest evictions. Kept
+    // apart from the pushed/popped indices so
+    // pushed == popped + size + discarded stays exact.
     std::atomic<std::uint64_t> m_discardedTotal{0};
+    // Subset of m_discardedTotal produced by overwrite-oldest evictions; the
+    // published popped total subtracts it because an eviction moves head without
+    // a delivery. Stays 0 on every non-overwrite edge.
+    std::atomic<std::uint64_t> m_evictedTotal{0};
 };
 
 // C++14 needs an out-of-class definition for a static constexpr data member as

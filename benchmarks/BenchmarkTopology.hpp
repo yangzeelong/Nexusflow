@@ -93,7 +93,8 @@ inline std::shared_ptr<nexusflow::Module> MakeStageModule(const std::string& nam
  */
 inline BuiltTopology BuildLinear(const TopologyShape& shape, std::size_t capacity, PayloadSpec spec,
                                  bool freshPayload, int batchSize = 0, bool measureLatency = true,
-                                 const WorkloadSpec& workload = WorkloadSpec{}) {
+                                 const WorkloadSpec& workload = WorkloadSpec{}, int slowStage = -1,
+                                 int slowUs = 0) {
     BuiltTopology built;
     built.shape = shape;
 
@@ -107,7 +108,14 @@ inline BuiltTopology BuildLinear(const TopologyShape& shape, std::size_t capacit
     std::string previous = "source";
     for (int i = 0; i < shape.modules - 2; ++i) {
         const std::string name = "stage_" + std::to_string(i);
-        auto stage = MakeStageModule(name, workload);
+        // A single slow stage is how the overload case builds a bottleneck: every
+        // upstream edge then fills and the queue-full policy decides what happens.
+        WorkloadSpec stageWorkload = workload;
+        if (i == slowStage && slowUs > 0) {
+            stageWorkload.kind = WorkloadKind::Delay;
+            stageWorkload.delayUs = slowUs;
+        }
+        auto stage = MakeStageModule(name, stageWorkload);
         built.modules.push_back(stage);
         builder.AddModule(stage);
         builder.Connect(previous, name);

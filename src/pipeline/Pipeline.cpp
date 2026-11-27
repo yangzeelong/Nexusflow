@@ -250,8 +250,14 @@ ErrorCode Pipeline::Start() {
     // A pipeline may be started again after Stop(): the edges were closed at
     // teardown so that every worker was certain to exit, and they have to be
     // reopened before the workers look at them again.
+    // kDropOldest needs the consumer-side slot claim armed on every edge before a
+    // worker starts; every other policy leaves the overwrite path off so its hot
+    // loop is untouched.
+    const QueueFullPolicy queuePolicy =
+        m_pImpl->context ? m_pImpl->context->GetQueueFullPolicy() : QueueFullPolicy::kBlock;
     for (auto& queue : m_pImpl->queues) {
         queue->restart();
+        queue->SetOverwriteOldest(queuePolicy == QueueFullPolicy::kDropOldest);
     }
 
     // What the previous stop measured describes the previous run, so a snapshot

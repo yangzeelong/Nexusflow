@@ -161,12 +161,21 @@ private:
         if (ShuttingDown()) {
             return queue->tryPush(msg);
         }
+        if (m_policy == QueueFullPolicy::kDropOldest) {
+            // Evict the oldest buffered message instead of blocking; the edge's
+            // discardedTotal records the eviction. During a drain the push above
+            // still fails fast rather than evicting from a closing queue.
+            return queue->pushEvictOldest(msg);
+        }
         return queue->push(msg);
     }
 
     bool PushTo(ViewPtr<MessageQueue> queue, Message&& msg) {
         if (ShuttingDown()) {
             return queue->tryPush(std::move(msg));
+        }
+        if (m_policy == QueueFullPolicy::kDropOldest) {
+            return queue->pushEvictOldest(std::move(msg));
         }
         return queue->push(std::move(msg));
     }

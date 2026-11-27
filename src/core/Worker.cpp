@@ -474,6 +474,12 @@ void Worker::RunJoin() {
 }
 
 std::size_t Worker::OutputRoom() const {
+    // Drop-oldest never blocks on a full edge: it evicts the oldest message
+    // instead, so there is no room to wait for and the pooled worker must not
+    // throttle itself to the edge depth.
+    if (m_context && m_context->GetQueueFullPolicy() == QueueFullPolicy::kDropOldest) {
+        return std::numeric_limits<std::size_t>::max();
+    }
     std::size_t room = std::numeric_limits<std::size_t>::max();
     for (const auto& queue : m_outputQueues) {
         if (!queue) {
@@ -496,6 +502,9 @@ std::size_t Worker::OutputRoom() const {
 }
 
 bool Worker::OutputsHaveRoom() const {
+    if (m_context && m_context->GetQueueFullPolicy() == QueueFullPolicy::kDropOldest) {
+        return true;    // a full edge evicts instead of blocking, see OutputRoom()
+    }
     for (const auto& queue : m_outputQueues) {
         if (!queue) {
             continue;

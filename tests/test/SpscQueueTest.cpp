@@ -301,4 +301,78 @@ TEST(SpscQueueTest, RepeatedClearsAccumulateInsteadOfRewindingTotals) {
     EXPECT_EQ(counters.pushed, counters.popped + counters.size + counters.discardedTotal);
 }
 
+// Overwrite-oldest: a push on a full ring sacrifices the oldest buffered item
+// and keeps the newest. The eviction is charged to discardedTotal (the item was
+// pushed, no consumer popped it) and never to poppedTotal, so the cumulative
+// identity still holds.
+TEST(SpscQueueTest, OverwriteOldestKeepsNewestItemsAndCountsTheEviction) {
+    SpscQueue<int> queue(2);
+    queue.SetOverwriteOldest(true);
+    ASSERT_TRUE(queue.push(1));
+    ASSERT_TRUE(queue.push(2));
+    ASSERT_TRUE(queue.pushEvictOldest(3)) << "the oldest item (1) should be evicted, the new one queued";
+
+    const auto counters = queue.GetStats();
+    EXPECT_EQ(counters.size, std::size_t(2));
+    EXPECT_EQ(counters.pushed, static_cast<std::uint64_t>(3));
+    EXPECT_EQ(counters.popped, static_cast<std::uint64_t>(0)) << "an eviction is not a delivery";
+    EXPECT_EQ(counters.discardedTotal, static_cast<std::uint64_t>(1));
+    EXPECT_EQ(counters.pushed, counters.popped + counters.size + counters.discardedTotal);
+
+    int value = 0;
+    ASSERT_TRUE(queue.tryPop(value));
+    EXPECT_EQ(value, 2);
+    ASSERT_TRUE(queue.tryPop(value));
+    EXPECT_EQ(value, 3);
+    EXPECT_FALSE(queue.tryPop(value));
+}
+
+// The producer may overwrite the very slot the consumer is copying, so this is
+// the tearing check for the per-slot claim: every popped value must be a real,
+// strictly increasing item, and the identity must survive a run that certainly
+// evicted. The consumer starts a little late so the producer is guaranteed to
+// overflow the ring while the consumer is reading.
+TEST(SpscQueueTest, OverwriteOldestIsSafeUnderConcurrentPop) {
+    SpscQueue<int> queue(4);
+    queue.SetOverwriteOldest(true);
+
+    constexpr int kItems = 100000;
+    std::atomic<bool> producerDone{false};
+    std::thread producer([&queue, &producerDone]() {
+        for (int i = 1; i <= 100000; ++i) {
+            while (!queue.pushEvictOldest(i)) {
+                std::this_thread::yield();
+            }
+        }
+        producerDone.store(true, std::memory_order_relaxed);
+    });
+
+    // The consumer must not race the producer's first burst, or the ring never
+    // fills and no eviction is exercised.
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    bool ordered = true;
+    int last = 0;
+    int popped = 0;
+    int value = 0;
+    while (!producerDone.load(std::memory_order_relaxed) || queue.getSize() > 0) {
+        if (!queue.tryPop(value)) {
+            continue;
+        }
+        if (value <= last) {
+            ordered = false;
+        }
+        last = value;
+        ++popped;
+    }
+    producer.join();
+
+    EXPECT_TRUE(ordered) << "a consumer saw an out-of-order or torn item while the producer was overwriting";
+    EXPECT_GT(popped, 0);
+    const auto counters = queue.GetStats();
+    EXPECT_EQ(counters.pushed, static_cast<std::uint64_t>(kItems));
+    EXPECT_GT(counters.discardedTotal, static_cast<std::uint64_t>(0)) << "the run must have exercised eviction";
+    EXPECT_EQ(counters.pushed, counters.popped + counters.size + counters.discardedTotal);
+    EXPECT_EQ(static_cast<std::uint64_t>(popped), counters.popped);
+}
+
 }    // namespace

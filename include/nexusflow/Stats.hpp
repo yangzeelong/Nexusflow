@@ -37,7 +37,9 @@ struct EdgeSnapshot {
     std::uint64_t pushedTotal = 0;
     /// Messages popped out of this edge.
     std::uint64_t poppedTotal = 0;
-    /// Messages destroyed by Pipeline::Cancel() before a consumer took them.
+    /// Messages destroyed before a consumer took them: the backlog a
+    /// Pipeline::Cancel() discards, plus everything evicted by the drop-oldest
+    /// queue policy (QueueFullPolicy::kDropOldest).
     ///
     /// Charged to the edge and never to a module's droppedTotal: the producer
     /// counted the message as processed and pushed, and no consumer ever popped

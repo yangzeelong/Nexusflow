@@ -12,6 +12,8 @@
 - 新增可选的队列满策略 `QueueFullPolicy::kDrop`（`PipelineContext::WithQueueFullPolicy`）：
   输出队列满时丢弃整条消息而不是阻塞（拒收发生在模块发送路径，队列里的旧消息不会被驱逐），丢弃数计入 `ModuleSnapshot::droppedTotal`；默认仍是 `kBlock`。
   基准侧新增 `--queue-full block|drop`，`cov,` 行在 drop 下把策略丢弃记为预期结果。
+- 新增 `QueueFullPolicy::kDropOldest`：边队列满时**驱逐队首**（最旧、未被消费的那条）并立刻放入新消息，保最新帧而不施加背压。被驱逐的消息计入该边的 `EdgeSnapshot::discardedTotal`（不计模块 `droppedTotal`），`pushed == popped + size + discarded` 不变。有界边才触发。实现上 `SpscQueue` 为覆盖式写入增加了每槽 `seq`/`claim` 标签，消费端读取前 CAS 认领槽位，避免生产者推进 head 时撕裂正在拷贝的帧；该路径仅在策略为 kDropOldest 时启用，`kBlock` 热路径零改动。
+  基准侧 `--queue-full` 接受 `drop-oldest`，并新增 `--slow-stage N --slow-us X` 构造单点瓶颈的过载用例（`--batch 1`、`capacity 64`、stage_1 每帧 2 ms）。
 
 ### Changed
 

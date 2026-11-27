@@ -5,6 +5,7 @@
 #include <nexusflow/Pipeline.hpp>
 #include <nexusflow/PipelineBuilder.hpp>
 #include <nexusflow/PipelineContext.hpp>
+#include <nexusflow/Stats.hpp>
 
 #include <gtest/gtest.h>
 
@@ -98,6 +99,88 @@ TEST(QueueFullPolicyTest, DropNewestCountsDropsAndKeepsProducing) {
     // Nothing holds the producer back any more, so it runs far ahead of the
     // 2 ms-per-message sink and throws away what cannot be delivered.
     EXPECT_GT(source->emitted.load(), sink->received.load() * 10u);
+}
+
+/// Emits a strictly increasing sequence, so a sink can tell how fresh its input
+/// is: a large last value next to a small count means it kept up with the newest
+/// frames instead of draining an old backlog.
+class SequencedSource : public Module {
+public:
+    explicit SequencedSource(const std::string& name) : Module(name) {}
+
+    std::atomic<std::uint64_t> emitted{0};
+
+protected:
+    void Process(Message& inputMessage) override {
+        (void)inputMessage;
+        const int sequence = m_next++;
+        emitted.store(static_cast<std::uint64_t>(sequence), std::memory_order_relaxed);
+        Broadcast(std::move(MakeMessage(sequence)));
+    }
+
+private:
+    int m_next = 1;
+};
+
+/// Consumes one message every 2 ms and remembers the highest sequence it saw.
+class RecordingSink : public Module {
+public:
+    explicit RecordingSink(const std::string& name) : Module(name) {}
+
+    std::atomic<std::uint64_t> received{0};
+    std::atomic<int> lastReceived{0};
+
+protected:
+    void Process(Message& inputMessage) override {
+        if (const int* sequence = inputMessage.BorrowPtr<int>()) {
+            received.fetch_add(1, std::memory_order_relaxed);
+            lastReceived.store(*sequence, std::memory_order_relaxed);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+};
+
+TEST(QueueFullPolicyTest, DropOldestKeepsNewestAndChargesTheEdge) {
+    auto source = std::make_shared<SequencedSource>("source");
+    auto sink = std::make_shared<RecordingSink>("sink");
+    auto pipeline = PipelineBuilder()
+                        .AddModule(source)
+                        .AddModule(sink)
+                        .Connect(source->GetModuleName(), sink->GetModuleName())
+                        .Build(kCapacity);
+    ASSERT_EQ(ErrorCode::SUCCESS, pipeline->Init());
+    pipeline->GetContext()->WithQueueFullPolicy(QueueFullPolicy::kDropOldest);
+    ASSERT_EQ(ErrorCode::SUCCESS, pipeline->Start());
+    std::this_thread::sleep_for(std::chrono::milliseconds(kRunMs));
+    const PipelineSnapshot mid = pipeline->GetSnapshot();
+    // Snapshot the producer before the stop begins: whatever it has emitted by
+    // now is already queued or evicted, so the newest of it must reach the sink.
+    const std::uint64_t emittedBeforeStop = source->emitted.load();
+    ASSERT_EQ(ErrorCode::SUCCESS, pipeline->Stop());
+
+    // An eviction belongs to the edge, never to a module's droppedTotal: the
+    // producer counted the message as processed and pushed.
+    for (const ModuleSnapshot& module : mid.modules) {
+        EXPECT_EQ(module.droppedTotal, static_cast<std::uint64_t>(0))
+            << module.name << " must not count an edge eviction as its own drop";
+    }
+    ASSERT_EQ(mid.edges.size(), std::size_t(1));
+    const EdgeSnapshot& edge = mid.edges[0];
+    EXPECT_GT(edge.discardedTotal, static_cast<std::uint64_t>(0)) << "the overloaded edge must have evicted old frames";
+    EXPECT_EQ(edge.pushedTotal, edge.poppedTotal + static_cast<std::uint64_t>(edge.size) + edge.discardedTotal)
+        << edge.Name() << ": pushedTotal must always equal poppedTotal + size + discardedTotal";
+
+    const std::uint64_t received = sink->received.load();
+    const int last = sink->lastReceived.load();
+    EXPECT_GT(received, static_cast<std::uint64_t>(0));
+    // The sink lagged far behind the producer but still saw late sequence values:
+    // the last value is well above the count it consumed.
+    EXPECT_GT(static_cast<std::uint64_t>(last), received * 2u);
+    // Drop-oldest keeps the newest frame, so the sink ends up holding a sequence
+    // at least as new as the producer's state when the stop began. (The producer
+    // may keep emitting during teardown; those extra frames only push `last` up.)
+    EXPECT_GE(static_cast<std::uint64_t>(last) + 8u, emittedBeforeStop)
+        << "drop-oldest must leave the sink holding the newest frame";
 }
 
 } // namespace

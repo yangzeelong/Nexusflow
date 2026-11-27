@@ -162,6 +162,32 @@ public:
     }
 
     /**
+     * @brief Pushes an item, evicting the oldest buffered one when full.
+     *
+     * @details The evicted item is charged to discardedTotal and to neither
+     * index, so pushed == popped + size + discarded stays exact. Used by the
+     * drop-oldest policy when an edge falls back to this queue (an unbounded
+     * fallback is never full, so it simply pushes).
+     */
+    bool pushEvictOldest(T&& item) {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        if (m_shutdown) {
+            return false;
+        }
+        if (isFull()) {
+            ++m_discardedTotal;
+            m_queue.pop();
+        }
+        PushLocked(std::move(item));
+        return true;
+    }
+
+    bool pushEvictOldest(const T& item) {
+        T temp = item;
+        return pushEvictOldest(std::move(temp));
+    }
+
+    /**
      * @brief Tries to pop an item, waiting up to a specified timeout.
      * @param itemRef Reference to store the popped item.
      * @param timeout The maximum duration to wait.

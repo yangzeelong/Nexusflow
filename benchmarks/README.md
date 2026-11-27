@@ -40,10 +40,10 @@ cmake --build build --config Release --target pipeline_benchmark --parallel 16
 ```
 
 每次运行会打印一行
-`csv,<label>,<platform>,<baseline>,<batch>,<observe>,<topology>,<modules>,<branches>,<capacity>,<payload>,<fresh>,<sync>,<duration>,<rep>,<delivered>,<throughput>,<cpu_s>,<cores>,<avg>,<p50>,<p95>,<p99>,<min>,<max>,<cpus>,<timings>,<workload>,<work_param>,<push_mode>,<attempts>,<refused>,<rss_start>,<rss_peak>,<rss_end>,<edge_depth_max>,<stop_ms>,<cycles_per_msg>,<pool>`，
+`csv,<label>,<platform>,<baseline>,<batch>,<observe>,<topology>,<modules>,<branches>,<capacity>,<payload>,<fresh>,<sync>,<duration>,<rep>,<delivered>,<throughput>,<cpu_s>,<cores>,<avg>,<p50>,<p95>,<p99>,<min>,<max>,<cpus>,<timings>,<workload>,<work_param>,<push_mode>,<attempts>,<refused>,<rss_start>,<rss_peak>,<rss_end>,<edge_depth_max>,<stop_ms>,<cycles_per_msg>,<pool>,<queue_full>,<slow_stage>,<slow_us>`，
 批量跑时 `grep '^csv,'` 收集成表。`min`/`max` 是单次样本的极值（`max` 通常是调度离群点，别当稳态读）。
 `modules` / `branches` 是**实际建出来的拓扑**，不是命令行回显：`diamond --branches 2` 记 `modules=4, branches=2`，`linear --modules 2` 记 `modules=2, branches=0`。
-后 12 列是本分支扩展：`cpus`（绑核数，0=不绑）、`timings`（逐跳计时 0/1）、`workload`/`work_param`（负载类型与参数）、`push_mode`（`block`/`try`）、`attempts`/`refused`（注入尝试/队列满拒绝次数）、`rss_start`/`rss_peak`/`rss_end`（MiB）、`edge_depth_max`（最深积压）、`stop_ms`（Stop 排水+join 耗时）。
+后 15 列是本分支扩展：`cpus`（绑核数，0=不绑）、`timings`（逐跳计时 0/1）、`workload`/`work_param`（负载类型与参数）、`push_mode`（`block`/`try`）、`attempts`/`refused`（注入尝试/队列满拒绝次数）、`rss_start`/`rss_peak`/`rss_end`（MiB）、`edge_depth_max`（最深积压）、`stop_ms`（Stop 排水+join 耗时），以及最后 3 列 `queue_full`（`block`/`drop`/`drop-oldest`）、`slow_stage`/`slow_us`（单点瓶颈档，-1/0 表示未启用）。
 倒数第 2 列 `cycles_per_msg` 是补充指标：`cpu/msg × TSC`，TSC 频率由 `tsc` 行给出（三窗校准）；ARM 上恒为 0，不伪造。口径见下文「测量协议」§4。
 最后一列 `pool` 是池化线程数（0 = 每模块一线程，`--pool-size N` 开启）。
 
@@ -64,7 +64,11 @@ cmake --build build --config Release --target pipeline_benchmark --parallel 16
 
 `--pool-size N` 走 v1.1 的线程池模型（`PipelineContext::WithThreadPoolSize`）：非融合模块固定绑定到 N 个共享线程，融合模块仍独占线程。池模式用精确配额背压（`OutputRoom()`），不丢帧，`cov` 应为 `ok`；代价是浅队列深链上吞吐下降，实测见 [`PERFORMANCE.zh-CN.md`](PERFORMANCE.zh-CN.md) 第二部分 §14。
 
-`--queue-full block|drop` 选择输出队列满时的行为：`block`（默认）阻塞等待，慢下游给上游施加背压；`drop` 丢掉这条消息并计数（`QueueFullPolicy::kDrop`），只在允许丢帧的流水线上有意义。丢弃发生在模块的发送路径（`Dispatcher::Broadcast`），不是队列内部：队列里的旧消息一条都不会被赶走，**被拒收的是正要入队的新消息**。策略是**全有或全无**：一条消息要么进所有输出队列、要么一条都不进，否则 join 组会永远凑不齐。实测见 [`PERFORMANCE.zh-CN.md`](PERFORMANCE.zh-CN.md) 第二部分 §15：它买到的是活性，不是吞吐。
+`--queue-full block|drop|drop-oldest` 选择输出队列满时的行为：`block`（默认）阻塞等待，慢下游给上游施加背压；`drop` 丢掉这条消息并计数（`QueueFullPolicy::kDrop`），只在允许丢帧的流水线上有意义。丢弃发生在模块的发送路径（`Dispatcher::Broadcast`），不是队列内部：队列里的旧消息一条都不会被赶走，**被拒收的是正要入队的新消息**。策略是**全有或全无**：一条消息要么进所有输出队列、要么一条都不进，否则 join 组会永远凑不齐。实测见 [`PERFORMANCE.zh-CN.md`](PERFORMANCE.zh-CN.md) 第二部分 §15：它买到的是活性，不是吞吐。
+
+`drop-oldest`（`QueueFullPolicy::kDropOldest`）同样不阻塞，但保最新帧：边队列满时**驱逐队首**（最旧、消费端还没取走的那条），新消息立刻占据它的位置。被驱逐的消息计入该边的 `EdgeSnapshot::discardedTotal`（不是模块的 `droppedTotal`——生产者已经把它算进 processed/pushed），因此 `pushed == popped + size + discarded` 不变。语义上它是"实时处理"：消费者再慢，拿到的也是最新的那一帧，而不是越拖越旧的一摞积压。仅当边有界（`capacity > 0`）时才有意义；无界边永不触发。
+
+`--slow-stage N --slow-us X` 只给第 N 个中间模块额外加 X 微秒延迟（覆盖/叠加 `--workload`），用来构造**单点瓶颈**：上游每条边必然被压满，于是队列满策略真正生效。过载用例的形状：`--modules 6 --capacity 64 --batch 1`，`--slow-stage 1 --slow-us 2000`，源不限速。此时吞吐对所有策略都≈瓶颈速率（500 msg/s），比较项是 **p50/p99 延迟**与 **discarded 占比**，不是吞吐。
 
 `--workload none|delay|compute|memory` 给每个中间 stage 加负载：`--delay-us`（等待；Windows 上用高精度 waitable timer，因为系统的 `Sleep` 在进程跑几秒后会被合并到 15.6 ms tick，`sleep_for` 不再可信；这个维度用 ≥2 ms 档）、`--compute-iters`（sin/cos 串行链）、`--memory-bytes`（每消息两次半区 memcpy）。`work_param` 记录实际参数。
 

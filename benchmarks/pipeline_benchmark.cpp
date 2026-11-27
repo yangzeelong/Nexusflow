@@ -98,9 +98,16 @@ struct Options {
     int poolSize = 0;
     /// How the pool packs modules into its threads; see ThreadPoolMapping.
     std::string poolMap = "contiguous";
-    /// What a module does when an output edge is full: `none` (block, the
-    /// framework default) or `drop` (drop the message, see QueueFullPolicy).
+    /// What a module does when an output edge is full: `block` (framework
+    /// default), `drop` (drop the new message) or `drop-oldest` (evict the oldest
+    /// queued frame); see QueueFullPolicy.
     std::string queueFullPolicy = "block";
+    /// Index of the intermediate stage that runs the delay workload on top of
+    /// `workload`; -1 disables it. Used to build a single-stage bottleneck
+    /// (overload) case without slowing every stage.
+    int slowStage = -1;
+    /// Delay in microseconds for `--slow-stage`.
+    int slowUs = 0;
     std::string logLevel = "warn";
 };
 
@@ -362,11 +369,23 @@ Options ParseOptions(int argc, char* argv[]) {
             }
             options.poolMap = value;
         } else if (TakeValue(arg, "--queue-full", argc, argv, i, value)) {
-            if (value != "block" && value != "drop") {
-                std::cerr << "--queue-full expects block or drop\n";
+            if (value != "block" && value != "drop" && value != "drop-oldest") {
+                std::cerr << "--queue-full expects block, drop or drop-oldest\n";
                 std::exit(1);
             }
             options.queueFullPolicy = value;
+        } else if (TakeValue(arg, "--slow-stage", argc, argv, i, value)) {
+            options.slowStage = NumberOrExit("--slow-stage", value);
+            if (options.slowStage < 0) {
+                std::cerr << "--slow-stage expects a non-negative stage index\n";
+                std::exit(1);
+            }
+        } else if (TakeValue(arg, "--slow-us", argc, argv, i, value)) {
+            options.slowUs = NumberOrExit("--slow-us", value);
+            if (options.slowUs < 0) {
+                std::cerr << "--slow-us expects a non-negative delay in microseconds\n";
+                std::exit(1);
+            }
         } else if (arg == "--timings") {
             options.timings = true;
         } else if (arg == "--sync-inputs") {
@@ -380,8 +399,8 @@ Options ParseOptions(int argc, char* argv[]) {
                    "       [--payload none|1080p-rgb|1080p-yuv420|2k-rgb|2k-yuv420] [--payload-fresh]\n"
                    "       [--workload none|delay|compute|memory] [--delay-us N] [--compute-iters N] [--memory-bytes N]\n"
                    "       [--cpus N] [--pool-size N] [--pool-map contiguous|round-robin]\n"
-                   "       [--queue-full block|drop] [--push-mode block|try]\n"
-                   "       [--straggler-us N] [--sync-inputs] [--timings]\n"
+                   "       [--queue-full block|drop|drop-oldest] [--push-mode block|try]\n"
+                   "       [--slow-stage N --slow-us X] [--straggler-us N] [--sync-inputs] [--timings]\n"
                    "       [--log-level trace|debug|info|warn|err|off] [--max-spread P] [--label TEXT]\n";
             std::exit(0);
         } else {
@@ -719,7 +738,7 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
             ? BuildInjection(options.modules, capacity, options.batch, options.observe, options.workload)
             : (shape.IsLinear()
                    ? BuildLinear(shape, capacity, spec, options.freshPayload, options.batch, options.observe,
-                                 options.workload)
+                                 options.workload, options.slowStage, options.slowUs)
                    : BuildDiamond(shape, capacity, spec, options.freshPayload, options.syncInputs, options.batch,
                                   options.observe, options.workload, options.stragglerUs));
     if (built.pipeline == nullptr) {
@@ -743,6 +762,8 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
     if (options.queueFullPolicy == "drop") {
         // Modules read the policy in ModuleActor::Start(), so set it before Start().
         built.pipeline->GetContext()->WithQueueFullPolicy(QueueFullPolicy::kDrop);
+    } else if (options.queueFullPolicy == "drop-oldest") {
+        built.pipeline->GetContext()->WithQueueFullPolicy(QueueFullPolicy::kDropOldest);
     }
 
     if (options.timings) {
@@ -821,8 +842,9 @@ Sample RunOnce(const Options& options, const TopologyShape& shape, const Payload
     sample.poolTurns = poolStats.turns;
     sample.poolBlocked = poolStats.blockedRounds;
     sample.poolIdle = poolStats.idleRounds;
+    // Both lossy policies make drops an expected outcome rather than a leak.
     sample.coverage = CoverageOf(midRun, *built.pipeline, shape, options.syncInputs,
-                                 options.queueFullPolicy == "drop", delivered);
+                                 options.queueFullPolicy != "block", delivered);
 
     built.pipeline->DeInit();
     return sample;
@@ -845,7 +867,8 @@ void PrintCsv(const Options& options, const TopologyShape& shape, std::size_t ca
               << WorkloadParameter(options.workload) << ',' << options.pushMode << ',' << sample.attempts << ','
               << sample.refused << ',' << sample.rssStartMiB << ',' << sample.rssPeakMiB << ',' << sample.rssEndMiB
               << ',' << sample.edgeDepthMax << ',' << sample.stopMs << ',' << sample.cyclesPerMsg
-              << ',' << options.poolSize << '\n';
+              << ',' << options.poolSize << ',' << options.queueFullPolicy << ',' << options.slowStage << ','
+              << options.slowUs << '\n';
 }
 
 /**
@@ -1042,11 +1065,15 @@ int main(int argc, char* argv[]) {
     if (options.stragglerUs > 0) {
         std::cout << "straggler: branch_0 runs the delay workload with " << options.stragglerUs << " us\n";
     }
+    if (options.slowStage >= 0 && options.slowUs > 0) {
+        std::cout << "slow stage: stage_" << options.slowStage << " delays " << options.slowUs
+                  << " us per message (single-stage bottleneck)\n";
+    }
     if (options.timings) {
         std::cout << "module timings: on\n";
     }
     if (options.queueFullPolicy != "block") {
-        std::cout << "queue full policy: drop on full output queues\n";
+        std::cout << "queue full policy: " << options.queueFullPolicy << " on full output queues\n";
     }
     if (options.poolSize > 0) {
         std::cout << "thread pool: " << options.poolSize << " threads (" << options.poolMap
