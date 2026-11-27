@@ -26,9 +26,11 @@
 int main(int argc, char** argv)
 {
     const cmp::Options opt = cmp::ParseOptions(argc, argv);
+    const cmp::TimerResolutionGuard timerGuard;
     cmp::PinToLogicalCpus(opt.cpus);
 
     std::atomic<bool> stop{false};
+    std::atomic<bool> measuring{false};  // true only inside the measured window
     std::atomic<std::uint64_t> seq{0};
     std::atomic<std::uint64_t> delivered{0};
     std::atomic<std::int64_t> inFlight{0};  // produced minus consumed; bounds the chain
@@ -85,6 +87,10 @@ int main(int argc, char** argv)
     auto stage_body = [opt](std::uint64_t offset) {
         return [opt, offset](cmp::Frame frame) {
             frame.payload[offset] = cmp::Work(frame.seq + offset, opt.iters);
+            if (opt.slowMs > 0)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(opt.slowMs));
+            }
             return frame;
         };
     };
@@ -95,8 +101,13 @@ int main(int argc, char** argv)
 
     tbb::flow::function_node<cmp::Frame, tbb::flow::continue_msg> sink(
         graph, tbb::flow::serial, [&](cmp::Frame frame) {
-            histogram.Add(cmp::NowNs() - frame.stampNs);
-            delivered.fetch_add(1, std::memory_order_relaxed);
+            // Only frames that reach the sink inside the window count, so the
+            // warm-up and the shutdown drain are not part of the throughput.
+            if (measuring.load(std::memory_order_relaxed))
+            {
+                histogram.Add(cmp::NowNs() - frame.stampNs);
+                delivered.fetch_add(1, std::memory_order_relaxed);
+            }
             inFlight.fetch_sub(1, std::memory_order_relaxed);
             return tbb::flow::continue_msg{};
         });
@@ -113,10 +124,11 @@ int main(int argc, char** argv)
 
     source.activate();
 
-    // Warm-up: one second of the same load, then reset the counters.
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    // Warm-up: the same load for `--warmup-ms`, then the counters start clean.
+    std::this_thread::sleep_for(std::chrono::milliseconds(opt.warmupMs));
     histogram.Reset();
     delivered.store(0, std::memory_order_relaxed);
+    measuring.store(true, std::memory_order_relaxed);
 
     const double cpu0 = cmp::CpuSeconds();
     const std::uint64_t wall0 = cmp::NowNs();
@@ -124,6 +136,7 @@ int main(int argc, char** argv)
     const std::uint64_t wall1 = cmp::NowNs();
     const double cpu1 = cmp::CpuSeconds();
 
+    measuring.store(false, std::memory_order_relaxed);
     stop.store(true, std::memory_order_relaxed);
     graph.wait_for_all();
 

@@ -1,0 +1,341 @@
+# platform: windows
+# cpu: Intel(R) Core(TM) i7-14700KF
+# logical: 28
+# window: empty=30s x3 (iters 0), compute=60s x3 (iters 500), warmup 1s, cpus 8
+# nf: linear 6 modules with an active source module, capacity 64, batch 4; nf-* rows re-run 2026-11-26
+cmp,raw,empty-r1,4,64,0,30.000,332749286,184.000,0.5530,7.00,35.00,37.00
+rss,5.7
+cmp,raw,empty-r2,4,64,0,30.000,359988430,184.766,0.5133,14.00,27.00,30.00
+rss,5.7
+cmp,raw,empty-r3,4,64,0,30.000,351076841,184.938,0.5268,14.00,29.00,30.00
+rss,5.7
+cmp,raw,compute-r1,4,64,500,60.000,27007977,359.625,13.3155,305.00,549.00,595.00
+rss,5.7
+cmp,raw,compute-r2,4,64,500,60.000,27116776,361.328,13.3249,288.00,454.00,554.00
+rss,5.7
+cmp,raw,compute-r3,4,64,500,60.001,27120279,361.266,13.3209,264.00,449.00,545.00
+rss,5.7
+cmp,tbb-flow,empty-r1,4,64,0,30.001,33443432,88.859,2.6570,45.00,61.00,70.00
+rss,6.8
+cmp,tbb-flow,empty-r2,4,64,0,30.000,33580439,88.406,2.6327,45.00,60.00,69.00
+rss,6.7
+cmp,tbb-flow,empty-r3,4,64,0,30.001,33100223,88.047,2.6600,30.00,60.00,70.00
+rss,6.8
+cmp,tbb-flow,compute-r1,4,64,500,60.001,18234820,176.984,9.7058,178.00,308.00,339.00
+rss,6.7
+cmp,tbb-flow,compute-r2,4,64,500,60.000,17907242,177.062,9.8878,179.00,310.00,341.00
+rss,6.7
+cmp,tbb-flow,compute-r3,4,64,500,60.000,18059487,177.047,9.8035,178.00,309.00,341.00
+rss,6.7
+cmp,tbb-pipeline,empty-r1,4,64,0,30.000,61208349,118.438,1.9350,0.00,35.00,39.00
+rss,6.7
+cmp,tbb-pipeline,empty-r2,4,64,0,30.000,64652184,118.422,1.8317,0.00,35.00,39.00
+rss,6.7
+cmp,tbb-pipeline,empty-r3,4,64,0,30.000,61075911,118.562,1.9412,0.00,35.00,39.00
+rss,6.7
+cmp,tbb-pipeline,compute-r1,4,64,500,60.000,28975367,237.188,8.1858,131.00,184.00,218.00
+rss,6.7
+cmp,tbb-pipeline,compute-r2,4,64,500,60.000,29005632,237.688,8.1945,131.00,181.00,217.00
+rss,6.7
+cmp,tbb-pipeline,compute-r3,4,64,500,60.000,29023587,237.438,8.1808,131.00,183.00,217.00
+rss,6.6
+cmp,taskflow,empty-r1,4,64,0,30.000,114321526,117.312,1.0262,0.00,1.00,1.00
+rss,6.0
+cmp,taskflow,empty-r2,4,64,0,30.000,118047388,117.000,0.9911,0.00,1.00,1.00
+rss,6.0
+cmp,taskflow,empty-r3,4,64,0,30.001,115110645,116.156,1.0091,0.00,1.00,1.00
+rss,6.0
+cmp,taskflow,compute-r1,4,64,500,60.001,29004577,231.281,7.9740,6.00,11.00,15.00
+rss,6.0
+cmp,taskflow,compute-r2,4,64,500,60.001,28171821,229.922,8.1614,8.00,11.00,15.00
+rss,6.0
+cmp,taskflow,compute-r3,4,64,500,60.001,29385800,232.516,7.9125,6.00,10.00,15.00
+rss,6.0
+tsc               : 3.41761 GHz (cycles/msg enabled)
+--- NexusFlow pipeline benchmark ---
+affinity: first 8 of 28 logical CPUs
+topology: inject  modules=6  edges=5  sync_inputs=no
+baseline: framework  batch=4  observe=full
+injection: block push from the main thread
+payload: none (0 bytes/frame, one buffer reused)  capacity=64  streams=1 x 30s (+1 warm-up)
+warm-up: 3017306 msg/s (discarded)
+----- 1 runs: median [min .. max] -----
+throughput  msg/s : 3034048  [3034048 .. 3034048]   spread 0%
+cores             : 5.63176  [5.63176 .. 5.63176]   spread 0%
+cpu per msg  us   : 1.85619  [1.85619 .. 1.85619]   spread 0%
+cycles per msg    : 6343.72  [6343.72 .. 6343.72]   spread 0%
+latency p50  us   : 59.25  [59.25 .. 59.25]   spread 0%
+latency p95  us   : 90.5  [90.5 .. 90.5]   spread 0%
+latency p99  us   : 124.5  [124.5 .. 124.5]   spread 0%
+coverage          : ok
+-------------------------------
+tsc               : 3.41761 GHz (cycles/msg enabled)
+--- NexusFlow pipeline benchmark ---
+affinity: first 8 of 28 logical CPUs
+topology: inject  modules=6  edges=5  sync_inputs=no
+baseline: framework  batch=4  observe=full
+injection: block push from the main thread
+payload: none (0 bytes/frame, one buffer reused)  capacity=64  streams=1 x 30s (+1 warm-up)
+warm-up: 3009112 msg/s (discarded)
+----- 1 runs: median [min .. max] -----
+throughput  msg/s : 3031488  [3031488 .. 3031488]   spread 0%
+cores             : 5.71509  [5.71509 .. 5.71509]   spread 0%
+cpu per msg  us   : 1.88524  [1.88524 .. 1.88524]   spread 0%
+cycles per msg    : 6443.03  [6443.03 .. 6443.03]   spread 0%
+latency p50  us   : 65.5  [65.5 .. 65.5]   spread 0%
+latency p95  us   : 92.5  [92.5 .. 92.5]   spread 0%
+latency p99  us   : 123.5  [123.5 .. 123.5]   spread 0%
+coverage          : ok
+-------------------------------
+tsc               : 3.41762 GHz (cycles/msg enabled)
+--- NexusFlow pipeline benchmark ---
+affinity: first 8 of 28 logical CPUs
+topology: inject  modules=6  edges=5  sync_inputs=no
+baseline: framework  batch=4  observe=full
+injection: block push from the main thread
+payload: none (0 bytes/frame, one buffer reused)  capacity=64  streams=1 x 30s (+1 warm-up)
+warm-up: 2983527 msg/s (discarded)
+----- 1 runs: median [min .. max] -----
+throughput  msg/s : 2841406  [2841406 .. 2841406]   spread 0%
+cores             : 5.6828  [5.6828 .. 5.6828]   spread 0%
+cpu per msg  us   : 1.99999  [1.99999 .. 1.99999]   spread 0%
+cycles per msg    : 6835.21  [6835.21 .. 6835.21]   spread 0%
+latency p50  us   : 52.25  [52.25 .. 52.25]   spread 0%
+latency p95  us   : 101.5  [101.5 .. 101.5]   spread 0%
+latency p99  us   : 135  [135 .. 135]   spread 0%
+coverage          : ok
+-------------------------------
+tsc               : 3.41765 GHz (cycles/msg enabled)
+--- NexusFlow pipeline benchmark ---
+affinity: first 8 of 28 logical CPUs
+topology: inject  modules=6  edges=5  sync_inputs=no
+baseline: framework  batch=4  observe=full
+injection: block push from the main thread
+thread pool: 4 threads (contiguous map) for all non-join modules
+payload: none (0 bytes/frame, one buffer reused)  capacity=64  streams=1 x 30s (+1 warm-up)
+warm-up: 2206420 msg/s (discarded)
+poolstats,nf-empty-pool4-r1,1,583124103,63169783,290123294,266131723
+----- 1 runs: median [min .. max] -----
+throughput  msg/s : 2341791  [2341791 .. 2341791]   spread 0%
+cores             : 4.85728  [4.85728 .. 4.85728]   spread 0%
+cpu per msg  us   : 2.07417  [2.07417 .. 2.07417]   spread 0%
+cycles per msg    : 7088.79  [7088.79 .. 7088.79]   spread 0%
+latency p50  us   : 78.5  [78.5 .. 78.5]   spread 0%
+latency p95  us   : 111.5  [111.5 .. 111.5]   spread 0%
+latency p99  us   : 201  [201 .. 201]   spread 0%
+coverage          : ok
+-------------------------------
+tsc               : 3.41761 GHz (cycles/msg enabled)
+--- NexusFlow pipeline benchmark ---
+affinity: first 8 of 28 logical CPUs
+topology: inject  modules=6  edges=5  sync_inputs=no
+baseline: framework  batch=4  observe=full
+injection: block push from the main thread
+thread pool: 4 threads (contiguous map) for all non-join modules
+payload: none (0 bytes/frame, one buffer reused)  capacity=64  streams=1 x 30s (+1 warm-up)
+warm-up: 2232482 msg/s (discarded)
+poolstats,nf-empty-pool4-r2,1,540457925,68101313,269706889,241776533
+----- 1 runs: median [min .. max] -----
+throughput  msg/s : 2448935  [2448935 .. 2448935]   spread 0%
+cores             : 4.89374  [4.89374 .. 4.89374]   spread 0%
+cpu per msg  us   : 1.99831  [1.99831 .. 1.99831]   spread 0%
+cycles per msg    : 6829.45  [6829.45 .. 6829.45]   spread 0%
+latency p50  us   : 76.5  [76.5 .. 76.5]   spread 0%
+latency p95  us   : 112.5  [112.5 .. 112.5]   spread 0%
+latency p99  us   : 171  [171 .. 171]   spread 0%
+coverage          : ok
+-------------------------------
+tsc               : 3.4176 GHz (cycles/msg enabled)
+--- NexusFlow pipeline benchmark ---
+affinity: first 8 of 28 logical CPUs
+topology: inject  modules=6  edges=5  sync_inputs=no
+baseline: framework  batch=4  observe=full
+injection: block push from the main thread
+thread pool: 4 threads (contiguous map) for all non-join modules
+payload: none (0 bytes/frame, one buffer reused)  capacity=64  streams=1 x 30s (+1 warm-up)
+warm-up: 2313667 msg/s (discarded)
+poolstats,nf-empty-pool4-r3,1,603712455,68637518,317953615,257745579
+----- 1 runs: median [min .. max] -----
+throughput  msg/s : 2377862  [2377862 .. 2377862]   spread 0%
+cores             : 4.86613  [4.86613 .. 4.86613]   spread 0%
+cpu per msg  us   : 2.04643  [2.04643 .. 2.04643]   spread 0%
+cycles per msg    : 6993.9  [6993.9 .. 6993.9]   spread 0%
+latency p50  us   : 77.5  [77.5 .. 77.5]   spread 0%
+latency p95  us   : 112.5  [112.5 .. 112.5]   spread 0%
+latency p99  us   : 197  [197 .. 197]   spread 0%
+coverage          : ok
+-------------------------------
+tsc               : 3.41762 GHz (cycles/msg enabled)
+--- NexusFlow pipeline benchmark ---
+affinity: first 8 of 28 logical CPUs
+topology: inject  modules=6  edges=5  sync_inputs=no
+baseline: framework  batch=4  observe=full
+injection: block push from the main thread
+workload: compute (parameter 500) on every intermediate stage
+payload: none (0 bytes/frame, one buffer reused)  capacity=64  streams=1 x 60s (+1 warm-up)
+warm-up: 392998 msg/s (discarded)
+----- 1 runs: median [min .. max] -----
+throughput  msg/s : 391462  [391462 .. 391462]   spread 0%
+cores             : 5.59973  [5.59973 .. 5.59973]   spread 0%
+cpu per msg  us   : 14.3046  [14.3046 .. 14.3046]   spread 0%
+cycles per msg    : 48887.8  [48887.8 .. 48887.8]   spread 0%
+latency p50  us   : 474  [474 .. 474]   spread 0%
+latency p95  us   : 684  [684 .. 684]   spread 0%
+latency p99  us   : 740  [740 .. 740]   spread 0%
+coverage          : ok
+-------------------------------
+tsc               : 3.41761 GHz (cycles/msg enabled)
+--- NexusFlow pipeline benchmark ---
+affinity: first 8 of 28 logical CPUs
+topology: inject  modules=6  edges=5  sync_inputs=no
+baseline: framework  batch=4  observe=full
+injection: block push from the main thread
+workload: compute (parameter 500) on every intermediate stage
+payload: none (0 bytes/frame, one buffer reused)  capacity=64  streams=1 x 60s (+1 warm-up)
+warm-up: 392795 msg/s (discarded)
+----- 1 runs: median [min .. max] -----
+throughput  msg/s : 391944  [391944 .. 391944]   spread 0%
+cores             : 5.58801  [5.58801 .. 5.58801]   spread 0%
+cpu per msg  us   : 14.2571  [14.2571 .. 14.2571]   spread 0%
+cycles per msg    : 48725.3  [48725.3 .. 48725.3]   spread 0%
+latency p50  us   : 462  [462 .. 462]   spread 0%
+latency p95  us   : 676  [676 .. 676]   spread 0%
+latency p99  us   : 740  [740 .. 740]   spread 0%
+coverage          : ok
+-------------------------------
+tsc               : 3.4176 GHz (cycles/msg enabled)
+--- NexusFlow pipeline benchmark ---
+affinity: first 8 of 28 logical CPUs
+topology: inject  modules=6  edges=5  sync_inputs=no
+baseline: framework  batch=4  observe=full
+injection: block push from the main thread
+workload: compute (parameter 500) on every intermediate stage
+payload: none (0 bytes/frame, one buffer reused)  capacity=64  streams=1 x 60s (+1 warm-up)
+warm-up: 391359 msg/s (discarded)
+----- 1 runs: median [min .. max] -----
+throughput  msg/s : 394338  [394338 .. 394338]   spread 0%
+cores             : 5.55208  [5.55208 .. 5.55208]   spread 0%
+cpu per msg  us   : 14.0795  [14.0795 .. 14.0795]   spread 0%
+cycles per msg    : 48118  [48118 .. 48118]   spread 0%
+latency p50  us   : 462  [462 .. 462]   spread 0%
+latency p95  us   : 676  [676 .. 676]   spread 0%
+latency p99  us   : 756  [756 .. 756]   spread 0%
+coverage          : ok
+-------------------------------
+tsc               : 3.41763 GHz (cycles/msg enabled)
+--- NexusFlow pipeline benchmark ---
+affinity: first 8 of 28 logical CPUs
+topology: inject  modules=6  edges=5  sync_inputs=no
+baseline: framework  batch=4  observe=full
+injection: block push from the main thread
+workload: compute (parameter 500) on every intermediate stage
+thread pool: 4 threads (contiguous map) for all non-join modules
+payload: none (0 bytes/frame, one buffer reused)  capacity=64  streams=1 x 60s (+1 warm-up)
+warm-up: 273143 msg/s (discarded)
+poolstats,nf-compute-pool4-r1,1,1426556846,25928792,556115741,850909084
+----- 1 runs: median [min .. max] -----
+throughput  msg/s : 272922  [272922 .. 272922]   spread 0%
+cores             : 4.54557  [4.54557 .. 4.54557]   spread 0%
+cpu per msg  us   : 16.6552  [16.6552 .. 16.6552]   spread 0%
+cycles per msg    : 56921.2  [56921.2 .. 56921.2]   spread 0%
+latency p50  us   : 804  [804 .. 804]   spread 0%
+latency p95  us   : 996  [996 .. 996]   spread 0%
+latency p99  us   : 1144  [1144 .. 1144]   spread 0%
+coverage          : ok
+-------------------------------
+tsc               : 3.4176 GHz (cycles/msg enabled)
+--- NexusFlow pipeline benchmark ---
+affinity: first 8 of 28 logical CPUs
+topology: inject  modules=6  edges=5  sync_inputs=no
+baseline: framework  batch=4  observe=full
+injection: block push from the main thread
+workload: compute (parameter 500) on every intermediate stage
+thread pool: 4 threads (contiguous map) for all non-join modules
+payload: none (0 bytes/frame, one buffer reused)  capacity=64  streams=1 x 60s (+1 warm-up)
+warm-up: 275613 msg/s (discarded)
+poolstats,nf-compute-pool4-r2,1,1395009977,26048866,536794720,838797759
+----- 1 runs: median [min .. max] -----
+throughput  msg/s : 272370  [272370 .. 272370]   spread 0%
+cores             : 4.54973  [4.54973 .. 4.54973]   spread 0%
+cpu per msg  us   : 16.7042  [16.7042 .. 16.7042]   spread 0%
+cycles per msg    : 57088.4  [57088.4 .. 57088.4]   spread 0%
+latency p50  us   : 804  [804 .. 804]   spread 0%
+latency p95  us   : 1004  [1004 .. 1004]   spread 0%
+latency p99  us   : 1160  [1160 .. 1160]   spread 0%
+coverage          : ok
+-------------------------------
+tsc               : 3.41762 GHz (cycles/msg enabled)
+--- NexusFlow pipeline benchmark ---
+affinity: first 8 of 28 logical CPUs
+topology: inject  modules=6  edges=5  sync_inputs=no
+baseline: framework  batch=4  observe=full
+injection: block push from the main thread
+workload: compute (parameter 500) on every intermediate stage
+thread pool: 4 threads (contiguous map) for all non-join modules
+payload: none (0 bytes/frame, one buffer reused)  capacity=64  streams=1 x 60s (+1 warm-up)
+warm-up: 274431 msg/s (discarded)
+poolstats,nf-compute-pool4-r3,1,1420299094,26561650,569305327,831282981
+----- 1 runs: median [min .. max] -----
+throughput  msg/s : 275271  [275271 .. 275271]   spread 0%
+cores             : 4.54895  [4.54895 .. 4.54895]   spread 0%
+cpu per msg  us   : 16.5253  [16.5253 .. 16.5253]   spread 0%
+cycles per msg    : 56477.1  [56477.1 .. 56477.1]   spread 0%
+latency p50  us   : 772  [772 .. 772]   spread 0%
+latency p95  us   : 1004  [1004 .. 1004]   spread 0%
+latency p99  us   : 1144  [1144 .. 1144]   spread 0%
+coverage          : ok
+-------------------------------
+cmp,ai-pipe,empty-r1,4,64,0,30.000,1642285,140.453,85.5230,1639.00,2188.00,2389.00
+rss,7.3
+drop,1902869
+cmp,ai-pipe,empty-r2,4,64,0,30.000,1807072,140.844,77.9403,1502.00,2040.00,2249.00
+rss,7.3
+drop,1991823
+cmp,ai-pipe,empty-r3,4,64,0,30.000,1484126,142.844,96.2477,1646.00,2172.00,2388.00
+rss,7.3
+drop,2221977
+cmp,ai-pipe,compute-r1,4,64,500,60.000,3354338,284.500,84.8155,1317.00,1772.00,1941.00
+rss,7.2
+drop,5481054
+cmp,ai-pipe,compute-r2,4,64,500,60.000,3256818,289.203,88.7993,1319.00,1746.00,1904.00
+rss,7.3
+drop,6012162
+cmp,ai-pipe,compute-r3,4,64,500,60.000,3149272,286.984,91.1272,1333.00,1761.00,1940.00
+rss,7.3
+drop,5988920
+csv,nf-empty-default-r1,windows-msvc,framework,4,1,linear,6,0,64,none,0,0,30,1,89046093,2966648,176.109,5.86724,55.7468,62.25,94.5,117.5,2.7,2655.2,8,0,none,0,block,0,0,5.30859,5.46094,5.32422,64,0.5072,6759.14,0
+cov,nf-empty-default-r1,framework,6,0,64,1,445230465,445230465,0,0,89046093,89046093,534276558,0,0,0,0,0,0,1
+stat,nf-empty-default-r1,windows-msvc,framework,4,1,linear,6,0,5,64,none,0,0,1,2966648,2966648,2966648,0,5.86724,5.86724,5.86724,62.25,94.5,117.5,1.97773,0
+csv,nf-empty-pool4-r1,windows-msvc,framework,4,1,linear,6,0,64,none,0,0,30,1,66997785,2231597,118.422,3.94446,72.7546,76.5,110.5,137,9.9,3280.8,8,0,none,0,block,0,0,5.27734,5.39453,5.30078,64,18.0583,6040.83,4
+cov,nf-empty-pool4-r1,framework,6,0,64,1,334988925,334988925,0,0,66997785,66997785,401986718,8,0,0,0,0,18,1
+stat,nf-empty-pool4-r1,windows-msvc,framework,4,1,linear,6,0,5,64,none,0,0,1,2231597,2231597,2231597,0,3.94446,3.94446,3.94446,76.5,110.5,137,1.76755,0
+csv,nf-compute-default-r1,windows-msvc,framework,4,1,linear,6,0,64,none,0,0,60,1,24878373,414526,354.391,5.9049,484.29,498,692,748,25.5,3570.8,8,0,compute,500,block,0,0,5.78906,5.96875,5.85156,64,1.2272,48683.8,0
+cov,nf-compute-default-r1,framework,6,0,64,1,124391884,124391884,0,0,24878373,24878373,149270315,58,0,0,0,0,1,1
+stat,nf-compute-default-r1,windows-msvc,framework,4,1,linear,6,0,5,64,none,0,0,1,414526,414526,414526,0,5.9049,5.9049,5.9049,498,692,748,14.2449,0
+csv,nf-compute-pool4-r1,windows-msvc,framework,4,1,linear,6,0,64,none,0,0,60,1,18373144,306133,236.625,3.94264,692.173,620,964,1064,18.3,9221.9,8,0,compute,500,block,0,0,5.76953,5.87891,5.80469,64,12.9354,44015.1,4
+cov,nf-compute-pool4-r1,framework,6,0,64,1,91865720,91865720,0,0,18373144,18373144,110238864,0,0,0,0,0,12,1
+stat,nf-compute-pool4-r1,windows-msvc,framework,4,1,linear,6,0,5,64,none,0,0,1,306133,306133,306133,0,3.94264,3.94264,3.94264,620,964,1064,12.8789,0
+csv,nf-empty-default-r2,windows-msvc,framework,4,1,linear,6,0,64,none,0,0,30,1,90389522,3012894,172.469,5.74879,46.5095,44.25,92.5,155,2.6,1328.3,8,0,none,0,block,0,0,5.31641,5.49219,5.35938,64,0.2302,6521.02,0
+cov,nf-empty-default-r2,framework,6,0,64,1,451947610,451947610,0,0,90389522,90389522,542337132,0,0,0,0,0,0,1
+stat,nf-empty-default-r2,windows-msvc,framework,4,1,linear,6,0,5,64,none,0,0,1,3012894,3012894,3012894,0,5.74879,5.74879,5.74879,44.25,92.5,155,1.90806,0
+csv,nf-empty-pool4-r2,windows-msvc,framework,4,1,linear,6,0,64,none,0,0,30,1,71142109,2370091,118.703,3.95458,66.85,71.5,103.5,126.5,10.2,2842.7,8,0,none,0,block,0,0,5.28125,5.40234,5.3125,64,13.1105,5702.43,4
+cov,nf-empty-pool4-r2,framework,6,0,64,1,355710545,355710545,0,0,71142109,71142109,426852654,0,0,0,0,0,13,1
+stat,nf-empty-pool4-r2,windows-msvc,framework,4,1,linear,6,0,5,64,none,0,0,1,2370091,2370091,2370091,0,3.95458,3.95458,3.95458,71.5,103.5,126.5,1.66854,0
+csv,nf-compute-default-r2,windows-msvc,framework,4,1,linear,6,0,64,none,0,0,60,1,24875936,414593,355.188,5.91972,467.854,474,684,732,24.7,2821,8,0,compute,500,block,0,0,5.79297,5.97266,5.85547,64,1.354,48797.9,0
+cov,nf-compute-default-r2,framework,6,0,64,1,124379680,124379680,0,0,24875936,24875936,149255641,25,0,0,0,0,1,1
+stat,nf-compute-default-r2,windows-msvc,framework,4,1,linear,6,0,5,64,none,0,0,1,414593,414593,414593,0,5.91972,5.91972,5.91972,474,684,732,14.2784,0
+csv,nf-compute-pool4-r2,windows-msvc,framework,4,1,linear,6,0,64,none,0,0,60,1,16918255,281898,236.109,3.93415,751.386,684,1032,1176,20.7,17013.4,8,0,compute,500,block,0,0,5.78125,5.89062,5.81641,64,14.8684,47695.8,4
+cov,nf-compute-pool4-r2,framework,6,0,64,1,84591275,84591275,0,0,16918255,16918255,101509530,0,0,0,0,0,14,1
+stat,nf-compute-pool4-r2,windows-msvc,framework,4,1,linear,6,0,5,64,none,0,0,1,281898,281898,281898,0,3.93415,3.93415,3.93415,684,1032,1176,13.9559,0
+csv,nf-empty-default-r3,windows-msvc,framework,4,1,linear,6,0,64,none,0,0,30,1,88558896,2951004,174.203,5.80489,53.469,63.25,95.5,141,2.8,1457.2,8,0,none,0,block,0,0,5.30078,5.46875,5.33594,64,0.4167,6722.77,0
+cov,nf-empty-default-r3,framework,6,0,64,1,442794597,442794597,0,0,88558896,88558896,531353544,51,0,0,0,0,0,1
+stat,nf-empty-default-r3,windows-msvc,framework,4,1,linear,6,0,5,64,none,0,0,1,2951004,2951004,2951004,0,5.80489,5.80489,5.80489,63.25,95.5,141,1.96709,0
+csv,nf-empty-pool4-r3,windows-msvc,framework,4,1,linear,6,0,64,none,0,0,30,1,71067833,2368202,119.031,3.96649,74.4879,76.5,105.5,131,10.2,5190.9,8,0,none,0,block,0,0,5.28516,5.40234,5.30859,64,15.4959,5724.15,4
+cov,nf-empty-pool4-r3,framework,6,0,64,1,355339165,355339165,0,0,71067833,71067833,426406998,0,0,0,0,0,15,1
+stat,nf-empty-pool4-r3,windows-msvc,framework,4,1,linear,6,0,5,64,none,0,0,1,2368202,2368202,2368202,0,3.96649,3.96649,3.96649,76.5,105.5,131,1.6749,0
+csv,nf-compute-default-r3,windows-msvc,framework,4,1,linear,6,0,64,none,0,0,60,1,23815162,396768,351.031,5.8483,489.031,498,692,836,24.3,5663.6,8,0,compute,500,block,0,0,5.79688,5.96875,5.85156,64,1.6305,50375.1,0
+cov,nf-compute-default-r3,framework,6,0,64,1,119075904,119075904,0,0,23815162,23815162,142891109,43,0,0,0,0,1,1
+stat,nf-compute-default-r3,windows-msvc,framework,4,1,linear,6,0,5,64,none,0,0,1,396768,396768,396768,0,5.8483,5.8483,5.8483,498,692,836,14.7398,0
+csv,nf-compute-pool4-r3,windows-msvc,framework,4,1,linear,6,0,64,none,0,0,60,1,16640682,277229,236.031,3.93223,763.079,748,1020,1176,22,10017.7,8,0,compute,500,block,0,0,5.76172,5.88281,5.80469,64,12.2935,48475.4,4
+cov,nf-compute-pool4-r3,framework,6,0,64,1,83203410,83203410,0,0,16640682,16640682,99844092,0,0,0,0,0,12,1
+stat,nf-compute-pool4-r3,windows-msvc,framework,4,1,linear,6,0,5,64,none,0,0,1,277229,277229,277229,0,3.93223,3.93223,3.93223,748,1020,1176,14.184,0

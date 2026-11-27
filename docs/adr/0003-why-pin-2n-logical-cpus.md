@@ -48,7 +48,7 @@ Windows 用 `SetProcessAffinityMask`、Linux 用 `sched_setaffinity`），默认
 
 ## 后果
 
-- `PERFORMANCE-desktop.md` 的池化表协议统一写 `pool N -> --cpus 2N`，并在 N > 8 时注明跨到 E 核。
+- `PERFORMANCE.zh-CN.md` 第二部分的池化表协议统一写 `pool N -> --cpus 2N`，并在 N > 8 时注明跨到 E 核。
 - 跨批比较必须同核预算；`p0` 一律不绑（16 条线程钉在 16 个逻辑核上会 SMT 自撞，见 §1.1 的 `--cpus 16` 数据）。
 - 读者不会把“线程数”和“核预算”两件事混起来。
 

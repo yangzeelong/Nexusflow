@@ -26,6 +26,7 @@ constexpr std::size_t kMaxLines = 64;
 int main(int argc, char** argv)
 {
     const cmp::Options opt = cmp::ParseOptions(argc, argv);
+    const cmp::TimerResolutionGuard timerGuard;
     cmp::PinToLogicalCpus(opt.cpus);
 
     const std::size_t lines = static_cast<std::size_t>(opt.workers > 0 ? opt.workers : 1);
@@ -57,15 +58,31 @@ int main(int argc, char** argv)
         }},
         tf::Pipe{tf::PipeType::SERIAL, [&](tf::Pipeflow& pf) {
             buffer[pf.line()].payload[1] = cmp::Work(buffer[pf.line()].seq + 1, opt.iters);
+            if (opt.slowMs > 0)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(opt.slowMs));
+            }
         }},
         tf::Pipe{tf::PipeType::SERIAL, [&](tf::Pipeflow& pf) {
             buffer[pf.line()].payload[2] = cmp::Work(buffer[pf.line()].seq + 2, opt.iters);
+            if (opt.slowMs > 0)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(opt.slowMs));
+            }
         }},
         tf::Pipe{tf::PipeType::SERIAL, [&](tf::Pipeflow& pf) {
             buffer[pf.line()].payload[3] = cmp::Work(buffer[pf.line()].seq + 3, opt.iters);
+            if (opt.slowMs > 0)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(opt.slowMs));
+            }
         }},
         tf::Pipe{tf::PipeType::SERIAL, [&](tf::Pipeflow& pf) {
             buffer[pf.line()].payload[4] = cmp::Work(buffer[pf.line()].seq + 4, opt.iters);
+            if (opt.slowMs > 0)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(opt.slowMs));
+            }
             if (measuring.load(std::memory_order_relaxed))
             {
                 histogram.Add(cmp::NowNs() - buffer[pf.line()].stampNs);
@@ -76,7 +93,7 @@ int main(int argc, char** argv)
     taskflow.composed_of(pl);
     auto future = executor.run(taskflow);
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    std::this_thread::sleep_for(std::chrono::milliseconds(opt.warmupMs));
     histogram.Reset();
     delivered.store(0, std::memory_order_relaxed);
     measuring.store(true, std::memory_order_relaxed);
@@ -87,6 +104,7 @@ int main(int argc, char** argv)
     const std::uint64_t wall1 = cmp::NowNs();
     const double cpu1 = cmp::CpuSeconds();
 
+    measuring.store(false, std::memory_order_relaxed);
     stop.store(true, std::memory_order_relaxed);
     future.wait();
 

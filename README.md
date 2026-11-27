@@ -91,7 +91,7 @@ cmake --build build --config Release --parallel
 The benchmark prints a `csv,` line per repetition plus a median summary
 (`median throughput`, `p50`, `cycles per msg`). Every number above comes from
 that harness — see [`benchmarks/README.md`](benchmarks/README.md) for the
-protocol and [`benchmarks/PERFORMANCE-desktop.md`](benchmarks/PERFORMANCE-desktop.md)
+protocol and [`benchmarks/PERFORMANCE.md`](benchmarks/PERFORMANCE.md)
 for the full tables.
 
 ## Documentation map

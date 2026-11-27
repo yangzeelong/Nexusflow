@@ -29,4 +29,4 @@
 - 复盘长文（故事与教训）：
   [为什么 Windows 上“睡 10 微秒”其实睡 2 毫秒](https://github.com/yangzeelong/engineering-notes/blob/master/posts/2026-11-21-windows-timer-granularity.md)
 
-复现命令见 `benchmarks/PERFORMANCE-desktop.md §14.4`。
+复现命令见 `benchmarks/PERFORMANCE.zh-CN.md` 第二部分 §14.4。

@@ -41,4 +41,4 @@
 
 ## 附录（可选）
 
-<!-- 大表放 benchmarks/PERFORMANCE-desktop.md 或 docs/，这里只放摘要和链接。 -->
+<!-- 大表放 benchmarks/PERFORMANCE.md（或中文版）或 docs/，这里只放摘要和链接。 -->
