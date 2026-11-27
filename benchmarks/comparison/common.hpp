@@ -24,6 +24,8 @@
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
 #include <psapi.h>
 #pragma comment(lib, "psapi.lib")
 #else
@@ -34,6 +36,29 @@ namespace cmp
 {
 
 using Clock = std::chrono::steady_clock;
+
+/// Windows rounds a sleep up to the current timer tick (15.6 ms by default),
+/// while the NexusFlow harness raises it to 1 ms for its lifetime. Without the
+/// same guard a 2 ms slow stage means 15.6 ms here and the two are not
+/// comparable.
+class TimerResolutionGuard
+{
+public:
+    TimerResolutionGuard()
+    {
+#if defined(_WIN32)
+        timeBeginPeriod(1);
+#endif
+    }
+    ~TimerResolutionGuard()
+    {
+#if defined(_WIN32)
+        timeEndPeriod(1);
+#endif
+    }
+    TimerResolutionGuard(const TimerResolutionGuard&) = delete;
+    TimerResolutionGuard& operator=(const TimerResolutionGuard&) = delete;
+};
 
 inline std::uint64_t NowNs()
 {
@@ -157,8 +182,10 @@ struct Options
     int workers = 4;       ///< concurrency: threads (TBB arena, Taskflow) / pool size
     std::size_t capacity = 64;  ///< per-edge queue capacity (0 = unbounded)
     double seconds = 5.0;  ///< measured window
+    int warmupMs = 1000;   ///< unmeasured run-in before the window opens
     int iters = 500;       ///< integer work per message per stage
     int cpus = 0;          ///< pin to the first N logical CPUs (0 = leave it alone)
+    int slowMs = 0;        ///< extra sleep in every work stage, to make the consumer slower than the source
     std::string label;
 };
 
@@ -202,6 +229,14 @@ inline Options ParseOptions(int argc, char** argv)
         {
             opt.seconds = std::atof(value.c_str());
         }
+        else if (key == "--slow-ms")
+        {
+            opt.slowMs = std::atoi(value.c_str());
+        }
+        else if (key == "--warmup-ms")
+        {
+            opt.warmupMs = std::atoi(value.c_str());
+        }
         else if (key == "--iters")
         {
             opt.iters = std::atoi(value.c_str());
@@ -219,6 +254,30 @@ inline Options ParseOptions(int argc, char** argv)
 }
 
 /// One CSV row per run, prefixed so a `grep '^cmp,'` collection stays simple.
+/// Whole-process resident memory, so a framework that buffers without bound shows up in the CSV.
+inline double ResidentMiB()
+{
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS counters{};
+    if (GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters)) == 0)
+    {
+        return 0.0;
+    }
+    return static_cast<double>(counters.WorkingSetSize) / (1024.0 * 1024.0);
+#else
+    long pages = 0, resident = 0;
+    if (std::FILE* statm = std::fopen("/proc/self/statm", "r"))
+    {
+        if (std::fscanf(statm, "%ld %ld", &pages, &resident) != 2)
+        {
+            resident = 0;
+        }
+        std::fclose(statm);
+    }
+    return static_cast<double>(resident) * 4096.0 / (1024.0 * 1024.0);
+#endif
+}
+
 inline void PrintCsv(const char* impl, const Options& opt, double wallSeconds, std::uint64_t delivered,
                      double cpuSeconds, const LatencyHistogram& histogram)
 {
@@ -230,6 +289,7 @@ inline void PrintCsv(const char* impl, const Options& opt, double wallSeconds, s
                 static_cast<double>(histogram.Percentile(0.50)) / 1000.0,
                 static_cast<double>(histogram.Percentile(0.95)) / 1000.0,
                 static_cast<double>(histogram.Percentile(0.99)) / 1000.0);
+    std::printf("rss,%.1f\n", ResidentMiB());
     std::fflush(stdout);
 }
 

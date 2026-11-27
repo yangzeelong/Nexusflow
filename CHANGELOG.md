@@ -39,7 +39,7 @@
   即使没有任何模块开启计时。现在开启与否由 `CapturesModuleTimings()` 决定，未开启时
   `elapsedMs` 直接为 0。同机实测（5 s × 3 中位）：3 模块 MSVC 3.287→3.698 M msg/s（+12.5%）、
   WSL2 3.292→3.563 M（+8.2%）；16 模块 MSVC +11.7%。测量口径与复现命令见后续版本的
-  `benchmarks/PERFORMANCE-desktop.md` §16。
+  `benchmarks/PERFORMANCE.zh-CN.md` 第二部分 §16。
 
 ## [1.0.1] - 2026-11-20
 
@@ -52,7 +52,7 @@
 - `benchmarks/README.md` 的「测量协议」§4 重写指标口径：交付吞吐 / CPU 归一吞吐 /
   每消息 CPU / 每消息周期 四条定义、三条恒等式，以及"Google Benchmark 的
   `items_per_second` 是 CPU 口径"这一常见坑。
-- `benchmarks/PERFORMANCE-desktop.md §1.2` 记录 3/4/16 模块的 cycles/消息
+- `benchmarks/PERFORMANCE.zh-CN.md` 第二部分 §1.2 记录 3/4/16 模块的 cycles/消息
   （2,954 / 4,152 / 23,257），给出浅链每跳约 1,477–1,550 cycles 的读法。
 
 ## [1.0.0] - 2026-11-19
@@ -67,8 +67,8 @@
   配套 6 个单测（`tests/test/PipelinePushTest.cpp`）与 README
   "Feeding a Running Pipeline" 一节。
 - 基准工具链：`benchmarks/README.md` 的「测量协议」节（测量规则与维度）、`benchmarks/RawPipeline.hpp`
-  （裸线程基线）、按机器分开的 `benchmarks/PERFORMANCE-laptop.md` 与
-  `benchmarks/PERFORMANCE-desktop.md`。`pipeline_benchmark` 新增 workload
+  （裸线程基线）、按机器分开的性能报告（现合并为
+  `benchmarks/PERFORMANCE.zh-CN.md`，基准机数据在第二部分）。`pipeline_benchmark` 新增 workload
   （delay / compute / memory）、inject 拓扑、`--cpus`、`--timings`、RSS 与停机采样、
   以及每次运行的覆盖率断言；CSV 扩到 37 列。
 - 可选扩展：`extensions/aifootball`（AI-Football SDK、离线 demo、Python
@@ -99,7 +99,7 @@
 - 台式机基准报告的拐点结论更正：2026-11-20 同机同参复测显示 18 模块只比 16 模块低
   2.6%（1.697 vs 1.742 M msg/s），真正的塌陷在 28 模块（0.856 M，−51%）；原报告的
   「16→18 −41%（拐点）」与 P/E 归因不再作为结论引用（详见
-  `benchmarks/PERFORMANCE-desktop.md` §1.1）。
+  `benchmarks/PERFORMANCE.zh-CN.md` 第二部分 §1.1）。
 - `RunFusion()` 的分组 key 由 `MessageMeta::sourceName` 改为输入边名，修复多路输入
   永远凑不齐、最终按 60 s 超时静默丢弃的问题。
 - `PullBatchMessage()` 在所有输入边 shutdown 时提前返回；`waitForRoom()` 在 park 前
@@ -117,7 +117,7 @@
   长跑中可能被合并到 15.6 ms，16 模块的 `stopMs` 约 15.6 ms（浅链约 0.2 ms）。基准工具
   的 delay workload 已用高精度 waitable timer 绕过，框架本身尚未修改。
 - `Push` 目前只支持 passive source 与单生产者线程；fan-out / fusion 的每帧成本较高，
-  见 `benchmarks/PERFORMANCE-desktop.md` §7。
+  见 `benchmarks/PERFORMANCE.zh-CN.md` 第二部分 §7。
 - 三维以上（深度、扇出、容量、batch、payload）的完整矩阵与 soak 测试尚未进入 CI。
 
 [Unreleased]: https://github.com/yangzeelong/Nexusflow/compare/v1.0.1...HEAD

@@ -80,7 +80,7 @@
 
 **本版已做**：每消息级日志降为 TRACE（`Module.cpp` 7 处 + `Worker.cpp:363`）；默认日志级别 DEBUG → INFO；逐段计时链改为按需开启（`PipelineContext::EnableModuleTimings()`，可链式，默认关；单模块可用 `Module::SetModuleTimingsEnabled()`）。实测代价：开启时 capacity=8 中位约 1.33M、关闭后约 2.97M msg/s。
 
-剩下的（**已用裸基线量过，不再靠估**；完整表见 [`benchmarks/PERFORMANCE-laptop.md`](benchmarks/PERFORMANCE-laptop.md) §2）:
+剩下的（**已用裸基线量过，不再靠估**；完整表见 [`benchmarks/PERFORMANCE.zh-CN.md`](benchmarks/PERFORMANCE.zh-CN.md) 第二部分 §2）:
 
 1. **调度链是主体**：Module/Worker/Dispatcher 这一圈（取消息、虚调用、`ProcessTimed` 的两次读时钟、`pendingOutputs` + 两次 Message 拷贝、推队列、`PublishCounters`）每多一个模块约 **0.12–0.38 µs**（默认 batch 4）；Message 自身每多一个模块只有 **0.04–0.12 µs**，两者差 3–5 倍。
 2. **批处理已经吃掉约一半**：同拓扑 batch 1 → batch 4，每多一个模块的调度成本从 0.23–0.52 降到 0.12–0.38。所以以后比固定开销，必须先钉住 batch 口径。
@@ -91,7 +91,7 @@
 
 ### 3.4 本轮基准暴露的框架问题（下版优化清单）
 
-> 数据：[`benchmarks/PERFORMANCE-desktop.md`](benchmarks/PERFORMANCE-desktop.md)（台式机 i7-14700KF，20 物理 / 28 逻辑核；114 条 `stat`、342 条 `cov` 全 ok；duration 5 s × 3，observe full；规则见 [`benchmarks/README.md` 的「测量协议」节](benchmarks/README.md#测量协议)）。这里列的是**框架问题**，不是测量误差；数字只用于同机前后对比。
+> 数据：[`benchmarks/PERFORMANCE.zh-CN.md`](benchmarks/PERFORMANCE.zh-CN.md) 第二部分（台式机 i7-14700KF，20 物理 / 28 逻辑核；114 条 `stat`、342 条 `cov` 全 ok；duration 5 s × 3，observe full；规则见 [`benchmarks/README.md` 的「测量协议」节](benchmarks/README.md#测量协议)）。这里列的是**框架问题**，不是测量误差；数字只用于同机前后对比。
 
 **P0：线程模型的断崖（§3.1 的直接动机，现在有曲线了）**
 
@@ -146,16 +146,14 @@
 
 ---
 
-## 4. 性能现状（数字见 [`benchmarks/PERFORMANCE-laptop.md`](benchmarks/PERFORMANCE-laptop.md)，规则见 [`benchmarks/README.md` 的「测量协议」节](benchmarks/README.md#测量协议)）
+## 4. 性能现状（数字见 [`benchmarks/PERFORMANCE.zh-CN.md`](benchmarks/PERFORMANCE.zh-CN.md) 第二部分，规则见 [`benchmarks/README.md` 的「测量协议」节](benchmarks/README.md#测量协议)）
 
-笔记本（i7-11800H，8 物理核）：3 模块线性、模块内无计算、capacity 8、batch 4（默认）——约 **2.47 M msg/s**、**1.20 µs CPU/消息**、**约 2.9 核**。同构的裸线程 + 裸 SpscQueue 基线是 **0.19 µs/消息**（零分配口径）、**0.32 µs**（每消息分配口径）。
-
-台式机（i7-14700KF，20 物理 / 28 逻辑核，Windows 11）：同构 3 模块、capacity 8、batch 4 —— **3.156 M msg/s**、**0.931 µs CPU/消息**、约 2.9 核；16 模块 batch1 1.76 M / 8.755 µs，batch4 2.24 M / 6.791 µs；2 模块裸基线 0.234–0.564 µs/消息。深度阶梯在 **16→18 模块**出现拐点（§3.4），两台机器分报告、不跨机比绝对值。
+台式机（i7-14700KF，20 物理 / 28 逻辑核，Windows 11）：同构 3 模块、capacity 8、batch 4 —— **3.156 M msg/s**、**0.931 µs CPU/消息**、约 2.9 核；16 模块 batch1 1.76 M / 8.755 µs，batch4 2.24 M / 6.791 µs；2 模块裸基线 0.234–0.564 µs/消息。深度阶梯在 **16→18 模块**出现拐点（见 PERFORMANCE 第二部分 §1.1），不跨机比绝对值。
 
 判断：
 
-- **饱和吞吐下框架开销是大头**：2 模块时框架 0.96 µs vs 裸实现 0.19 µs（约 5 倍）。但按真实帧率算无关紧要：60 fps × 4 分支约 960 消息/秒，1.2 µs/消息只有约 0.1% 的一个核。
-- **线程数才是资源占用的主要单点**（= 模块数），对应 §3.1。
+- **饱和吞吐下框架开销是大头**：2 模块时框架 0.96 µs vs 裸实现 0.23–0.56 µs（约 2–4 倍）。但按真实帧率算无关紧要：60 fps × 4 分支约 960 消息/秒，0.93 µs/消息只有约 0.1% 的一个核。
+- **线程数才是资源占用的主要单点**（= 模块数）。
 - **容量旋钮有上限**：capacity 8 之后吞吐不再涨，只买尾部延迟（p99 从 9 µs 涨到 161 µs）。
 - **定位不变**：适合"每帧几十 µs ~ 几 ms"的视觉/算法流水线，**不适合当高频小消息的事件总线**；对外不要按低延迟消息框架的口径描述性能。
 

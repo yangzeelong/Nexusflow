@@ -1,9 +1,170 @@
-# PERFORMANCE-desktop.md — 台式机实测
+# CPU 实测 —— 基准机（台式机）
 
-> 机器：i7-14700KF（20 物理核 / 28 逻辑核）。**只对本文件写明的机器、commit、工具参数有效。**
-> 规则见 [README.md 的「测量协议」节](README.md#测量协议)，怎么跑见 [README.md](README.md)。笔记本（i7-11800H）在 `PERFORMANCE-laptop.md`，两份**不许混读**。
+本文件是基准台式机（i7-14700KF）上的正式实测记录，分两部分：
 
-## 0. 环境与口径
+- **第一部分：跨框架横评**（NexusFlow / raw / TBB ×2 / Taskflow / ai-pipe），2026-11-26；
+- **第二部分：NexusFlow 自身的参数扫描**（深度、容量、batch、载荷、扇出/融合、外部注入、线程池、`--queue-full`、计时归因），2026-11-18 起。
+
+中文版；英文版见 [`PERFORMANCE.md`](PERFORMANCE.md)。第一部分的成本归因与代码级分析见英文技术附录
+[`COMPARISON.md`](COMPARISON.md)，本文件不重复维护。
+逐次运行的原始行在 [`comparison/results/`](comparison/results/)。
+
+GPU benchmark 是另一份计划：[`gpu/README.md`](gpu/README.md)。
+
+## 第一部分：跨框架横评（2026-11-26）
+
+### 对比的仓库
+
+| 项目 | 仓库地址 | 受测版本 |
+| --- | --- | --- |
+| NexusFlow | https://github.com/yangzeelong/Nexusflow | `2f2d021` + passive-source 修复 `2593711`（本地，未提交） |
+| oneTBB | https://github.com/uxlfoundation/oneTBB | tag `v2021.13.0` |
+| Taskflow | https://github.com/taskflow/taskflow | `9d9cea0`（2026-10-14），header-only，C++20 |
+| ai-pipe | https://github.com/yangzeelong/ai-pipe | `c33edf1`（2026-02-12），静态库 |
+
+### 测试机（基准台式机）
+
+| 项 | 值 |
+| --- | --- |
+| CPU | Intel Core i7-14700KF，8 P + 12 E，28 逻辑线程 |
+| 内存 | 31.8 GiB |
+| 系统 | Windows 11 Pro 10.0.26200（build 26200） |
+| GPU | NVIDIA GeForce RTX 4070 SUPER，12,282 MiB，驱动 616.56 |
+| WSL2 | Kali GNU/Linux Rolling，内核 6.18.58.1-microsoft-standard-WSL2 |
+| 计时 | TSC 3.41762 GHz；每次运行期间保持 1 ms 定时器精度 |
+| 绑核 | 前 8 个逻辑 CPU（`--cpus 8`）：Windows 用进程掩码，WSL 用 `sched_setaffinity` |
+
+本台式机以后就是参考测试机。跨机器的数字不可比；同一台机器跨会话也要看下面的
+波动说明。
+
+### 工具链与编译选项
+
+| 侧 | 编译器 | 选项 |
+| --- | --- | --- |
+| NexusFlow（Windows） | MSVC 14.40（VS 17.10），CMake `Release` | `/MD /O2 /Ob2 /DNDEBUG` |
+| NexusFlow（WSL2） | g++-11 11.4.0，CMake `Release` | `-O3 -DNDEBUG` |
+| raw / TBB / Taskflow（Windows） | MSVC 14.40 | `/O2 /DNDEBUG /std:c++20` |
+| raw / TBB / Taskflow（WSL2） | g++-11 11.4.0 | `-O3 -DNDEBUG -std=c++17`（Taskflow `-std:c++20`） |
+| ai-pipe（Windows） | MSVC 14.40，静态 `ai_pipe.lib` | `/O2 /Ob2 /DNDEBUG /std:c++20`，`/MD` |
+| ai-pipe（WSL2） | g++-11 11.4.0，静态 `libai_pipe.a` | `-O3 -DNDEBUG -std=c++20` |
+
+两侧都按各自平台 CMake `Release` 给 NexusFlow 用的那套 flags 编译。MSVC 没有
+`-O3`，`/O2` 就是它的“最大化速度”开关。
+
+### 测试用例
+
+两个用例跑同一张线性图，只有每级的工作量不同。
+
+| 用例 | 模块数 | 边数 | 每级工作 | 窗口 |
+| --- | ---: | ---: | --- | --- |
+| empty | 6（source + 4 stage + sink） | 5 | 无（`--iters 0`） | 30 s × 3 次 |
+| compute | 6（source + 4 stage + sink） | 5 | 每帧 500 次 `sin(x)*cos(x)` | 60 s × 3 次 |
+
+公共参数：每条边容量 64（`--capacity 64`），4 个 worker，绑定 8 个逻辑 CPU；对比
+程序丢弃 1 s warm-up，NexusFlow 丢弃一整次重复；只统计窗口内到达 sink 的帧，排水
+不计；结束时采 RSS。`cycles/帧` = CPU 秒 × 3.4176 GHz。NexusFlow 的边也支持无界队列
+（capacity ≤ 0 时回落到 `ConcurrentQueue`），横评统一用 64 是为了让 NexusFlow、
+TBB `parallel_pipeline`、ai-pipe 和 raw 的环深度一致；Part II §4 已证明容量 ≥4 后
+吞吐就平了，这个上限不产生可测成本。
+
+| 实现 | 线程 / worker | 细节 |
+| --- | --- | --- |
+| raw | 6（producer + 4 stage + sink） | 每条边一个有界 SPSC 环（64），满/空时 `yield` |
+| Taskflow | 4 worker，5 条 serial pipe | token 留在本行，级间无队列 |
+| TBB `parallel_pipeline` | 4 个 arena 线程 | `max_live_tokens` = capacity（64），`global_control` 限制 arena |
+| TBB `flow::graph` | 4（arena） | 4 个 `function_node<Frame, Frame, serial>`，节点缓冲无界 |
+| NexusFlow（默认） | 6 个模块线程 | 活跃 source 模块 + 4 stage + sink，每模块一线程，每条边 capacity 64，batch 4 |
+| NexusFlow（pool 4） | 4 个池槽 | 同图，`--pool-size 4`（source 也在池里） |
+| ai-pipe | 4 worker | `EngineConfig::stream(4, 64)`，统计开、同步协调关、满则丢最旧 |
+
+### 结果 —— empty（只算框架成本）
+
+3 次运行的中位数。`dropped (running)` 是运行期丢帧；`droppedAtStop` 是窗口结束时仍在
+流水线里、没到 sink 的帧。
+
+| implementation | platform | throughput (M frames/s) | delivered (M frames) | µs/frame | µs CPU/frame | cores | cycles/frame | p50/p95/p99 µs | dropped (running) | droppedAtStop | RSS MiB |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: |
+| raw | Windows | 11.703 | 351.1 | 0.09 | 0.53 | 6.16 | 1,800 | 14/29/30 | 0 | 0 | 5.7 |
+| raw | WSL2 | 10.923 | 327.7 | 0.09 | 0.58 | 6.33 | 1,982 | 25/31/49 | 0 | 0 | 4.3 |
+| Taskflow | Windows | 3.837 | 115.1 | 0.26 | 1.01 | 3.90 | 3,449 | 0/1/1 | 0 | 0 | 6.0 |
+| Taskflow | WSL2 | 4.739 | 142.2 | 0.21 | 0.84 | 3.97 | 2,864 | 0/1/1 | 0 | 0 | 4.4 |
+| TBB parallel_pipeline | Windows | 2.040 | 61.2 | 0.49 | 1.94 | 3.95 | 6,613 | 0/35/39 | 0 | 0 | 6.7 |
+| TBB parallel_pipeline | WSL2 | 3.093 | 92.8 | 0.32 | 1.29 | 4.00 | 4,420 | 0/24/30 | 0 | 0 | 5.3 |
+| TBB flow::graph | Windows | 1.115 | 33.4 | 0.90 | 2.66 | 2.95 | 9,081 | 45/60/70 | 0 | 0 | 6.8 |
+| TBB flow::graph | WSL2 | 1.107 | 33.2 | 0.90 | 2.71 | 3.00 | 9,263 | 3/64/75 | 0 | 0 | 5.4 |
+| NexusFlow（默认） | Windows | 2.967 | 89.0 | 0.34 | 1.97 | 5.80 | 6,723 | 62/94/141 | 0 | 51 | 5.3 |
+| NexusFlow（默认） | WSL2 | 3.459 | 103.8 | 0.29 | 1.66 | 5.75 | 5,662 | 32/78/161 | 0 | 155 | 4.7 |
+| NexusFlow（pool 4） | Windows | 2.368 | 71.1 | 0.42 | 1.67 | 3.95 | 5,724 | 76/106/131 | 0 | 8 | 5.3 |
+| NexusFlow（pool 4） | WSL2 | 2.962 | 88.9 | 0.34 | 1.35 | 4.00 | 4,616 | 66/80/118 | 0 | 16 | 4.7 |
+| ai-pipe | Windows | 0.055 | 1.6 | 18.27 | 85.52 | 4.69 | 292,285 | 1,639/2,172/2,388 | 6,116,669 | 0 | 7.3 |
+| ai-pipe | WSL2 | 0.342 | 10.2 | 2.93 | 11.65 | 4.00 | 39,803 | 339/483/566 | 1,203,976 | 0 | 4.9 |
+
+### 结果 —— compute（每级 500 次迭代）
+
+| implementation | platform | throughput (M frames/s) | delivered (M frames) | µs/frame | µs CPU/frame | cores | cycles/frame | p50/p95/p99 µs | dropped (running) | droppedAtStop | RSS MiB |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: |
+| raw | Windows | 0.452 | 27.1 | 2.21 | 13.32 | 6.02 | 45,526 | 288/454/554 | 0 | 0 | 5.7 |
+| raw | WSL2 | 0.408 | 24.5 | 2.45 | 15.11 | 6.17 | 51,637 | 381/777/1,060 | 0 | 0 | 4.5 |
+| Taskflow | Windows | 0.483 | 29.0 | 2.07 | 7.97 | 3.85 | 27,252 | 6/11/15 | 0 | 0 | 6.0 |
+| Taskflow | WSL2 | 0.324 | 19.4 | 3.09 | 12.14 | 3.92 | 41,490 | 11/15/30 | 0 | 0 | 4.6 |
+| TBB parallel_pipeline | Windows | 0.483 | 29.0 | 2.07 | 8.19 | 3.96 | 27,976 | 131/183/217 | 0 | 0 | 6.7 |
+| TBB parallel_pipeline | WSL2 | 0.335 | 20.1 | 2.98 | 11.94 | 4.00 | 40,799 | 197/232/279 | 0 | 0 | 5.5 |
+| TBB flow::graph | Windows | 0.301 | 18.1 | 3.32 | 9.80 | 2.95 | 33,505 | 178/309/341 | 0 | 0 | 6.7 |
+| TBB flow::graph | WSL2 | 0.217 | 13.0 | 4.62 | 13.85 | 3.00 | 47,320 | 286/359/497 | 0 | 0 | 5.6 |
+| NexusFlow（默认） | Windows | 0.415 | 24.9 | 2.41 | 14.28 | 5.90 | 48,798 | 498/692/748 | 0 | 126 | 5.9 |
+| NexusFlow（默认） | WSL2 | 0.403 | 24.2 | 2.48 | 14.69 | 5.91 | 50,194 | 470/716/1,020 | 0 | 96 | 5.5 |
+| NexusFlow（pool 4） | Windows | 0.282 | 16.9 | 3.55 | 13.96 | 3.93 | 47,696 | 684/1,020/1,176 | 0 | 0 | 5.8 |
+| NexusFlow（pool 4） | WSL2 | 0.221 | 13.2 | 4.53 | 18.14 | 4.00 | 61,997 | 948/1,096/1,576 | 0 | 0 | 5.4 |
+| ai-pipe | Windows | 0.054 | 3.3 | 18.42 | 88.80 | 4.78 | 303,482 | 1,319/1,761/1,940 | 17,482,136 | 0 | 7.2 |
+| ai-pipe | WSL2 | 0.105 | 6.3 | 9.52 | 45.71 | 4.81 | 156,214 | 720/918/1,050 | 29,675,773 | 0 | 5.0 |
+
+### 备注
+
+* empty 档的“µs CPU/帧”包含等待策略：raw 在循环里 `yield`，NexusFlow 先自旋后
+  park，TBB 阻塞。compute 档线程基本饱和，它是真实工作量。
+* `dropped (running)` 是运行期丢帧（harness 的 `midDropped`）：24 次 NF 运行全为 0；
+  四个阻塞型对比程序按定义也是 0。`droppedAtStop` 是窗口结束调 `Stop()` 时还在流水线
+  里、没到 sink 的帧（停机残留，三次合计 0–155 帧），不是稳态丢帧。
+* ai-pipe 按设计丢帧（满则丢最旧），全部计入 `dropped (running)`：empty 档 WSL2 丢
+  4%、Windows 丢 54%，满载时两侧都在 60% 左右。吞吐仍只计到 sink 的帧。
+* ai-pipe 在 Windows 比 WSL2 慢 6.2×；厂商自带的 `ai_pipe_match.exe` 在同一台机器
+  复现了该差距，所以这是库在该平台的表现，不是探针问题。
+* 运行间波动：raw 单程序三次 Windows 为 11.09–12.00 M fps，三次 WSL2 为
+  9.72–11.81 M。只在同一会话内比较行。
+* Windows 的 compute 表有一部分是 codegen 差异：MSVC 内联了 Taskflow 的 lambda
+  （7.97 µs CPU/帧），但没有内联 NexusFlow 的 `RunCompute`（14.28 µs）；WSL2 上
+  同一对是 12.14 vs 14.69 µs。
+
+### 复现
+
+```bash
+# NexusFlow 库与 harness（两侧都适用）
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel 16
+
+# 对比程序
+benchmarks/comparison/build_win.bat          # Windows：cmp_raw、cmp_tbb、cmp_tbbpipe、cmp_tf、cmp_ai
+benchmarks/comparison/build_wsl.sh           # WSL2：/root/cmp_*
+
+# 各跑一格
+build/benchmarks/Release/pipeline_benchmark.exe --topology linear --modules 6 \
+  --capacity 64 --cpus 8 --repeat 1 --workload none --duration 30 --label nf-empty-default-r1
+benchmarks/comparison/cmp_raw.exe --workers 4 --capacity 64 --cpus 8 \
+  --iters 0 --seconds 30 --label empty-r1
+```
+
+逐次 CSV：`comparison/results/windows.csv`、`comparison/results/wsl.csv`
+（头部记录本次会话条件；`cmp,`/`csv,` 是测量行，`rss,` 是常驻内存，`drop,` 只有
+ai-pipe 会输出）。
+
+---
+
+## 第二部分：NexusFlow 自身参数扫描（同一台基准机）
+
+以下 0–16 节是 NexusFlow 自身的参数扫描。机器与第一部分相同（i7-14700KF，20 物理 / 28 逻辑核），
+但工具参数、commit 与测量日期在各节注明；数字只对这台机器、这个 commit 有效，跨机器只比趋势。
+
+### 0. 环境与口径
 
 | 项 | 值 |
 | --- | --- |
@@ -20,7 +181,7 @@
 
 **记号（本文件内部，不是命令行参数）**：`L<n>` = `--topology linear --modules <n>`；`cap<n>` = `--capacity <n>`；`p<n>` = `--pool-size <n>`；`S-` 前缀 = 在 WSL2 里跑；`D<n>` = `--topology diamond --branches <n>`；`I<n>` = `--topology inject --modules <n>`。例如 `L16cap8 p4` 展开就是 `--topology linear --modules 16 --capacity 8 --pool-size 4`，每节的「复现」给出完整命令。
 
-本文件覆盖 **116 个 stat 档 / 489 条覆盖率断言**（`cov,` 行全部 ok，没有任何一次运行中出现丢弃）。
+本部分覆盖 **116 个 stat 档 / 489 条覆盖率断言**（`cov,` 行全部 ok，没有任何一次运行中出现丢弃）。
 
 三个同构基线（`--baseline`，都不分批，所以框架侧用 `--batch 1` 对照）：
 
@@ -30,7 +191,7 @@
 | `raw-alloc` | 每消息 `make_shared` 一个 payload 包装 | 扣掉「分配」这一项 |
 | `raw-message` | 直接用框架的 `nexusflow::Message` | 扣掉「Message 自身」这一项 |
 
-### 0.1 术语速查（先看这个再看表）
+#### 0.1 术语速查（先看这个再看表）
 
 | 词 | 意思 |
 | --- | --- |
@@ -43,7 +204,7 @@
 | **batch** | 一个 worker 一次取几条消息再处理（`maxBatchSize`，默认 4）。`batch1` = 一次一条，和裸基线同口径。 |
 | **高精度定时器** | delay 负载在 Windows 上用 `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`，不用 `sleep_for`；后者在长跑里会被合并到 15.6 ms tick（§8 末）。 |
 
-## 1. 线性深度阶梯（CPU，µs/消息，中位数）
+### 1. 线性深度阶梯（CPU，µs/消息，中位数）
 
 | 模块数 | batch1 吞吐 (M msg/s) | batch1 CPU/消息 (µs) | 比上一档多花 (µs) | batch4 吞吐 (M msg/s) | batch4 CPU/消息 (µs) | 比上一档多花 (µs) | 稳定 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -94,7 +255,7 @@
 
 > **2026-11-20 复测修订**：上面两条结论都没能重现——18 模块只比 16 模块慢 2.6%，真正的塌陷在 28 模块；P 核钉死反而更差。详见 §1.1。
 
-### 1.1 拐点复测（2026-11-20）
+#### 1.1 拐点复测（2026-11-20）
 
 同机（i7-14700KF）、同参数（linear、cap 8、`--batch 1`、5 s × 1 预热 + 5 次取中位）复跑拐点区，结果与上表不一致：
 
@@ -114,7 +275,7 @@
 2. **真正的塌陷在 28 模块**（= 逻辑核数）：吞吐掉到 16 模块的 49%（0.856 M），CPU/消息翻到 23.50 µs，spread 47.8%。
 3. **P 核钉死不解决问题，反而更差**：`--cpus 16` 把 18 个模块线程压到 16 个 P 线程上，吞吐 0.419 M（−75%）、24.902 µs；说明多余线程落到 E 核是在吸收溢出，不是主因。E 核归因需要更直接的证据（`GetSystemCpuSetInformation` 的 `EfficiencyClass` 记账），在此之前 §1 结论 2 的 P/E 解释应视为假设。
 
-### 1.2 cycles/消息（补充指标，2026-11-20）
+#### 1.2 cycles/消息（补充指标，2026-11-20）
 
 `--batch` 默认 4、linear、5 s × 3 次取中位，TSC 校准值 3.4176 GHz（每次启动打印 `tsc` 行）。
 `cycles/msg = cpu/msg × TSC`：把主频从数字里拿掉，换机器/换频点后仍可比。
@@ -129,7 +290,7 @@
 **浅链的每跳成本几乎不随深度变化**，23K 只是"15 跳 × 每跳 1.5K"的线性累加，
 不是深链本身变贵。口径定义与三条恒等式见 `benchmarks/README.md` 的「测量协议」节 §4。
 
-## 2. 三层拆分（每多一个模块多花多少，µs）
+### 2. 三层拆分（每多一个模块多花多少，µs）
 
 只取两端都稳定、且裸基线没有交叉的浅档位：
 
@@ -141,21 +302,21 @@
 
 读法：分配是「每消息」，另外两列是「每多一个模块」。6 个模块以上，`raw` 与 `raw-alloc` 开始交叉（5 s × 3 的噪声把差值吃掉了），本表不再往下取：
 
-- **Message 每多一个模块约 0.098 µs**（三档一致），和 laptop 上同一量级；这是重做消息层的上限。
+- **Message 每多一个模块约 0.098 µs**（三档一致）；这是重做消息层的上限。
 - **调度每多一个模块约 0.21–0.25 µs（batch1）、0.06–0.09 µs（batch4）**；batch 把调度链砍掉约 65%。
 - **分配每消息约 0.15–0.34 µs**，不随模块数增长。
 
-## 3. 观测开销（harness 自己花了多少）
+### 3. 观测开销（harness 自己花了多少）
 
 | 量法 | 吞吐 (M msg/s) | CPU/消息 (µs) | p50 (µs) |
 | --- | --- | --- | --- |
 | `--observe full` | 2.60 | 1.114 | 3.016 |
 | `--observe none` | 2.61 | 1.131 | —（不记延迟） |
 
-差值：**CPU/消息 +0.02 µs，落在 ±0.02 µs 的批次噪声内，测不出来**。所以本文件不需要做「减去观测」的修正。
-台式机上没有跑 `--micro-observer`；笔记本上同一段微基准约 40 ns/消息，可作为量级参考。
+差值：**CPU/消息 +0.02 µs，落在 ±0.02 µs 的批次噪声内，测不出来**。所以本附录不需要做「减去观测」的修正。
+台式机上没有跑 `--micro-observer`；早期另一台机器上同一段微基准约 40 ns/消息，可作为量级参考。
 
-## 4. 队列容量（linear 3 模块，batch 4 默认）
+### 4. 队列容量（linear 3 模块，batch 4 默认）
 
 | capacity | 吞吐 (msg/s) | CPU/消息 (µs) | 比上一档多花 (µs) | p50 (µs) | p99 (µs) | 稳定 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -172,7 +333,7 @@
 1. **capacity 4 就饱和了**：1→4 吞吐 +58%，4 之后到 64 在 2.63–2.74M 之间打转（CPU/消息 1.07–1.12 µs）。
 2. **再开大只买到尾部延迟**：p50 从 capacity 4 的 2 µs 涨到 64 的 7 µs、256 的 46 µs；p99 从 5 µs 涨到 112 µs，且 256 这一档 spread 21.9%，标 `unstable`。
 
-## 5. 批大小（linear 3 模块，capacity 8）
+### 5. 批大小（linear 3 模块，capacity 8）
 
 | batch | 吞吐 (msg/s) | CPU/消息 (µs) | 比上一档多花 (µs) | p50 (µs) | p99 (µs) | 稳定 |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -187,7 +348,7 @@
 1. **batch 4 是甜点**：比 batch1 少 19% CPU/消息、吞吐高 23%；batch 8 已回落 12%，batch 16 掉 36% 且 p50 涨到 9 µs。
 2. **归因是「凑批等待」**：capacity 只有 8，一批 16 条要等生产端把队列重新填几轮，`PullBatchMessage` 最多等 100 ms 超时才交付；所以 batch 不该明显大于 capacity。
 
-## 6. 载荷（linear 3 模块，capacity 4）
+### 6. 载荷（linear 3 模块，capacity 4）
 
 复用同一块帧缓冲（框架开销口径）：
 
@@ -211,7 +372,7 @@
 1. **复用模式里帧大小几乎不影响框架成本**：0 到 10.55 MiB 的吞吐都在 2.36–2.48M（差约 5%），CPU/消息 1.17–1.25 µs——这是「Message 拷贝只是引用计数」的实测。
 2. **每帧新建掉到 692 / 476 帧/s**（约 3400 倍），CPU/消息 1797.6 / 2472.2 µs，p50 3.6 / 4.96 ms：这是 malloc + 写零的成本，不是框架的。
 
-## 7. 扇出与融合（diamond，capacity 8，5 s × 3）
+### 7. 扇出与融合（diamond，capacity 8，5 s × 3）
 
 非融合（sink 各读各的分支消息，一条分支消息算一条）：
 
@@ -238,7 +399,7 @@
 1. **非融合扇出只加成本、不加帧率**：每多一个分支，每帧 CPU 从 1.14 涨到 14.88 µs（约 13 倍），帧率从 2.58M 掉到 618K；sink 单线程串行收全部分支，分支越多每帧等得越久。
 2. **融合更贵**：2 分支 855K 帧/s vs 非融合 2.00M，每帧 CPU 4.59 vs 1.96 µs（2.3 倍）；8 分支 361K 帧/s、26.75 µs/帧，且这一档 spread 13.9% 标 `unstable`。
 
-## 8. 负载节点（linear 3 模块，capacity 4，`--batch 1`）
+### 8. 负载节点（linear 3 模块，capacity 4，`--batch 1`）
 
 把「框架空转」换成「每帧真有活干」：compute 是忙等（sin × cos 迭代），memory 是 memcpy，delay 是等待。
 
@@ -262,7 +423,7 @@
 
 delay 档的「比上一档多花」会出现负数：等待本身不烧 CPU，CPU/消息主要由排队与自旋决定。这一维度只读吞吐、核数和 p50。
 
-## 9. 外部注入（`--topology inject`，3 个模块，capacity 8）
+### 9. 外部注入（`--topology inject`，3 个模块，capacity 8）
 
 主线程扮演外部解码器，用 `Pipeline::Push` / `TryPush` 往 passive source 里送消息。
 
@@ -273,7 +434,7 @@ delay 档的「比上一档多花」会出现负数：等待本身不烧 CPU，C
 
 读法：两种模式吞吐与 CPU/消息几乎一样（2.803M vs 2.927M，差值在噪声内）；`try` 模式约 39% 的尝试撞上满队列并重试，但没有变成丢帧——`cov,` 全 ok。
 
-## 10. 内存与停机（抽样）
+### 10. 内存与停机（抽样）
 
 | 配置 | RSS 起始 (MiB) | RSS 峰值 (MiB) | 停机 (ms) | 边最大深度 |
 | --- | --- | --- | --- | --- |
@@ -288,18 +449,18 @@ delay 档的「比上一档多花」会出现负数：等待本身不烧 CPU，C
 
 读法：空载荷常驻约 5.8 MiB；复用帧时 1080p-rgb 只涨到 11.8、2k-rgb 涨到 16.4 MiB——队列里放的是同一块帧的引用，不是每槽一份。16 模块的停机 15.6 ms 明显高于浅链（约 0.2 ms），因为要等 15 个 worker 排空退出。
 
-## 11. 已知不稳 / 还没测
+### 11. 已知不稳 / 还没测
 
 - **标了 `unstable` 的档一律不读**：`d2-raw`（14.8%）、`d6-raw`（16.7%）、`d6-rawalloc`（29.6%）、`capacity 256`（21.9%）、`join 8 分支`（13.9%）。其余档重跑后都在 10% 以内。
 - **深度拐点区 18–28 模块**：首轮和 5 次复测里多数 arms 的 spread 在 15–126%，这是 P/E 混合调度下线程落点每次不同导致的；`d18-fw-b1` 复测后稳定（8.3%），`d20-fw-b4` 也稳定（5.6%），其余按表中 ★ 处理，不引用单值。
 - **三层拆分只取浅档**：6 个模块以上裸基线开始交叉（噪声大于差值），§2 已按 3/4/5 模块取样。
-- **没跑 `--micro-observer`**：观测微基准只在 laptop 上量过（约 40 ns/消息）。
+- **没跑 `--micro-observer`**：观测微基准只在早期另一台机器上量过（约 40 ns/消息）。
 - **5 s × 3 是本次统一口径**：10 s 长跑没做。
-- **本文件只对台式机有效**：与 `PERFORMANCE-laptop.md` 的绝对值不许混读，只能比趋势。
+- **本附录只对台式机有效**：与其它机器的数据不许混读，只能比趋势。
 - **线程池（v1.1 `--pool-size`）已测**：见 §14；结论是线程数换吞吐，默认仍为每模块一线程。
 - **下版优化清单**：本报告暴露的框架问题（跨 P 核断崖、低速率定时器地板、每消息固定开销、fan/join、批处理语义）已整理进 [`NEXT-VERSION.md`](../NEXT-VERSION.md) §3.4，并带验收阈值。
 
-## 12. 复现
+### 12. 复现
 
 ```powershell
 # 深度（框架 batch1，与裸基线同口径；18/20/24 建议 --repeat 5 复测）
@@ -330,12 +491,12 @@ delay 档的「比上一档多花」会出现负数：等待本身不烧 CPU，C
 # 取数：grep "^stat," 拼阶梯；grep "^cov," 查覆盖率；grep "^csv," 看单次样本
 ```
 
-## 13. 工作区
+### 13. 工作区
 
-本文件对应的基准工具改动已随 `31b4420`（v1.0.0）提交；报告中的数字都来自该提交构建的 `pipeline_benchmark`。`benchmarks/` 之外的 `docs/` 是本地笔记，不在仓库内。
+本附录对应的基准工具改动已随 `31b4420`（v1.0.0）提交；报告中的数字都来自该提交构建的 `pipeline_benchmark`。`benchmarks/` 之外的 `docs/` 是本地笔记，不在仓库内。
 
 
-## 14. 线程池（v1.1 实验，`--pool-size N`）
+### 14. 线程池（v1.1 实验，`--pool-size N`）
 
 `PipelineContext::WithThreadPoolSize(N)` 把非融合模块交给 N 个共享线程：模块按注册顺序固定绑定到 `index % N` 个线程，每个线程用非阻塞 `StepOnce()` 推进自己槽内的模块；融合模块（`--sync-inputs`）始终保留独立线程。`N = 0`（默认）就是 1.0 的“每模块一条线程”。
 
@@ -358,7 +519,7 @@ delay 档的「比上一档多花」会出现负数：等待本身不烧 CPU，C
 - **两平台差 20–34 个百分点**：不是代码路径不同（`cov` 都是 ok），而是“被阻塞的线程多久能被重新调度”不同：Linux 上池线程一直可运行（非阻塞 + `pause`），MSVC 下更多时间花在调度切换与就绪队列上。
 - **默认仍是每模块一线程**（`pool = 0`），池是 opt-in。要拿到“少线程且不掉吞吐”，还差一步：per-module 完成信号 + 有界阻塞（`NEXT-VERSION.md` §3.1 的 L2 下一步）。
 
-### 14.1 同机 A/B：v1.0.1 对比池化（2026-11-20 补测）
+#### 14.1 同机 A/B：v1.0.1 对比池化（2026-11-20 补测）
 
 上一节是 5 s x 1 的粗测。这里换成同机、同源码族的两份二进制：`v1.0.1`（tag 构建）与分支构建，各 5 s x 1 预热 + 3 次取中位。
 先回答“不改配置会不会变慢”：**`pool = 0` 与 v1.0.1 走同一条代码路径，实测落在噪声内**（+2.0% / +1.1%，p50 一致）。
@@ -379,7 +540,7 @@ delay 档的「比上一档多花」会出现负数：等待本身不烧 CPU，C
 结论不变：池化在 MSVC 上仍是负收益（深链 -62% … -79%），在 Linux 上从“接近持平”变成
 “少线程不掉吞吐、深链还能更高”；默认 `pool = 0` 保持不变。
 
-### 14.2 回归检查：pool = 0 与 v1.0.1 横向对比（2026-11-20，合并后）
+#### 14.2 回归检查：pool = 0 与 v1.0.1 横向对比（2026-11-20，合并后）
 
 v1.0.1 合进分支后，同一个二进制里 `pool = 0` 走的就是旧路径。为了确认“合并没把老路径改慢”，
 拿 `v1.0.1` tag 构建的二进制与合并后二进制做同机横向矩阵（`--duration 5 --repeat 3`，中位；M msg/s）：
@@ -403,7 +564,7 @@ L16c8 +1.5%、L4c64 +1.3%、D2c8 +4.4%、I6c64 -3.7%；两边的 min–max 区�
 落在同一噪声带内，没有系统性回归**；单次 5 s 的 p50 会双峰跳（2 µs 与 8–10 µs 之间），
 延迟列的对照只能看区间，不能看单次中位。
 
-### 14.3 池化热路径：四刀下去，买到了多少（2026-11-20）
+#### 14.3 池化热路径：四刀下去，买到了多少（2026-11-20）
 
 池化路径（pool > 0）比串行路径多花时间的地方就四处：槽轮本身
 （`ThreadPool::Loop`）、`Worker::StepOnce()`、每 turn 一次的 `OutputRoom()`
@@ -441,7 +602,7 @@ L16c8 +1.5%、L4c64 +1.3%、D2c8 +4.4%、I6c64 -3.7%；两边的 min–max 区�
 pool4 出现过 1.24–1.42 M 与 2.07–2.10 M 两簇），所以本节 10% 以内的
 差异不可信；表中每个数是三次 5 s 的中位，pool4 行是把进程钉到 8 个 P 线程上取的。
 
-### 14.4 修复：空闲退避的单位错了一个数量级（2026-11-21）
+#### 14.4 修复：空闲退避的单位错了一个数量级（2026-11-21）
 
 §14.3 把池化与 p0 的差距记成了"背压 + 派发"，但 MSVC 上 p4/p0 只有 63–68%，WSL2 却打平，
 这个平台差异一直没解释。根因不是池化的固有开销，而是 `ThreadPool::Loop()` 的空闲退避：
@@ -464,7 +625,7 @@ pool4 出现过 1.24–1.42 M 与 2.07–2.10 M 两簇），所以本节 10% 以
 残余 6–7% 是轮询设计本身（空 `StepOnce` + 每批只拿约 2.4 条），不是这个 bug。
 详细机制、API 对照与终端对照见 [`TIMERS.md`](TIMERS.md)。
 
-### 14.5 修复后重测：池化 vs 非池化，双平台（2026-11-22）
+#### 14.5 修复后重测：池化 vs 非池化，双平台（2026-11-22）
 
 协议：矩阵 `--duration 300 --repeat 2`（另有 1 次预热，每配置 3 × 5 分钟）；扫描段
 `--duration 60 --repeat 2`，只用来对照窗口长度。`pool 0` 不钉核，`pool N` 钉到 2N 个逻辑核
@@ -520,7 +681,7 @@ WSL2 深链 p0 在两个窗口里都落在慢态（691 K / 767 K）。
 WSL2 深链 `p0` 只作为区间记录，不参与判定。浅链按 parity 验收（≥95%），深链不按吞吐比、
 按每核效率验收（p4 ≥2× 每核、p8 ≥1.5×），否则“用 4 个核打出 4 个核的量”会被误判为失败。
 
-### 14.6 WSL2 的两态与线程数扫描（2026-11-23）
+#### 14.6 WSL2 的两态与线程数扫描（2026-11-23）
 
 §14.5 里出现过一个没解释干净的现象：WSL2 上同一个二进制、同一组参数，深链 `pool 0` 会跑出
 两簇相差 3 倍的吞吐。这一节把它钉成可判定的指标，并把线程数 8 / 12 / 16 单独列出来。
@@ -594,9 +755,9 @@ build/benchmarks/Release/pipeline_benchmark.exe --topology linear --modules 16 -
 
 原始日志：`accept_win.log`、`accept_wsl.log`（本机临时目录，不入库）。
 
-## 15. 队列满策略：`--queue-full drop`（v1.1 实验）
+### 15. 队列满策略：`--queue-full drop`（v1.1 实验）
 
-### 15.1 它做什么
+#### 15.1 它做什么
 
 `--queue-full drop` 打开 `QueueFullPolicy::kDrop`：模块在广播前先看所有输出队列，
 **只要有一条满了就整条消息丢掉**并计数（计入 `ModuleSnapshot::droppedTotal`），而不是阻塞在
@@ -609,7 +770,7 @@ DropHead/DropTail 的本质区别：那边是队列内部 evict，这里是入�
 全有或全无是刻意的：如果一条消息只进了部分输出队列，join 组就永远等不到另一半，下游会挂到
 `joinTimeoutMs` 超时为止。所以“丢”在这里不是“给快分支让路”，而是“这一帧不要了”。
 
-### 15.2 实测（i7-14700KF，MSVC，5 s × 3 中位）
+#### 15.2 实测（i7-14700KF，MSVC，5 s × 3 中位）
 
 | 场景 | 策略 | 交付/秒 | p50 µs | 核 | 运行期丢弃 | `cov` |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -622,7 +783,7 @@ DropHead/DropTail 的本质区别：那边是队列内部 evict，这里是入�
 | inject 6 cap 4（健康链） | block | 3.105 M | 6 | 5.88 | 0 | ok |
 | 同上 | drop | 2.950 M | 5 | 5.93 | 1,839,919 | ok |
 
-### 15.3 结论：默认继续 `block`
+#### 15.3 结论：默认继续 `block`
 
 1. **吞吐完全没变好**，反而在健康链上 −5%。这是全有或全无的直接后果：能交付的帧数仍然由最慢的
    那条路决定，丢帧只改变了“谁在等”，没有改变“谁快”。
@@ -636,20 +797,20 @@ DropHead/DropTail 的本质区别：那边是队列内部 evict，这里是入�
 ② 把策略下沉到**单边**（非 join 的扇出允许部分投递），③ 或者干脆用 `--push-mode try` 从源头
 限速。三者都还没做。
 
-## 16. 归因案例：热路径上的两次时钟读取（2026-11-20）
+### 16. 归因案例：热路径上的两次时钟读取（2026-11-20）
 
-### 16.1 问题：p0 与 p4 的差距到底是谁的
+#### 16.1 问题：p0 与 p4 的差距到底是谁的
 
 在 `L4cap16`（linear 4 模块、capacity 16）上，MSVC 实测 `pool=0` 3.287 M msg/s、`pool=4` 1.946 M msg/s，差 40.8%。此前只有"池化开销"这一句猜测，没有任何可观察证据。
 
-### 16.2 方法：能看栈的采样
+#### 16.2 方法：能看栈的采样
 
 - Windows 的 xperf/wpr 采样导不出可用调用栈（ETL 407 MB、命令行没有符号化导出），改在 WSL2 上做。
 - **必须带帧指针重编**：`-DCMAKE_CXX_FLAGS_RELEASE="-O2 -g -fno-omit-frame-pointer"`。不带时栈只有 2–3 层、满屏 `[unknown]`，只能看到"哪个函数占得多"，看不到"谁调用它"。
 - 采样：`perf record -e cpu-clock -F 1999 -g --call-graph fp`，每配置 5 s、约 7.85 万样本；`perf script` 导出后用脚本画火焰图（自底向上，宽度 = 样本占比）。
 - 两个被剖的进程：`L4cap16 pool=0`（1.185 µs/msg）与 `pool=4`（1.323 µs/msg）。
 
-### 16.3 发现：两边都在付同一笔钱
+#### 16.3 发现：两边都在付同一笔钱
 
 self time（占本进程样本）：
 
@@ -672,11 +833,11 @@ self time（占本进程样本）：
 
 **两者基本抵消**。所以"22% 正好解释 p4 慢出的 0.14 µs"是错的——0.29 ≠ 0.14；真实差距来自批填充方式、跨线程调度与缓存效应，不能记在"池化开销"这一个科目上。
 
-### 16.4 修复：关掉计时就别读钟
+#### 16.4 修复：关掉计时就别读钟
 
 `Module::ProcessTimed`（`src/module/Module.cpp`）每条消息无条件读两次 `steady_clock::now()`（`started` 与 `elapsed`），即使 `EnableModuleTimings` 从未开启。改为只在 `CapturesModuleTimings()` 为真时读钟，否则 `elapsedMs = 0`（TRACE 日志保留）。
 
-### 16.5 结果（MSVC，5 s × 3 中位；WSL2 复核 5 s × 1）
+#### 16.5 结果（MSVC，5 s × 3 中位；WSL2 复核 5 s × 1）
 
 | 配置 | 修复前 | 修复后 | Δ | µs/msg 前 → 后 | p50 前 → 后 |
 |---|---|---|---|---|---|
@@ -691,13 +852,13 @@ WSL2 复核：`L4cap16-p0` 3.292 → 3.563 M（+8.2%）、`p4` 2.970 → 3.258 M
 
 p4 的相对收益更大，因为它每消息的固定成本占比更高。同一份时钟开销删掉后，绝对吞吐都涨了，但 p4/p0 的比值从 59.2%（1.946/3.287）变成 55.5%（2.052/3.698）——单线程/模块模型吃得更多，池化的**相对**代价反而略微变大。
 
-### 16.6 剩下的与教训
+#### 16.6 剩下的与教训
 
 - 修复后 profile 里 `clock_gettime` 从 14.74%→8.04%（p0）、9.55%→3.07%（p4）；剩下的来自 `SpscQueue::waitAndPopFor` 的 1 ms 超时等待，下一个候选是"有消息就取、没消息才看钟"或复用一个时间戳。
 - 教训一：**注释里的成本假设会过期**。`Module::ProcessTimed` 原注释断言"复制 timing map 是热路径最大开销"，采样显示关掉计时的路径根本不做这次复制，而钟照读。
 - 教训二：没有帧指针的采样只能看顶层 self，看不到调用链，很容易把"某个叶函数占 20%"误读成"这个函数该优化"，而真正该删的是一次没人要的 API 调用。
 
-### 16.7 复现
+#### 16.7 复现
 
 ```bash
 cmake -S . -B build-perf -DCMAKE_BUILD_TYPE=Release \
@@ -708,7 +869,7 @@ perf record -e cpu-clock -F 1999 -g --call-graph fp -o p0.data -- \
 perf script -i p0.data > p0.txt
 ```
 
-### 16.8 又试了两条，都没留住
+#### 16.8 又试了两条，都没留住
 
 以后再有"热路径上还有钟"的直觉，先看这一节。
 

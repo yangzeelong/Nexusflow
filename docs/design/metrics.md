@@ -44,5 +44,5 @@ cyclesPerMsg = cpuPerMsgUs × tscGhz × 1000
 
 - `benchmarks/README.md`：CSV 39 列的 schema；
 - `benchmarks/README.md` 的「测量协议」§4：四条定义、三条恒等式、GB 口径的坑；
-- `benchmarks/PERFORMANCE-desktop.md §1.2`：cycles/消息的读数示例；
+- `benchmarks/PERFORMANCE.zh-CN.md`（第二部分 §1.2）：cycles/消息的读数示例；
 - `benchmarks/ProcessCpuTime.hpp` / `ProcessMemory.hpp` / `TscClock.hpp`：实现。
